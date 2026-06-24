@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+*.log
+.env
+.env.local
+*.zip
+
+# AI tool working records / internal artifacts (not for OSS)
+.kiro/
+.claude/
+.pptx-generator/
+.codegraph/
+
+# Binary / generated office documents
+*.pptx
+*.xlsx
+*.docx

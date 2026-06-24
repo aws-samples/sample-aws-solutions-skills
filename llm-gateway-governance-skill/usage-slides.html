@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Gateway Governance Skill — 사용 가이드</title>
+<style>
+  :root{
+    --gold:#F2C94C; --purple:#8B5CF6; --blue:#3B82F6; --teal:#2DD4BF; --pink:#EC4899;
+    --ink:#eaf1fb; --mut:#9bb0cc;
+    --grad:linear-gradient(90deg,#fbd36b,#c08bff 45%,#5aa6ff 100%);
+    --grad2:linear-gradient(135deg,#8B5CF6,#3B82F6 55%,#2DD4BF);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{font-family:"Noto Sans KR","Apple SD Gothic Neo",sans-serif;color:var(--ink);overflow:hidden;
+    background:
+      radial-gradient(900px 620px at 10% 6%, rgba(139,92,246,.26), transparent 60%),
+      radial-gradient(820px 600px at 92% 14%, rgba(59,130,246,.22), transparent 60%),
+      radial-gradient(760px 760px at 78% 96%, rgba(45,212,191,.16), transparent 60%),
+      radial-gradient(600px 500px at 30% 90%, rgba(236,72,153,.12), transparent 60%),
+      linear-gradient(140deg,#0a1020,#0e1830 58%,#0a1222);}
+  .deck{position:relative;height:100vh;width:100vw}
+  .deck:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:radial-gradient(rgba(255,255,255,.06) 1px, transparent 1.4px);background-size:26px 26px;
+    -webkit-mask-image:radial-gradient(120% 120% at 50% 0%, #000 35%, transparent 80%);
+            mask-image:radial-gradient(120% 120% at 50% 0%, #000 35%, transparent 80%);}
+  #bar{position:fixed;top:0;left:0;height:4px;z-index:30;background:var(--grad2);box-shadow:0 0 14px rgba(90,166,255,.6);transition:width .35s}
+  .slide{position:absolute;inset:0;z-index:1;display:none;flex-direction:column;padding:38px 56px 74px}
+  .slide.active{display:flex;animation:in .4s cubic-bezier(.2,.7,.2,1)}
+  @keyframes in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
+    padding:5px 13px;border-radius:30px;margin-bottom:10px;color:#0c1020;background:var(--grad);width:max-content}
+  h1{font-size:48px;line-height:1.12;margin:0 0 14px;font-weight:900;letter-spacing:-.5px}
+  .g-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;background-size:200% auto;animation:sheen 6s linear infinite}
+  @keyframes sheen{to{background-position:200% center}}
+  h2{font-size:29px;margin:0 0 14px;font-weight:900;color:#fff;letter-spacing:-.3px}
+  h2 .u{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  p{font-size:17px;line-height:1.6;color:#cbdaee;margin:6px 0}
+  .lead{font-size:20px;color:#dde8f6}
+  ul{margin:4px 0;padding:0;list-style:none}
+  li{font-size:15.5px;line-height:1.45;padding:7px 0 7px 26px;position:relative;border-bottom:1px solid rgba(255,255,255,.07)}
+  li:before{content:"";position:absolute;left:3px;top:12px;width:10px;height:10px;border-radius:3px;background:var(--grad2)}
+  li:last-child{border-bottom:none} li b{color:#fff}
+  code{background:rgba(255,255,255,.08);color:#ffe08a;padding:1px 6px;border-radius:5px;font-size:.85em;font-family:Consolas,monospace}
+  .grid{display:grid;gap:14px} .g2{grid-template-columns:1fr 1fr} .g3{grid-template-columns:repeat(3,1fr)} .g4{grid-template-columns:repeat(4,1fr)}
+  .card{position:relative;border-radius:14px;padding:14px 16px;overflow:hidden;
+    background:linear-gradient(160deg,rgba(255,255,255,.08),rgba(255,255,255,.02));
+    border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(10px);box-shadow:0 12px 30px rgba(0,0,0,.28)}
+  .card:before{content:"";position:absolute;left:0;top:0;height:100%;width:4px;background:var(--grad2)}
+  .card h3{margin:0 0 6px;font-size:15.5px;color:#fff} .card p{font-size:13.5px;margin:2px 0;color:#bccde3;line-height:1.5}
+  .card.gold:before{background:linear-gradient(135deg,#fbd36b,#f59e0b)} .card.pink:before{background:linear-gradient(135deg,#EC4899,#8B5CF6)} .card.teal:before{background:linear-gradient(135deg,#2DD4BF,#3B82F6)}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14px}
+  th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:linear-gradient(180deg,rgba(139,92,246,.30),rgba(59,130,246,.18));color:#fff;font-weight:700}
+  td b{color:#ffe08a}
+  .pill{display:inline-block;padding:5px 12px;margin:5px 6px 0 0;font-size:13px;border-radius:30px;color:#dce8f7;
+    background:linear-gradient(140deg,rgba(255,255,255,.10),rgba(255,255,255,.03));border:1px solid rgba(255,255,255,.16)}
+  .pill.on{background:linear-gradient(140deg,rgba(45,212,191,.25),rgba(45,212,191,.08));border-color:rgba(45,212,191,.5);color:#9af5d8}
+  .src{color:#7e93ad;font-size:12.5px;margin-top:8px}
+  /* ---- architecture diagram ---- */
+  .arch{flex:1;display:flex;flex-direction:column;gap:10px;min-height:0}
+  .extrow{display:flex;gap:12px;align-items:stretch}
+  .vpc{position:relative;flex:1;border:2px dashed rgba(139,92,246,.55);border-radius:16px;
+    padding:18px 14px 12px;background:rgba(139,92,246,.06);display:flex;flex-direction:column;gap:9px;min-height:0}
+  .vpc-label{position:absolute;top:-12px;left:18px;background:#0c1426;padding:3px 13px;border-radius:20px;
+    font-size:12.5px;color:#c4b5fd;border:1px solid rgba(139,92,246,.55);font-weight:700}
+  .lane{display:flex;align-items:center;gap:10px;border-radius:12px;padding:9px 12px;border:1px solid rgba(255,255,255,.10);flex:1}
+  .lane.pub{background:rgba(59,130,246,.10)} .lane.priv{background:rgba(45,212,191,.09)} .lane.iso{background:rgba(236,72,153,.10)}
+  .lane .tag{font-size:10.5px;color:#9bb0cc;width:118px;flex-shrink:0;text-transform:uppercase;letter-spacing:.07em;font-weight:700}
+  .node{background:linear-gradient(160deg,rgba(255,255,255,.14),rgba(255,255,255,.03));border:1px solid rgba(255,255,255,.20);
+    border-radius:10px;padding:7px 12px;font-size:13.5px;color:#fff;white-space:nowrap;text-align:center}
+  .node small{display:block;font-size:10.5px;color:#a8bad2;font-weight:400}
+  .node.k{border-color:rgba(242,201,76,.5);background:linear-gradient(160deg,rgba(242,201,76,.18),rgba(242,201,76,.04))}
+  .arrow{color:#6ee7c7;font-size:17px;flex-shrink:0}
+  .ext{display:flex;flex-direction:column;justify-content:center;gap:8px;min-width:170px;
+    border-radius:14px;padding:12px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02))}
+  .ext .t{font-size:11px;color:#9bb0cc;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .svc{background:linear-gradient(160deg,rgba(242,201,76,.16),rgba(242,201,76,.04));border:1px solid rgba(242,201,76,.32);
+    border-radius:9px;padding:6px 10px;font-size:12.5px;color:#ffe08a;text-align:center}
+  .svcrow{display:flex;gap:9px;flex-wrap:wrap}
+  .legend{display:flex;gap:16px;font-size:12px;color:#9bb0cc;margin-top:4px;flex-wrap:wrap}
+  .legend span:before{content:"";display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+  .lg-pub:before{background:rgba(59,130,246,.7)} .lg-priv:before{background:rgba(45,212,191,.7)} .lg-iso:before{background:rgba(236,72,153,.7)}
+  /* numbered flow */
+  .timeline{flex:1;display:flex;flex-direction:column;gap:7px;min-height:0;justify-content:center}
+  .tl{display:flex;gap:14px;align-items:flex-start;border-radius:12px;padding:9px 14px;
+    background:linear-gradient(160deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.10)}
+  .tl .n{flex-shrink:0;width:28px;height:28px;border-radius:8px;background:var(--grad);color:#0c1020;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:14px}
+  .tl .b{font-size:15px;color:#fff;font-weight:700} .tl .d{font-size:13px;color:#aebfd6} .tl .gv{margin-left:auto;font-size:11.5px;color:#9af5d8;background:rgba(45,212,191,.12);border:1px solid rgba(45,212,191,.35);padding:3px 9px;border-radius:20px;white-space:nowrap;align-self:center}
+  .steps{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .step{flex:1 1 0;min-width:120px;border-radius:13px;padding:13px;text-align:center;background:linear-gradient(160deg,rgba(255,255,255,.08),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12)}
+  .step .n{display:inline-flex;width:28px;height:28px;border-radius:50%;align-items:center;justify-content:center;font-weight:800;color:#0c1020;background:var(--grad);margin-bottom:6px}
+  .step b{display:block;font-size:14px;color:#fff} .step span{font-size:11.5px;color:#9bb0cc}
+  .gate{color:var(--gold);font-weight:800}
+  .big{font-size:28px;font-weight:800;color:var(--gold)}
+  footer{position:fixed;left:0;right:0;bottom:0;height:54px;z-index:20;display:flex;align-items:center;justify-content:space-between;
+    padding:0 26px;background:rgba(8,15,28,.7);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.08)}
+  .brand{font-size:12.5px;color:#8aa0bd} .brand b{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .nav{display:flex;align-items:center;gap:12px}
+  .nav button{background:linear-gradient(140deg,rgba(139,92,246,.35),rgba(59,130,246,.25));border:1px solid rgba(255,255,255,.18);color:#eaf1fb;border-radius:10px;padding:7px 14px;font-size:13.5px;cursor:pointer}
+  .nav button:hover{filter:brightness(1.2)}
+  .count{font-size:12.5px;color:#aebfd6;min-width:54px;text-align:center}
+  .dots{position:fixed;bottom:62px;left:0;right:0;z-index:20;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;padding:0 40px}
+  .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.18);cursor:pointer;transition:.2s}
+  .dot.active{width:24px;border-radius:6px;background:var(--grad)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;flex:1;min-height:0}
+  .flow{font-family:Consolas,monospace;font-size:14.5px;line-height:1.9;border-radius:14px;padding:16px 18px;color:#d4e3f7;overflow:auto;white-space:pre;
+    background:linear-gradient(160deg,rgba(20,32,56,.85),rgba(12,20,38,.9));border:1px solid rgba(255,255,255,.10)}
+  .flow b{color:var(--gold)} .flow .p{color:#c4b5fd}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div class="deck" id="deck">
+
+<!-- 1 TITLE -->
+<section class="slide active">
+  <div style="margin:auto 0">
+    <div class="kicker">AWS Solution Skill · 사용 가이드</div>
+    <h1>LLM Gateway Governance<br><span class="g-text">Skill</span></h1>
+    <p class="lead">AI(Claude Code · Kiro · Amazon Quick)와 대화하며, 사내 개발자용<br>
+      <b style="color:#fff">LLM 거버넌스 게이트웨이</b>를 AWS에 구축하는 Skill</p>
+    <div style="margin-top:16px">
+      <span class="pill">LiteLLM</span><span class="pill">Amazon Bedrock</span><span class="pill">AgentCore</span>
+      <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO · Guardrails · Data Residency</span>
+    </div>
+    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 16 슬라이드</p>
+  </div>
+</section>
+
+<!-- 2 WHAT -->
+<section class="slide">
+  <div class="kicker">무엇을 만드는가</div>
+  <h2>한 문장 정의 + 4대 통제축</h2>
+  <p class="lead">코드 에이전트(Claude Code · Codex)를 개별로 Bedrock에 붙이지 않고,
+    <span class="g-text" style="font-weight:800">단일 거버넌스 게이트웨이</span>를 강제 경유시켜 중앙 통제한다.</p>
+  <div class="grid g4" style="margin-top:14px;flex:1">
+    <div class="card gold"><h3>① 신원 · Who</h3><p>SSO 신원 강제(<code>AWSReservedSSO_</code>)<br>사용자별 가상키 발급<br>Enterprise 라이선스 불필요</p></div>
+    <div class="card teal"><h3>② 모델·비용 · How much</h3><p>모델 라우팅(Claude/GPT)<br>티어별 allowlist<br>예산 캡(economy $50)</p></div>
+    <div class="card pink"><h3>③ 콘텐츠 안전 · What</h3><p>Bedrock Guardrails<br>콘텐츠·PII·금지토픽<br>시크릿 탐지(pre-call)</p></div>
+    <div class="card"><h3>④ 관측·감사 · Trace</h3><p>CloudWatch(인프라)<br>Langfuse(프롬프트/트레이스)<br>키별 사용량·예산</p></div>
+  </div>
+  <p class="src">한 코드베이스로 최소 PoC ~ 엔터프라이즈까지 (토글로 구성)</p>
+</section>
+
+<!-- 3 ARCHITECTURE DIAGRAM -->
+<section class="slide">
+  <div class="kicker">아키텍처 다이어그램</div>
+  <h2>VPC 격리 · CloudFront 단일 진입 · <span class="u">엔드포인트로 프라이빗</span> Bedrock</h2>
+  <div class="arch">
+    <div class="extrow">
+      <div class="node k">👤 개발자<small>Claude Code · Codex</small></div>
+      <span class="arrow">→</span>
+      <div class="node">☁️ CloudFront<small>TLS 종단 · VPC Origin</small></div>
+      <span class="arrow">→</span>
+      <div class="node">🛡️ API Gateway<small>IAM · SigV4 인증</small></div>
+      <span class="arrow">→</span>
+      <div class="node">λ Token Lambda<small>SSO 검증 · 가상키</small></div>
+    </div>
+    <div class="vpc">
+      <div class="vpc-label">VPC · 2 AZ · 단일 리전 (예: ap-northeast-2 / us-east-1)</div>
+      <div class="lane pub"><span class="tag">Public Subnet</span>
+        <div class="node">NAT Gateway<small>아웃바운드 egress</small></div>
+        <span class="arrow">·</span><div class="node">CloudFront VPC Origin 진입</div></div>
+      <div class="lane priv"><span class="tag">Private (egress)</span>
+        <div class="node">Internal ALB<small>인터넷 비노출</small></div><span class="arrow">→</span>
+        <div class="node">LiteLLM<small>ECS Fargate · Graviton</small></div>
+        <div class="node">Token/DB-init λ</div>
+        <div class="node">Langfuse<small>ECS(선택)</small></div>
+        <div class="node">Interface Endpoints</div></div>
+      <div class="lane iso"><span class="tag">Isolated Subnet</span>
+        <div class="node">Aurora Serverless v2<small>PostgreSQL · 저장 암호화 · 인터넷 격리</small></div>
+        <span class="arrow">←</span><div class="node">LiteLLM·Langfuse·λ 만 접근(SG)</div></div>
+    </div>
+    <div class="extrow">
+      <div class="ext" style="flex:1"><div class="t">AWS 서비스 — VPC 엔드포인트로 프라이빗 접근(인터넷 미경유)</div>
+        <div class="svcrow">
+          <div class="svc">Bedrock · Claude + Guardrail</div>
+          <div class="svc">Bedrock Mantle · GPT</div>
+          <div class="svc">AgentCore Gateway · Web Search Tool</div>
+          <div class="svc">Secrets Manager</div>
+          <div class="svc">DynamoDB · 키캐시</div>
+          <div class="svc">CloudWatch</div>
+          <div class="svc">S3 (Gateway EP)</div>
+        </div>
+      </div>
+    </div>
+    <div class="legend"><span class="lg-pub">Public</span><span class="lg-priv">Private(egress)</span><span class="lg-iso">Isolated</span>
+      <span style="margin-left:auto">SigV4(Task Role) — Bedrock/Mantle/AgentCore 호출에 토큰 없음</span></div>
+  </div>
+</section>
+
+<!-- 4 COMPONENT RESPONSIBILITIES -->
+<section class="slide">
+  <div class="kicker">각 컴포넌트가 하는 일</div>
+  <h2>11개 스택 · <span class="u">책임 분리</span></h2>
+  <div class="grid g4" style="flex:1">
+    <div class="card teal"><h3>Network</h3><p>VPC·3계층 서브넷, SG 체인(누가 누구에게 어떤 포트), Gateway/Interface 엔드포인트로 트래픽 VPC 내 유지</p></div>
+    <div class="card pink"><h3>Data</h3><p>Aurora Serverless v2(격리 서브넷·암호화). LiteLLM/Langfuse DB 시크릿 분리 + db-init 커스텀 리소스</p></div>
+    <div class="card gold"><h3>Guardrail</h3><p>Bedrock Guardrail 생성: 콘텐츠 필터·PII 차단·금지 토픽. LiteLLM이 ID/버전으로 참조</p></div>
+    <div class="card teal"><h3>LiteLLM</h3><p>게이트웨이 본체. ECS Fargate(Graviton)+내부 ALB. Task Role SigV4로 Bedrock 호출. master key 소유</p></div>
+    <div class="card pink"><h3>Langfuse <small style="color:#9bb0cc">(선택)</small></h3><p>프롬프트/트레이스 관측. 자가호스팅 ECS. <code>enableLangfuse</code> 토글</p></div>
+    <div class="card gold"><h3>Auth</h3><p>SSO Token Service. API GW(IAM)+Lambda가 SSO ARN 검증→가상키 발급, DynamoDB 캐시, 팀 매핑</p></div>
+    <div class="card teal"><h3>Observability</h3><p>CloudWatch 대시보드(ALB 요청/5xx, Token Service, Langfuse 링크)</p></div>
+    <div class="card"><h3>CDN</h3><p>CloudFront(VPC Origin→내부 ALB). 유일한 공개 진입점·TLS 종단. Location 재작성 함수</p></div>
+  </div>
+  <p class="src">cross-stack는 append-only <code>*Exports</code> 인터페이스 계약 + 런타임 SSM으로 결합(순환 의존성 0)</p>
+</section>
+
+<!-- 5 DATA FLOW -->
+<section class="slide">
+  <div class="kicker">데이터 흐름 · 거버넌스 체크포인트</div>
+  <h2>요청 1건이 거치는 <span class="u">통제 지점</span></h2>
+  <div class="timeline">
+    <div class="tl"><div class="n">1</div><div><div class="b">SSO 로그인 → 키 helper</div><div class="d">aws sso login 후 boto3 SigV4 서명(리전은 Token URL에서 파싱)</div></div><div class="gv">신원 확보</div></div>
+    <div class="tl"><div class="n">2</div><div><div class="b">API Gateway (IAM/SigV4)</div><div class="d">서명된 caller ARN만 통과 — 미서명/무권한 거부</div></div><div class="gv">엣지 인가</div></div>
+    <div class="tl"><div class="n">3</div><div><div class="b">Token Lambda — SSO ARN 검증</div><div class="d"><code>AWSReservedSSO_</code> 접두사 확인, 비-SSO는 403. 권한셋→팀(standard/economy) 매핑</div></div><div class="gv">신원 강제 · 티어링</div></div>
+    <div class="tl"><div class="n">4</div><div><div class="b">가상키 발급·캐시 (DynamoDB)</div><div class="d">LiteLLM /key/generate(master key는 Secrets Manager) → 키별 모델 allowlist·예산·MCP 그룹</div></div><div class="gv">키 거버넌스</div></div>
+    <div class="tl"><div class="n">5</div><div><div class="b">CloudFront(TLS) → 내부 ALB → LiteLLM</div><div class="d">ALB는 인터넷 비노출, CloudFront VPC Origin만 접근</div></div><div class="gv">네트워크 격리</div></div>
+    <div class="tl"><div class="n">6</div><div><div class="b">Guardrail 통과 → Bedrock 호출</div><div class="d">Claude는 시크릿탐지+Bedrock Guardrail 적용. Task Role SigV4(토큰 없음)</div></div><div class="gv">콘텐츠 안전</div></div>
+    <div class="tl"><div class="n">7</div><div><div class="b">트레이스/사용량 기록</div><div class="d">Langfuse(프롬프트·트레이스) + CloudWatch(인프라) + 키별 사용량/예산</div></div><div class="gv">감사·관측</div></div>
+  </div>
+</section>
+
+<!-- 6 GOVERNANCE -->
+<section class="slide">
+  <div class="kicker">거버넌스 · Governance</div>
+  <h2>누가 · 무엇을 · 얼마나 · 어떻게 <span class="u">통제</span>되는가</h2>
+  <div class="grid g3" style="flex:1">
+    <div class="card gold"><h3>🪪 신원 (Identity)</h3><p>IAM Identity Center(SSO)가 신뢰 기준. <code>AWSReservedSSO_</code> ARN만 허용, 직접 IAM 롤 우회 차단(403)</p></div>
+    <div class="card teal"><h3>🔏 인가 (AuthZ)</h3><p>API Gateway AWS_IAM(SigV4). 권한셋에 <code>execute-api:Invoke</code>만 부여 — 최소 권한</p></div>
+    <div class="card pink"><h3>🔑 키 라이프사이클</h3><p>사용자별 가상키 발급·DynamoDB 캐시(TTL). master key는 Secrets Manager grantRead. 장기 키 배포 없음</p></div>
+    <div class="card teal"><h3>📊 티어링 · 예산</h3><p>권한셋→LiteLLM 팀. economy=모델 allowlist + 예산 캡($50). standard=전 모델</p></div>
+    <div class="card gold"><h3>🛡️ 정책 (Policy)</h3><p>Bedrock Guardrail + 시크릿 탐지가 모든 Claude 요청에 default 적용. MCP는 키별 access group으로 스코프</p></div>
+    <div class="card pink"><h3>🧾 감사 (Audit)</h3><p>키별 사용량·예산, Langfuse 프롬프트/트레이스, CloudWatch 지표. cdk-nag 억제는 사유 명시</p></div>
+  </div>
+</section>
+
+<!-- 7 SSO PREP -->
+<section class="slide">
+  <div class="kicker">전제조건 · IAM Identity Center (SSO)</div>
+  <h2>SSO 사용자·권한 <span class="u">준비</span> (게이트웨이 사용 전 1회)</h2>
+  <div class="two">
+    <div class="card gold">
+      <h3>🔎 디스커버리 질문</h3>
+      <ul style="margin-top:2px">
+        <li>IdC 활성화 여부 · <b>리전</b>은?</li>
+        <li>자격 소스: IdC 디렉터리 / 외부 IdP(Okta·Entra)</li>
+        <li>권한세트 → <b>티어</b> 매핑(standard / economy)</li>
+        <li>전용 사용자 vs 기존 사용자 / <b>그룹</b>(팀 권장)</li>
+      </ul>
+    </div>
+    <div class="timeline" style="flex:none">
+      <div class="tl"><div class="n">1</div><div><div class="b">권한세트 생성 <span style="color:#ff9">(이름에 밑줄 금지)</span></div><div class="d"><code>execute-api:Invoke</code>-only 인라인 정책(토큰 서비스 API ARN)</div></div></div>
+      <div class="tl"><div class="n">2</div><div><div class="b">계정 할당</div><div class="d">사용자 또는 <b>그룹</b> → 계정 (자동 프로비저닝)</div></div></div>
+      <div class="tl"><div class="n">3</div><div><div class="b">사용자 생성</div><div class="d">identitystore (또는 기존 사용자/그룹 사용)</div></div></div>
+      <div class="tl"><div class="n">4</div><div><div class="b">비밀번호 활성화 <span style="color:#ff9">(콘솔 전용)</span></div><div class="d">IdC 콘솔 → Reset password → 이메일/1회용 비번 — 공개 API 없음(핸드오프)</div></div></div>
+      <div class="tl"><div class="n">5</div><div><div class="b">클라이언트 SSO 프로필</div><div class="d"><code>aws configure sso</code> → <code>aws sso login</code> → 키 helper 자동</div></div></div>
+    </div>
+  </div>
+  <p class="src">권한세트명 무밑줄(Lambda 정규식) · 최소권한 execute-api · 비-SSO 호출 403(설계) · IdC 리전 ≠ 게이트웨이 리전 OK — 근거: shared/reference/sso-setup.md</p>
+</section>
+
+<!-- 8 DATA RESIDENCY & ISOLATION -->
+<section class="slide">
+  <div class="kicker">데이터 레지던시 · 네트워크 격리</div>
+  <h2>데이터는 <span class="u">어디에 머무는가</span></h2>
+  <div class="two">
+    <div>
+      <h3 style="color:#ffe08a;font-size:16px;margin:0 0 8px">📍 데이터 위치 (단일 리전 고정)</h3>
+      <ul>
+        <li><b>대화/키/사용량</b> → Aurora Serverless v2 (격리 서브넷, 저장 암호화) — 배포 리전 내</li>
+        <li><b>가상키 캐시</b> → DynamoDB (배포 리전, PITR)</li>
+        <li><b>시크릿</b> → Secrets Manager (배포 리전)</li>
+        <li><b>프롬프트/트레이스</b> → Langfuse → 동일 Aurora (리전 내)</li>
+        <li><b>모델 추론</b> → Bedrock (선택 리전 inference profile)</li>
+        <li><b>CloudFront</b> → <code>CACHING_DISABLED</code> — 본문을 엣지에 캐시하지 않음</li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="color:#9af5d8;font-size:16px;margin:0 0 8px">🔒 격리 보장</h3>
+      <ul>
+        <li><b>인터넷 미경유</b> — Bedrock·Secrets·SSM·ECR·Logs·AgentCore를 <b>VPC 인터페이스 엔드포인트</b>로 호출</li>
+        <li><b>ALB 비공개</b> — internal-only, CloudFront VPC Origin만 진입</li>
+        <li><b>DB 격리</b> — Aurora는 isolated 서브넷(egress 없음), SG로 LiteLLM/λ만 5432 허용</li>
+        <li><b>리전 고정</b> — 메인 스택 단일 리전(CDN만 us-east-1 · CloudFront 요구사항)</li>
+        <li><b>S3/DynamoDB</b> — Gateway 엔드포인트(무료, 리전 내)</li>
+      </ul>
+    </div>
+  </div>
+  <p class="src">데이터 레지던시 요건이 있으면 배포 리전을 고정하고 모든 영속 데이터가 그 리전에 머무름을 위 경로로 보장</p>
+</section>
+
+<!-- 8 GUARDRAILS -->
+<section class="slide">
+  <div class="kicker">가드레일 · Defense in Depth</div>
+  <h2>요청마다 <span class="u">3계층</span> 방어</h2>
+  <div class="grid g3" style="flex:1">
+    <div class="card gold"><h3>Layer 1 · 시크릿 탐지</h3><p>LiteLLM <code>hide-secrets</code> (pre-call) — API 키/토큰 패턴을 요청 단계에서 마스킹·차단. 모든 모델 공통</p></div>
+    <div class="card pink"><h3>Layer 2 · Bedrock Guardrail</h3>
+      <p><b>콘텐츠</b>: HATE·INSULTS·SEXUAL·VIOLENCE·MISCONDUCT (HIGH)</p>
+      <p><b>PII 차단</b>: 카드·SSN·AWS Access/Secret Key + API키 정규식</p>
+      <p><b>금지 토픽</b>: 해킹툴·데이터 유출</p></div>
+    <div class="card teal"><h3>Layer 3 · 도구(MCP) 스코프</h3><p>가상키별 <code>mcp_access_groups</code>(예 default_tools). 팀 멤버십 없는 키는 도구 사용 불가 — 검색 트래픽도 게이트웨이 경유</p></div>
+  </div>
+  <p class="src">⚠️ Bedrock Guardrail은 <b>bedrock-runtime(Claude) 전용</b> → GPT(Mantle) 경로는 Layer 1로 보완하고 정책 공백을 문서화(constraints.md)</p>
+</section>
+
+<!-- 9 OPTIONS -->
+<section class="slide">
+  <div class="kicker">무엇을 선택하는가 · 7개 구성축</div>
+  <h2>대화로 정하는 <span class="u">선택지</span></h2>
+  <table>
+    <thead><tr><th style="width:34px">#</th><th>선택축</th><th>config 필드</th><th>옵션</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><b>커스텀 도메인</b></td><td><code>litellm.certMode</code></td><td>acm-dns(도메인+ACM+Route53) / 도메인리스(기본 cloudfront.net)</td></tr>
+      <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만</td></tr>
+      <tr><td>3</td><td><b>모델·비용 티어</b></td><td>Token Lambda 팀 매핑</td><td>standard(전 모델) / economy(allowlist + 예산캡)</td></tr>
+      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude(bedrock/) + GPT(bedrock_mantle/) 조합</td></tr>
+      <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>CDK_DEFAULT_REGION</code></td><td>메인 리전 고정 · CDN은 us-east-1</td></tr>
+      <tr><td>6</td><td><b>용량·비용</b></td><td><code>data.* · litellm.* · natGateways</code></td><td>Aurora ACU · Fargate 크기 · NAT 수</td></tr>
+      <tr><td>7</td><td><b>부트스트랩</b></td><td><code>bootstrapQualifier</code></td><td>기본 / 커스텀(충돌 회피)</td></tr>
+    </tbody>
+  </table>
+  <p class="src">추가 토글: <code>awsRegion</code>(리전 선택) · <code>guardrail.enabled</code> · <code>observability.dashboardEnabled</code> · <code>agentcore</code>(AgentCore 웹검색) · <code>mantle</code>(GPT-5.x 피어링) · <code>sso</code> · <code>auth.keyCacheTtlSeconds</code></p>
+</section>
+
+<!-- 10 WORKFLOW -->
+<section class="slide">
+  <div class="kicker">어떻게 쓰는가 · 워크플로우</div>
+  <h2>Discovery → Deploy, <span class="u">게이트(GATE)</span>로 확인하며 진행</h2>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><b>Discovery</b><span>도메인·모델·티어·관측성·리전·MCP·SSO 질의</span></div>
+    <div class="step"><span class="n">2</span><b>Design</b><span>decision-tree 적용 · MCP로 모델 ID/리전 검증</span></div>
+    <div class="step"><span class="n">3</span><b>Generate</b><span>CDK·Lambda·LiteLLM·스크립트 생성</span></div>
+    <div class="step"><span class="n">4</span><b>Validate</b><span>typecheck · synth · cdk-nag 해소</span></div>
+    <div class="step"><span class="n">5</span><b>Deploy</b><span>bootstrap · cdk deploy</span></div>
+    <div class="step"><span class="n">6</span><b>Onboarding</b><span>Claude Code/Codex 세팅 안내(항상 출력)</span></div>
+  </div>
+  <div class="grid g2" style="margin-top:16px;flex:1">
+    <div class="card gold"><h3>⛔ GATE 1 — 요구사항 확인</h3><p>Discovery 답변과 그 결과 <code>config/dev.json</code>을 요약해 사용자 승인 후 진행</p></div>
+    <div class="card teal"><h3>⛔ GATE 2 — 아키텍처·비용 확인</h3><p>스택 구성·예상 비용 제시 후 승인. MCP-first: 모델 ID는 하드코딩 금지·런타임 검증</p></div>
+  </div>
+  <p class="src">근거: SKILL.md (Phase 1~6)</p>
+</section>
+
+<!-- 11 GENERATED OUTPUT -->
+<section class="slide">
+  <div class="kicker">어떤 형태로 구축되는가 · 산출물</div>
+  <h2>Skill이 <span class="u">생성</span>하는 완성형 CDK 앱</h2>
+  <div class="two">
+    <div class="flow">project/
+├─ bin/app.ts            <span class="p"># 8 스택 와이어링</span>
+├─ config/dev.json       <span class="p"># 선택값(런타임 검증)</span>
+├─ lib/
+│  ├─ *-stack.ts         <span class="p"># Network ~ CDN</span>
+│  ├─ interfaces.ts      <span class="p"># cross-stack 계약</span>
+│  ├─ config/{constants,schema}.ts
+│  └─ nag-suppressions.ts
+├─ lambda/
+│  ├─ token-service/handler.py
+│  └─ db-init/handler.py
+├─ services/litellm/     <span class="p"># config.yaml·Dockerfile</span>
+└─ scripts/ · templates/ <span class="p"># 개발자 온보딩</span></div>
+    <div>
+      <ul>
+        <li><b>IaC 전부 CDK</b> — typecheck · synth · cdk-nag 게이트</li>
+        <li><b>SSO Token Service</b> — API GW(IAM)+Lambda+DynamoDB</li>
+        <li><b>LiteLLM 컨테이너</b> — config.yaml · Mantle SigV4 오버레이</li>
+        <li><b>개발자 온보딩</b> — 키 helper · Claude/Codex 설정 템플릿</li>
+        <li><b>테스트·억제</b> — synth 단언 · 정당화된 cdk-nag suppression</li>
+      </ul>
+      <p class="src">산업·티어·리전 입력에 맞춰 커스터마이즈되어 생성</p>
+    </div>
+  </div>
+</section>
+
+<!-- 12 BEST PRACTICES -->
+<section class="slide">
+  <div class="kicker">내장된 베스트 프랙티스 · 함정 회피</div>
+  <h2>실전에서 막히는 지점을 <span class="u">코드+문서</span>로 예방</h2>
+  <div class="grid g3" style="flex:1">
+    <div class="card teal"><h3>🌍 리전 하드코딩 금지</h3><p>키 helper가 Token URL에서 SigV4 리전 파싱 → 무수정 다리전</p></div>
+    <div class="card pink"><h3>🔁 UI 리다이렉트(도메인리스)</h3><p>CloudFront Function이 Host로 Location 재작성 + <code>PROXY_BASE_URL</code>/<code>NEXTAUTH_URL</code> 공개도메인(2단계)</p></div>
+    <div class="card gold"><h3>🧱 부트스트랩 충돌</h3><p>잔존 리소스 시 커스텀 <code>--qualifier</code>로 비파괴 부트스트랩</p></div>
+    <div class="card pink"><h3>⚖️ Mantle ↔ Guardrail</h3><p>Guardrail은 bedrock-runtime 전용 → GPT 경로 공백 명시</p></div>
+    <div class="card gold"><h3>🔑 시크릿 외부화</h3><p>master key·DB·앱 시크릿은 Secrets Manager. 평문은 안티패턴</p></div>
+    <div class="card teal"><h3>🏗️ prod 전환 체크</h3><p>RETAIN·백업·per-AZ NAT·스코프 IAM·로그 — 각 항목 <code>PROD TODO</code></p></div>
+  </div>
+  <p class="src">근거: shared/reference/constraints.md (실 배포에서 발견·역반영된 항목)</p>
+</section>
+
+<!-- 13 INSTALL -->
+<section class="slide">
+  <div class="kicker">설치 · 3개 도구 공통</div>
+  <h2>한 SKILL.md, <span class="u">세 곳에 설치</span></h2>
+  <div class="grid g3" style="margin-top:4px">
+    <div class="card teal"><h3>Claude Code</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.claude/skills/<br>llm-gateway-governance</p></div>
+    <div class="card pink"><h3>Kiro</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.kiro/skills/<br>llm-gateway-governance</p></div>
+    <div class="card gold"><h3>Amazon Quick</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.quickwork/skills/<br>llm-gateway-governance</p></div>
+  </div>
+  <p style="margin-top:16px">세 곳의 <code>SKILL.md</code>는 <b>md5 동일</b>(CI 검증) · 지식은 <code>shared/</code>에 1벌만 작성(<code>sync-skills.sh</code>).</p>
+  <p style="margin-top:6px">트리거 예: <span class="g-text" style="font-weight:800">"사내 개발자용 LLM 게이트웨이 만들어줘"</span> · "Govern Bedrock access for developers"</p>
+  <p class="src">설치 후 SKILL.md description으로 자동 활성화(트리거 매칭)</p>
+</section>
+
+<!-- 14 REAL PROOF -->
+<section class="slide">
+  <div class="kicker">검증된 자산 · 실제 배포 결과</div>
+  <h2>레퍼런스는 <span class="u">실제 배포·검증</span>됨</h2>
+  <div class="two">
+    <div><ul>
+      <li><b>11개 스택 전부 CREATE_COMPLETE</b></li>
+      <li><b>ECS</b> LiteLLM·Langfuse 1/1 running</li>
+      <li><b>CloudFront → 내부 ALB → LiteLLM</b> /health 200</li>
+      <li><b>SSO 강제</b> 비-SSO 호출 403 (설계대로)</li>
+      <li><b>SSO 사용자</b> 발급 → 가상키 → Claude 정상 응답</li>
+      <li><b>UI</b> LiteLLM·Langfuse 로그인 동작(도메인리스)</li>
+    </ul></div>
+    <div class="grid g2" style="gap:12px">
+      <div class="card gold" style="text-align:center"><div class="big">8/8</div><p>스택 배포</p></div>
+      <div class="card pink" style="text-align:center"><div class="big">3계층</div><p>Guardrail</p></div>
+      <div class="card teal" style="text-align:center"><div class="big">100%</div><p>토큰리스 SigV4</p></div>
+      <div class="card" style="text-align:center"><div class="big">3툴</div><p>md5 동일 SKILL</p></div>
+    </div>
+  </div>
+  <p class="src">실 배포에서 발견한 이슈(리전·UI 리다이렉트·키 레이스)는 모두 Skill에 역반영</p>
+</section>
+
+<!-- 15 CLOSING -->
+<section class="slide">
+  <div style="margin:auto 0;text-align:center">
+    <div class="kicker" style="margin:0 auto 16px">시작하기</div>
+    <h1 style="font-size:42px">이렇게 말하면 됩니다</h1>
+    <p class="lead" style="margin:12px auto 0;max-width:780px">
+      <span class="g-text" style="font-weight:900;font-size:26px">"사내 개발자용 LLM 게이트웨이 만들어줘"</span></p>
+    <p style="color:#aebfd6;margin-top:6px">"Govern Bedrock access for developers" · "LiteLLM 배포하고 SSO 가상키 발급"</p>
+    <div style="margin-top:22px">
+      <span class="pill on">Discovery</span><span class="pill">Design</span><span class="pill">Generate</span>
+      <span class="pill">Validate</span><span class="pill">Deploy</span><span class="pill on">Onboarding</span>
+    </div>
+    <div style="margin-top:26px">
+      <a href="/llm-gateway-governance-skill.zip" download
+         style="display:inline-block;text-decoration:none;font-weight:800;font-size:17px;color:#0c1020;
+                background:var(--grad);padding:15px 30px;border-radius:14px;box-shadow:0 12px 34px rgba(192,139,255,.45)">
+        ⬇ 스킬 다운로드 (.zip)
+      </a>
+      <p class="src" style="margin-top:12px">llm-gateway.daradat.cloud/llm-gateway-governance-skill.zip</p>
+    </div>
+    <p class="src" style="margin-top:14px">llm-gateway-governance-skill · Claude Code · Kiro · Amazon Quick</p>
+  </div>
+</section>
+
+</div>
+
+<div class="dots" id="dots"></div>
+<footer>
+  <div class="brand"><b>LLM Gateway Governance</b> · AWS Solution Skill</div>
+  <div class="nav">
+    <button onclick="go(cur-1)">← 이전</button>
+    <span class="count" id="count">1 / 16</span>
+    <button onclick="go(cur+1)">다음 →</button>
+  </div>
+</footer>
+
+<script>
+  var slides=[].slice.call(document.querySelectorAll('.slide'));
+  var dotsWrap=document.getElementById('dots'),bar=document.getElementById('bar'),count=document.getElementById('count');
+  var cur=0;
+  slides.forEach(function(_,i){var d=document.createElement('div');d.className='dot'+(i===0?' active':'');d.onclick=function(){go(i)};dotsWrap.appendChild(d)});
+  var dots=[].slice.call(document.querySelectorAll('.dot'));
+  function go(i){
+    if(i<0)i=0; if(i>=slides.length)i=slides.length-1;
+    slides[cur].classList.remove('active'); dots[cur].classList.remove('active');
+    cur=i;
+    slides[cur].classList.add('active'); dots[cur].classList.add('active');
+    count.textContent=(cur+1)+' / '+slides.length;
+    bar.style.width=((cur+1)/slides.length*100)+'%';
+  }
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();go(cur+1);}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();go(cur-1);}
+    else if(e.key==='Home')go(0); else if(e.key==='End')go(slides.length-1);
+  });
+  document.getElementById('deck').addEventListener('click',function(e){
+    if(e.target.closest('a,button,.dot,table,.flow,.arch,.timeline,.vpc,.card'))return;
+    var x=e.clientX/window.innerWidth; if(x>0.65)go(cur+1); else if(x<0.35)go(cur-1);
+  });
+  bar.style.width=(1/slides.length*100)+'%';
+</script>
+</body>
+</html>
