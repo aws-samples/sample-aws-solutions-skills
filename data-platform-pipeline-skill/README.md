@@ -2,7 +2,7 @@
 
 A production-grade Agent Skill that builds the **ingestion → storage → catalog → query** layers of a serverless data lake on AWS. Stops once data is queryable in Athena. Output is a working CDK TypeScript project plus Glue scripts and Athena DDL.
 
-**Anthropic Agent Skills format** — single `SKILL.md` deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
+**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
 
 ## What it produces
 
@@ -32,11 +32,14 @@ data-platform-pipeline-skill/
 ├── README.md                                                          (this file)
 ├── LICENSE
 ├── claude-code/skills/data-platform-pipeline/SKILL.md                  ★ md5-identical
+│                                            └── reference/*.md         ★
 ├── kiro/skills/data-platform-pipeline/SKILL.md                         ★
+│                                      └── reference/*.md               ★
 └── quick/skills/data-platform-pipeline/SKILL.md                        ★
+                                        └── reference/*.md              ★
 ```
 
-> Note: This skill is monolithic (single ~50 KB SKILL.md, no separate `shared/`). All knowledge lives in the SKILL.md itself. This is the original datalab-skills authoring style, intentionally preserved.
+> Note: The `SKILL.md` carries the core workflow; deeper material (CDK gotchas, Glue scripts, Iceberg/Hive paths, VPC connectivity) lives in `reference/*.md` loaded on demand. The `SKILL.md` + `reference/` set is md5-identical across all three tools.
 
 ## Installation
 

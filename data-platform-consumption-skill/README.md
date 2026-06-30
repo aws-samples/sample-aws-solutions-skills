@@ -4,7 +4,7 @@ A production-grade Agent Skill that connects existing queryable data to **Amazon
 
 Works with any queryable source: Athena over a Glue Catalog (most common), Redshift, S3 manifest, or RDS via federated query. Self-contained; doesn't depend on any other skill having run.
 
-**Anthropic Agent Skills format** — single `SKILL.md` deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
+**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
 
 ## What it produces
 
@@ -23,11 +23,14 @@ data-platform-consumption-skill/
 ├── README.md                                                              (this file)
 ├── LICENSE
 ├── claude-code/skills/data-platform-consumption/SKILL.md                   ★ md5-identical
+│                                               └── reference/*.md          ★
 ├── kiro/skills/data-platform-consumption/SKILL.md                          ★
+│                                         └── reference/*.md                ★
 └── quick/skills/data-platform-consumption/SKILL.md                         ★
+                                           └── reference/*.md               ★
 ```
 
-> Note: This skill is monolithic (single ~60 KB SKILL.md, no separate `shared/`). All knowledge lives in the SKILL.md itself.
+> Note: The `SKILL.md` carries the core workflow; deeper material (Quick Sight CDK, IAM, dashboard patterns and a full definition example, chat-agent semantic model, region constraints, AI commentary) lives in `reference/*.md` loaded on demand. The `SKILL.md` + `reference/` set is md5-identical across all three tools.
 
 ## Installation
 
