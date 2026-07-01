@@ -349,7 +349,7 @@ const qualityGroup = new cr.AwsCustomResource(this, 'QualityGroup', {
   onCreate: {
     service: 'QuickSight',
     action: 'createGroup',
-    parameters: { AwsAccountId: cdk.Stack.of(this).account, Namespace: prefix, GroupName: 'quality-team', Description: '품질팀 (Quality Team)' },
+    parameters: { AwsAccountId: cdk.Stack.of(this).account, Namespace: prefix, GroupName: 'quality-team', Description: 'Quality Team' },
     physicalResourceId: cr.PhysicalResourceId.of(`${prefix}-quality-team-group`),
   },
   policy: cr.AwsCustomResourcePolicy.fromSdkCalls({ resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE }),

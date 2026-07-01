@@ -46,7 +46,7 @@ A "domain" maps to one Athena view typically (e.g., `v_quality_inspections`). Do
 new quicksight.CfnDataSet(this, 'QualityInspectionsDataset', {
   awsAccountId: cdk.Stack.of(this).account,
   dataSetId: `${prefix}-quality-inspections`,
-  name: '품질 검사 (Quality Inspections)',
+  name: 'Quality Inspections',
   importMode: 'SPICE', // SPICE, not DIRECT_QUERY
   physicalTableMap: {
     'qi-physical': {
@@ -94,7 +94,7 @@ new quicksight.CfnDataSet(this, 'QualityInspectionsDataset', {
           // types via the inputColumns above (type: 'DATETIME').
           tagColumnOperation: {
             columnName: 'supplier_name',
-            tags: [{ columnDescription: { text: '공급업체명 (Supplier name)' } }],
+            tags: [{ columnDescription: { text: 'Supplier name' } }],
           },
         },
       ],
@@ -300,7 +300,7 @@ SPICE refresh policy + capacity sizing → core SKILL §6. SPICE per-region quot
 new quicksight.CfnDashboard(this, 'QualityDashboard', {
   awsAccountId: cdk.Stack.of(this).account,
   dashboardId: `${prefix}-quality-dashboard`,
-  name: '품질 관리 대시보드',
+  name: 'Quality Management Dashboard',
   sourceEntity: {
     sourceTemplate: {
       arn: templateArn, // built from a definition or imported

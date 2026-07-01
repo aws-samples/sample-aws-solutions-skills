@@ -6,8 +6,6 @@ description: |
   Use for AWS Data Lab builds, new data platform setup, or adding data sources
   to an existing lake. Triggers: "build data pipeline", "data lake setup",
   "ingest data", "ETL pipeline", "Glue job", "data platform", "serverless analytics".
-  Korean triggers: "데이터 파이프라인", "데이터 레이크", "ETL 파이프라인",
-  "글루 잡", "데이터 플랫폼", "서버리스 분석", "데이터 수집".
 ---
 
 # Data Platform Pipeline (AWS Serverless)
@@ -97,7 +95,7 @@ What is the current state of your data platform?
 | `aws_region` | `ap-northeast-2`, `us-west-2` | Where the data lake lives. |
 | `source_type` | `jdbc` / `s3` / `cdc` | Drives the decision tree in §3. |
 | `source_details` | see below | DB endpoint + Secrets Manager ARN, OR existing S3 path. |
-| `business_questions` | "월별 검사 불량률 추세, 거래처별 불량 TOP5" | Drives table selection and Athena view/mart design. |
+| `business_questions` | "Monthly defect-rate trend, Top 5 defects by supplier" | Drives table selection and Athena view/mart design. |
 
 **`source_details` by type:**
 - **JDBC**: `{ engine: "sqlserver"|"mysql"|"postgresql"|"oracle", host, port, database, secret_arn, tables: [...] }`
@@ -119,14 +117,14 @@ What is the current state of your data platform?
 For question #1, present the two patterns explicitly:
 
 ```
-어떤 스토리지 패턴을 사용할까요?
-  a) Iceberg / S3 Tables (추천 ✓) — 자동 maintenance, ACID, time travel, schema evolution
-  b) Hive (기존 패턴) — S3 + Glue Crawler + Parquet. 기존 Hive 인프라 / 호환성 필요 시
+Which storage pattern would you like to use?
+  a) Iceberg / S3 Tables (recommended ✓) — automatic maintenance, ACID, time travel, schema evolution
+  b) Hive (existing pattern) — S3 + Glue Crawler + Parquet. Use when you need existing Hive infra / compatibility
 ```
 
 The choice determines the build: **Iceberg (default)** uses §4 + `reference/iceberg-cdk.md`; **Hive (opt-in)** follows `reference/hive-pattern.md`. Both share the `{prefix}_db` interface so the consumption layer is unaffected.
 
-> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "추천대로" / "just use the defaults", accept ALL defaults (including **Iceberg** for #1) and proceed.
+> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept ALL defaults (including **Iceberg** for #1) and proceed.
 
 ### ⚠️ MANDATORY: run ALL precondition checks before building
 
@@ -183,36 +181,36 @@ Before generating CDK/scripts, propose the data model plan:
 
 Based on the user's source data and business questions, propose:
 ```
-데이터 모델 초안:
+Draft data model:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📁 Base tables (raw → cleaned):
-  - base_{source}_{table} — [설명]
+  - base_{source}_{table} — [description]
   ...
 
 📁 Mart tables (business-ready):
-  - mart_{name} — grain: (col1, col2) — [설명, 어떤 질문에 답하는지]
+  - mart_{name} — grain: (col1, col2) — [description, which question it answers]
   ...
 
 🔗 Join relationships:
   - base_X.col_a → base_Y.col_b
   ...
 
-"이 구조가 비즈니스 질문을 답하기에 충분한지 확인해주세요.
-추가로 필요한 분석이나 수정할 부분이 있으면 말씀해주세요."
+"Please confirm this structure is sufficient to answer your business questions.
+Let me know if you need any additional analysis or changes."
 ```
 
 **Step 2: Iterate**
 
 User might say:
-- "mart_quality에 거래처별 집계도 추가해줘"
-- "이 테이블은 필요 없어"
-- "raw_orders와 raw_products를 조인한 mart가 하나 더 필요해"
+- "Add a per-supplier aggregation to mart_quality too"
+- "This table isn't needed"
+- "I need one more mart that joins raw_orders and raw_products"
 
 → Adjust and show updated plan.
 
 **Step 3: Confirm + execute**
 
-"최종 데이터 모델 확인: [plan]. 이대로 빌드 시작할까요?"
+"Final data model confirmation: [plan]. Shall I start the build with this?"
 → Once approved, generate CDK + scripts + deploy autonomously.
 
 ---
@@ -309,12 +307,12 @@ Only STOP and ask when a column mapping is genuinely ambiguous (multiple plausib
 
 | # | Corruption | Symptom if unhandled | Fix (one-liner) |
 |---|-----------|---------------------|-----------------|
-| 1 | **Unicode NFD filenames** (Korean decomposed form on macOS) — `MES_생산실적_202601.csv` | `NoSuchKey` on literal match — breaks on EVERY Korean/CJK filename on macOS | `list_objects` prefix-match, then use the **actual byte key** returned |
+| 1 | **Unicode NFD filenames** (CJK/Korean decomposed form on macOS) — e.g. a filename with CJK characters | `NoSuchKey` on literal match — breaks on EVERY Korean/CJK filename on macOS | `list_objects` prefix-match, then use the **actual byte key** returned |
 | 2 | **Mixed encoding per source** (MES = EUC-KR, SAP = UTF-8 in one pipeline) | Mojibake / garbled Korean in dimensions | Per-source `.option("encoding", ...)` branch in the Spark job |
 | 3 | **SAP trailing-minus negatives** — `150.000-` means -150 (often >50% of rows) | `cast('double')` → NULL → all cost/amount KPIs become 0 | `parse_num` helper: detect trailing `-`, move it to front before cast |
 | 4 | **Mixed date formats** (`yyyyMMddHHmmss` + `yyyy-MM-dd HH:mm:ss` + `yyyy/M/d H:m:s` no zero-pad + literal `'NULL'`) | Unparsed rows silently dropped → metric too low (16% loss seen) | `coalesce(to_timestamp(c,fmt1), …fmt2, …fmt3)` chain + filter literal `'NULL'` |
 | 5 | **Join-key leading-zero / whitespace** — MATNR as `10010015` vs `000…010010002` vs `  000…009` | Joins return 0 rows → empty dimensions | `norm_key`: `regexp_replace(trim(c),'^0+','')` on BOTH sides before any join |
-| 6 | **Cross-source bridge (no common key)** — SAP material groups (`FG100…`) vs Finance categories (`브라켓류…`) | Cannot join the two sources at all | Domain-knowledge bridge table: infer mapping from name-membership overlap |
+| 6 | **Cross-source bridge (no common key)** — SAP material groups (`FG100…`) vs Finance categories (e.g. `bracket-type…`) | Cannot join the two sources at all | Domain-knowledge bridge table: infer mapping from name-membership overlap |
 
 > **Rule:** the Iceberg/Spark default path reads empty CSV fields as `null` automatically, but it does NOT auto-fix any of the six above. After ingest, run the row-count reconciliation in §8 (source vs base table) — a gap means one of these silently dropped or zeroed rows.
 

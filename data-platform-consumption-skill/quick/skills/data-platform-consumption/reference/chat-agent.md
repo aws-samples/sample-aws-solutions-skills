@@ -26,7 +26,7 @@ Pick a domain expert role and write it as if briefing a new analyst:
 Chat-agent quality comes from the **semantic model** — column→business-term mappings, synonyms, calculated fields, named entities (below) — **not** from a long description string. Spend your effort there. Condense the guardrail that *does* go in the `Description` to one short sentence:
 
 ```
-데이터 기반 답변만 제공; 예측·추측 불가. 출처(테이블/기간) 명시.
+Answer only from the data; no predictions or speculation. Always cite the source (table/period).
 ```
 
 Keep the full rules below as the **principles to encode** — through synonym coverage, `visible: false` on raw IDs, calculated fields, and (for the speculation refusal) the one-sentence description above plus the test-case validation:
@@ -61,12 +61,12 @@ aws quicksight create-topic \
   --aws-account-id {account_id} \
   --topic-id "{prefix}-quality" \
   --topic '{
-    "Name": "품질 관리 토픽",
-    "Description": "데이터 기반 답변만 제공; 예측·추측 불가. 출처(테이블/기간) 명시.",
+    "Name": "Quality Management Topic",
+    "Description": "Answer only from the data; no predictions or speculation. Always cite the source (table/period).",
     "DataSets": [{
       "DatasetArn": "arn:aws:quicksight:{region}:{account}:dataset/{prefix}-quality-inspections",
       "DatasetName": "Quality Inspections",
-      "DatasetDescription": "월별 검사 결과 및 불량 데이터",
+      "DatasetDescription": "Monthly inspection results and defect data",
       "Filters": [],
       "Columns": [/* see Semantic Model below */],
       "CalculatedFields": [/* see Semantic Model below */],
@@ -84,12 +84,12 @@ For each customer domain, generate at least 5 test questions covering these cate
 
 | Category | Example (Manufacturing) | Expected behavior |
 |---|---|---|
-| Simple lookup | "2024년 검사 건수는?" | Returns single number with period |
-| Trend analysis | "월별 불량률 추세를 보여줘" | Returns time series, cites table |
-| Comparison | "거래처별 불량 TOP 5" | Returns top-N with sort and limit |
-| Filter combination | "2025년 1분기에 포장검사 불량률" | Multi-condition filter |
-| Refusal — speculation | "다음 달 불량률을 예측해줘" | Refuses per rule 5, suggests forecasting tool |
-| Refusal — out-of-scope | "이 거래처의 신용등급은?" | States data not in topic, suggests where to look |
+| Simple lookup | "What was the 2024 inspection count?" | Returns single number with period |
+| Trend analysis | "Show me the monthly defect-rate trend" | Returns time series, cites table |
+| Comparison | "Top 5 defects by supplier" | Returns top-N with sort and limit |
+| Filter combination | "Packaging-inspection defect rate in Q1 2025" | Multi-condition filter |
+| Refusal — speculation | "Predict next month's defect rate" | Refuses per rule 5, suggests forecasting tool |
+| Refusal — out-of-scope | "What is this supplier's credit rating?" | States data not in topic, suggests where to look |
 
 Document these as a `test-cases.md` alongside the topic so the customer can re-validate after schema changes.
 
@@ -99,7 +99,7 @@ After topic creation, validate **in the Quick Sight console** (or hand the test 
 - [ ] Agent uses data from the cited table
 - [ ] Numbers include time period and filters
 - [ ] Refusal questions are refused (not answered with speculation)
-- [ ] Synonyms work (Korean and English variations)
+- [ ] Synonyms work (all expected term variations)
 - [ ] Out-of-scope questions explain what's missing rather than guessing
 
 If any check fails, iterate on synonyms (below) before iterating on the persona.
@@ -118,39 +118,39 @@ The semantic model bridges raw column names and business questions. Three pieces
 # Saved to semantic-model.yaml alongside the topic
 columns:
   supplier_id:
-    business_name: "공급업체 ID"
+    business_name: "Supplier ID"
     description: "Unique identifier for supplier"
     visible: false  # hide IDs from natural language, expose names
   supplier_name:
-    business_name: "공급업체"
-    synonyms: ["거래처", "supplier", "vendor"]
+    business_name: "Supplier"
+    synonyms: ["supplier", "vendor"]
     description: "Supplier name"
   product_code:
-    business_name: "제품 코드"
-    synonyms: ["제품코드", "product code", "품번"]
+    business_name: "Product code"
+    synonyms: ["product code", "part number"]
     visible: false
   product_name:
-    business_name: "제품명"
-    synonyms: ["제품", "product", "품목"]
+    business_name: "Product name"
+    synonyms: ["product", "item"]
   inspection_type_name:
-    business_name: "검사 유형"
-    synonyms: ["검사종류", "inspection type", "검사 유형명"]
+    business_name: "Inspection type"
+    synonyms: ["inspection type", "inspection category"]
   defect_count:
-    business_name: "불량 건수"
-    synonyms: ["불량", "defect count", "결함 수"]
+    business_name: "Defect count"
+    synonyms: ["defect", "defect count", "defects"]
     aggregation: SUM
   total_count:
-    business_name: "검사 건수"
-    synonyms: ["전체 검사", "inspection count", "총 검사"]
+    business_name: "Inspection count"
+    synonyms: ["total inspections", "inspection count"]
     aggregation: SUM
   defect_rate_pct:
-    business_name: "불량률"
-    synonyms: ["불량률", "defect rate", "결함률"]
+    business_name: "Defect rate"
+    synonyms: ["defect rate", "defect ratio"]
     aggregation: AVERAGE
     format: "percent_2_decimal"
   inspection_month:
-    business_name: "검사월"
-    synonyms: ["검사 시간", "inspection month", "검사월자"]
+    business_name: "Inspection month"
+    synonyms: ["inspection time", "inspection month"]
     semantic_type: DATE
 ```
 
@@ -160,7 +160,7 @@ Push business logic into the dataset, not into each visual:
 
 ```sql
 -- defect_rate_pct already in the view, but topic adds derived metrics:
-"YoY 불량률 변화" = ({defect_rate_pct} - LAG({defect_rate_pct}, 12) OVER (ORDER BY {inspection_month})) / LAG({defect_rate_pct}, 12) OVER (ORDER BY {inspection_month})
+"YoY defect-rate change" = ({defect_rate_pct} - LAG({defect_rate_pct}, 12) OVER (ORDER BY {inspection_month})) / LAG({defect_rate_pct}, 12) OVER (ORDER BY {inspection_month})
 
 "Pass Rate" = 100 - {defect_rate_pct}
 
@@ -175,35 +175,35 @@ Metrics are columns the chat agent treats as first-class:
 metrics:
   total_defects:
     expression: "SUM({defect_count})"
-    name: "총 불량 건수"
-    synonyms: ["전체 불량", "불량 합계"]
+    name: "Total defect count"
+    synonyms: ["total defects", "defect total"]
     filterable_by: [supplier_name, inspection_month, inspection_type_name]
   avg_defect_rate:
     expression: "AVG({defect_rate_pct})"
-    name: "평균 불량률"
-    synonyms: ["평균 불량 비율"]
+    name: "Average defect rate"
+    synonyms: ["average defect ratio"]
 
 named_entities:
   supplier:
     columns: [supplier_id, supplier_name]
     primary_column: supplier_name
-    synonyms: ["거래처", "공급업체", "supplier", "vendor"]
+    synonyms: ["supplier", "vendor"]
   product:
     columns: [product_code, product_name]
     primary_column: product_name
-    synonyms: ["제품", "품목", "product"]
+    synonyms: ["product", "item"]
   inspection:
     columns: [inspection_month, inspection_type_name]
     primary_column: inspection_type_name
-    synonyms: ["검사", "inspection"]
+    synonyms: ["inspection"]
 ```
 
 ### Synonym coverage rule
 
 For every business question in the input, identify the key terms and ensure each has at least 2 synonyms in the topic:
-- Original business term ("불량률")
-- English equivalent ("defect rate")
-- Common variant ("결함률")
+- Primary business term ("defect rate")
+- Common variant ("defect ratio")
+- Any abbreviation or alternate phrasing users actually type
 
 Insufficient synonyms is the **#1 cause of poor chat agent quality**. Spend time here.
 

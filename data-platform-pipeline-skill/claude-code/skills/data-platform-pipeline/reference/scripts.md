@@ -12,7 +12,7 @@ All script bodies the pipeline generates. The thin core (`SKILL.md`) points here
 
 ### 1. Unicode NFD filenames (Korean decomposed form on macOS)
 
-macOS stores Korean filenames in NFD (decomposed) form, so `MES_생산실적_202601.csv` on disk is byte-different from the NFC string you type. A literal `s3.get_object(Key="...생산실적...")` then fails with `NoSuchKey`. **This breaks on EVERY Korean/CJK filename uploaded from a Mac.**
+macOS stores CJK/Korean filenames in NFD (decomposed) form, so a filename containing CJK characters on disk is byte-different from the NFC string you type. A literal `s3.get_object(Key="...")` with a hard-coded CJK key then fails with `NoSuchKey`. **This breaks on EVERY Korean/CJK filename uploaded from a Mac.**
 
 ```python
 import boto3
@@ -93,14 +93,14 @@ joined   = orders.join(material, "matnr_norm", "left")
 
 ### 6. Cross-source bridge mapping (no common key)
 
-Two sources can describe the same entities with **no shared key** — SAP material groups (`FG100`, `FG200`, …) and a finance report's product categories (`브라켓류`, `하우징류`, …). There is nothing to join on directly. Build a **domain-knowledge bridge table** that infers the mapping from name-membership overlap (e.g. a material whose name contains the product-category name), then join through the bridge:
+Two sources can describe the same entities with **no shared key** — SAP material groups (`FG100`, `FG200`, …) and a finance report's product categories (`bracket-type`, `housing-type`, …). There is nothing to join on directly. Build a **domain-knowledge bridge table** that infers the mapping from name-membership overlap (e.g. a material whose name contains the product-category name), then join through the bridge:
 
 ```python
 # bridge: (material_group, product_category) inferred from name membership.
 # Built once from domain logic, materialized as its own small Iceberg lookup table.
 bridge = spark.createDataFrame([
-    ("FG100", "브라켓류"),
-    ("FG200", "하우징류"),
+    ("FG100", "bracket-type"),
+    ("FG200", "housing-type"),
     # …derived by matching material_name CONTAINS product_category, reviewed by a human
 ], ["material_group", "product_category"])
 
@@ -110,13 +110,13 @@ enriched = sap_df.join(bridge, "material_group", "left") \
 
 > Document the bridge logic in `ARCHITECTURE.md` (it encodes a business assumption) and surface low-confidence rows for human review rather than guessing silently.
 
-### Excel normalization checklist (Korean hand-made finance reports)
+### Excel normalization checklist (hand-made finance reports)
 
 Finance Excels are authored by humans, not systems — the Glue **Python Shell** job (pandas + openpyxl) must normalize all of the following before writing Parquet:
 
 1. **`skiprows` until the real header** — title often at row 2, header at row 4. Don't assume row 0. Use a `scan_excel_for_header_row` helper that finds the first row whose cells match expected header tokens.
 2. **Forward-fill merged cells** — factory/department appears only in the first row of each merged group; `df[col].ffill()` to repopulate.
-3. **Tag rows as `data` / `subtotal` / `total`** by keyword detection (`소계`, `합계`, `계`) and EXCLUDE subtotal/total rows from the fact table — summing a column that already contains its own subtotals double-counts.
+3. **Tag rows as `data` / `subtotal` / `total`** by keyword detection (e.g. "subtotal", "total", "sum" — use the source's own header terms) and EXCLUDE subtotal/total rows from the fact table — summing a column that already contains its own subtotals double-counts.
 4. **Strip currency formatting** — remove `₩` and thousands commas, convert to float (`"1,234,567" → 1234567.0`).
 5. **Ignore footnote columns** — drop everything past the last non-empty header cell (footnotes/notes live to the right of the real table).
 
@@ -132,11 +132,11 @@ def scan_excel_for_header_row(path, sheet, expected_tokens, max_scan=10):
             return i
     raise ValueError(f"header row not found in first {max_scan} rows")
 
-hdr = scan_excel_for_header_row(path, sheet, {"공장", "제품", "금액"})
+hdr = scan_excel_for_header_row(path, sheet, {"factory", "product", "amount"})
 df = pd.read_excel(path, sheet_name=sheet, header=hdr)
 df["factory"] = df["factory"].ffill()                          # merged cells
 df["row_kind"] = df["item"].apply(
-    lambda v: "total" if any(k in str(v) for k in ("소계", "합계", "계")) else "data")
+    lambda v: "total" if any(k in str(v) for k in ("subtotal", "total", "sum")) else "data")
 df = df[df["row_kind"] == "data"].copy()                       # drop subtotal/total rows
 df["amount"] = (df["amount"].astype(str)
                 .str.replace(r"[₩,]", "", regex=True).astype(float))
@@ -480,11 +480,11 @@ SELECT
   p.product_name,
   qi.inspection_type,
   CASE qi.inspection_type
-    WHEN 'incoming_material' THEN '수입검사'
-    WHEN 'in_process' THEN '공정검사'
-    WHEN 'final_product' THEN '최종검사'
-    WHEN 'packaging' THEN '포장검사'
-    ELSE '기타'
+    WHEN 'incoming_material' THEN 'Incoming inspection'
+    WHEN 'in_process' THEN 'In-process inspection'
+    WHEN 'final_product' THEN 'Final inspection'
+    WHEN 'packaging' THEN 'Packaging inspection'
+    ELSE 'Other'
   END AS inspection_type_name,
   COUNT(*) AS total_count,
   SUM(CASE WHEN qi.result = 'fail' THEN 1 ELSE 0 END) AS defect_count,
@@ -502,7 +502,7 @@ GROUP BY
 
 Patterns to apply:
 
-- `CASE` statements for code→Korean name enrichment (matches business question phrasing)
+- `CASE` statements for code→name enrichment (matches business question phrasing)
 - `LEFT JOIN` for dimension lookups, never `INNER JOIN` (avoid silent row drops)
 - `NULLIF(denom, 0)` to avoid divide-by-zero
 - `DATE_TRUNC('month', date_col) AS month` for time-series rollups
@@ -510,7 +510,7 @@ Patterns to apply:
 ### Named query — one per business question
 
 ```sql
--- Q: 거래처별 불량 TOP5 (FY 2025)
+-- Q: Top 5 defects by supplier (FY 2025)
 SELECT supplier_name, SUM(defect_count) AS total_defects
 FROM v_quality_inspections
 WHERE inspection_month >= DATE '2025-01-01'

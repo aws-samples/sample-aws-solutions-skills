@@ -5,9 +5,9 @@
 Before presenting the sheet/visual plan (§1), decide how many dashboards. Ask once, in the user's language:
 
 ```
-이 프로젝트에서 대시보드를 어떻게 구성할까요?
-  a) 단일 대시보드 + 주제별 탭(시트) (추천 ✓ — 단일 URL, 공통 필터, 관리 1회)
-  b) 주제별 분리 대시보드 (팀별 접근제어가 다르거나, 시트 8개 초과 시)
+How should the dashboards be organized for this project?
+  a) Single dashboard + per-topic tabs (sheets) (recommended ✓ — single URL, shared filters, manage once)
+  b) Separate dashboards per topic (when per-team access control differs, or sheet count exceeds 8)
 ```
 
 **Default = (a)** single dashboard with per-topic tabs (sheets): one URL, shared filters, one thing to manage and refresh. Only split into separate dashboards when:
@@ -25,17 +25,17 @@ Before generating ANY dashboard definition, CDK, or temp-validation dashboard, p
 Present it like this (in the user's language):
 
 ```
-대시보드 계획:
+Dashboard plan:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Sheet 1: [이름]
-  - Visual 1: [타입] — [설명]
-  - Visual 2: [타입] — [설명]
+Sheet 1: [name]
+  - Visual 1: [type] — [description]
+  - Visual 2: [type] — [description]
   ...
-Sheet 2: [이름]
+Sheet 2: [name]
   - Visual 1: ...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-데이터셋: [이름] (SPICE, 갱신: daily 04:00 KST)
-필터: [공통 필터 목록]
+Dataset: [name] (SPICE, refresh: daily 04:00 KST)
+Filters: [list of common filters]
 ```
 
 **Wait for explicit user approval before building.** Only after the user confirms (or adjusts) the plan do you generate the definition, run STRICT validation, and deploy.
@@ -201,7 +201,7 @@ The `CfnDashboard` CDK block itself → `quicksight-cdk.md` §8.
 
 After STRICT validation passes and the dashboard renders:
 
-1. **Identify the metric** being displayed (e.g. "총 생산량", "불량률", "지연 주문 수").
+1. **Identify the metric** being displayed (e.g. "total production", "defect rate", "delayed order count").
 2. **Write the SAME aggregation as a direct Athena query against the SOURCE table** (the base table, not the mart).
 3. **Compare three numbers:**
    - Source-table result
@@ -212,7 +212,7 @@ After STRICT validation passes and the dashboard renders:
    - **Mart ≠ Dashboard** → grain duplication on SUM (multi-grain mart feeding a KPI card → use the single-row KPI dataset, §10), or the wrong aggregation function in the field well (`COUNT` vs `COUNT(DISTINCT)`, SUM over a column not listed in the mart's `sum_safe_columns`).
 
 ```sql
--- Verify "총 생산량" KPI matches the SOURCE
+-- Verify "total production" KPI matches the SOURCE
 SELECT SUM(quantity_good) AS source_total FROM base_mes_production;
 -- Compare with the MART
 SELECT SUM(daily_production_qty) AS mart_total FROM mart_daily_production;
@@ -277,8 +277,8 @@ FROM base_quality_notifications;
 - [ ] Currency: `₩` prefix + `NumberScale: AUTO` (shows B/M/K)
 - [ ] Percentages: if the value is ALREADY `78.3`, use Number + `"%"` suffix — NOT `PercentageDisplay`, which ×100s it into 7830%
 - [ ] Thousands separator enabled
-- [ ] **Korean myriad units (억/만), not B/M/K, for a Korean audience.** Korean (CJK) groups large numbers by 4 digits — 만 (10⁴), 억 (10⁸), 조 (10¹²) — so `123,456,789` reads as `1억 2,345만`, *not* `123.5M`. QuickSight's `NumberScale: AUTO` only does the Western K/M/B, which reads unnaturally on a 매출/원가 card. There is no native 억/만 scale, so for a headline KRW figure prefer a `CalculatedField` that divides (`{cost}/100000000`) with a `"억원"` suffix, or label the axis/title `(억원)` and pre-scale upstream. (Microsoft globalization: number-formatting locale ko-KR.)
-- [ ] No false precision — round consistently (defect rate `0.0%`, 가동률 whole `%`), same decimals across sibling cards so the row scans cleanly.
+- [ ] **Use myriad units (man/eok), not B/M/K, for a CJK/Korean audience.** Korean (CJK) groups large numbers by 4 digits — man (10⁴), eok (10⁸), jo (10¹²) — so `123,456,789` reads as "1 eok 2,345 man", *not* `123.5M`. QuickSight's `NumberScale: AUTO` only does the Western K/M/B, which reads unnaturally on a revenue/cost card. There is no native man/eok scale, so for a headline KRW figure prefer a `CalculatedField` that divides (`{cost}/100000000`) with a "hundred-million-won" suffix, or label the axis/title accordingly and pre-scale upstream. (Microsoft globalization: number-formatting locale ko-KR.)
+- [ ] No false precision — round consistently (defect rate `0.0%`, utilization rate whole `%`), same decimals across sibling cards so the row scans cleanly.
 
 **Charts:**
 - [ ] TOP-N bars: `SortConfiguration` DESC + `CategoryItemsLimit` with `OtherCategories: EXCLUDE`
@@ -287,18 +287,18 @@ FROM base_quality_notifications;
 - [ ] **Pareto for cause analysis** (defect causes, downtime reasons): a `ComboChart` with count bars sorted DESC + a cumulative-% line, cumulative-% computed as a `CalculatedField` (`runningSum(...) / sum(...)` ×100), plus an 80% reference line (bound to `SECONDARY_YAXIS`) to mark the vital few. In a combo chart the **`LineValues` land on the secondary Y-axis automatically — there is no per-series `AxisBinding` to set** (`DataFieldComboSeriesItem.Settings` is `ComboChartSeriesSettings`, which has no `AxisBinding`; per-series binding exists only on *line* charts via `DataFieldSeriesItem`). Scale/label the secondary axis 0–100% via `SecondaryYAxisDisplayOptions`/`SecondaryYAxisLabelOptions`. Beats a flat bar for "where do I focus." (Full worked JSON: `dashboard-definitions.md` Part F1.)
 - [ ] **Heat maps use a single-hue sequential ramp**, not the default categorical palette: set a `ColorScale` with `ColorFillType: GRADIENT` and 2–3 `Colors` (light→dark of one hue). Sequential = ordered magnitude; categorical hues on a heat map read as noise.
 - [ ] **Gray is for context.** Use saturated color only on the focal series; render secondary/context series and non-data ink (gridlines, axes) in gray. Reserve red/amber/green strictly for status-vs-target, kept consistent across visuals (field-based coloring).
-- [ ] **Bars over pies for comparison.** Keep a pie/donut only for true part-of-whole with < ~7 slices; otherwise a sorted horizontal bar wins. If a pie's category count is unbounded, add `CategoryItemsLimit` + an "기타" bucket.
-- [ ] **Axis labels + units.** Give each axis a `ChartAxisLabelOptions` with the unit (`%`, `₩`, `건`) when the title alone doesn't make it obvious.
+- [ ] **Bars over pies for comparison.** Keep a pie/donut only for true part-of-whole with < ~7 slices; otherwise a sorted horizontal bar wins. If a pie's category count is unbounded, add `CategoryItemsLimit` + an "Other" bucket.
+- [ ] **Axis labels + units.** Give each axis a `ChartAxisLabelOptions` with the unit (`%`, `₩`, count) when the title alone doesn't make it obvious.
 
 **Tables:**
-- [ ] `SortConfiguration.RowSort` DESC on the ranking measure when the title says "상위/TOP" — an empty sort makes "top" arbitrary.
+- [ ] `SortConfiguration.RowSort` DESC on the ranking measure when the title says "top/TOP" — an empty sort makes "top" arbitrary.
 - [ ] `PaginationConfiguration` (`PageSize`) so a "top N" table actually shows N rows.
-- [ ] Conditional-format the 판정(status) column (e.g. `variance_pct` red when over budget) via `ConditionalFormatting` → `Cell` → `TextFormat`.
+- [ ] Conditional-format the status column (e.g. `variance_pct` red when over budget) via `ConditionalFormatting` → `Cell` → `TextFormat`.
 
 **KPI cards:**
 - [ ] Conditional formatting uses an AGGREGATION expression (`min({col}) >= 80`), NOT a raw `FieldId`
 - [ ] Hero KPIs (1–2 key metrics) sized larger than secondary KPIs
-- [ ] `Subtitle` either carries one line (unit / "최근 30일" / source) or is set `Visibility: HIDDEN` — never VISIBLE-but-empty (leaves a dead caption slot).
+- [ ] `Subtitle` either carries one line (unit / "last 30 days" / source) or is set `Visibility: HIDDEN` — never VISIBLE-but-empty (leaves a dead caption slot).
 
 **Layout:**
 - [ ] NOT every tab the identical "KPI row + 2-column grid" (anti-cookie-cutter)

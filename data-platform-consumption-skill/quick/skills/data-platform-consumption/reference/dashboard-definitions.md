@@ -22,17 +22,17 @@
 
 ## What this dashboard is
 
-A manufacturing operations dashboard ("한성 제조 통합 대시보드") with **4 topic
+A manufacturing operations dashboard ("Hansung Manufacturing Integrated Dashboard") with **4 topic
 tabs (sheets)** over a single dashboard — the recommended structure
 (`dashboard-patterns.md` §0): one URL, shared per-sheet date filters, one thing
 to manage.
 
 | # | Sheet (`SheetId`) | Name | Visuals | Theme |
 |---|---|---|---|---|
-| 1 | `eff-sheet`   | 생산 효율 (Production efficiency) | 8  | Gauge + 3 KPI + bars + line + heatmap |
-| 2 | `qual-sheet`  | 품질 분석 (Quality analysis)      | 8  | 4 KPI (one w/ sparkline) + pie + TOP-10 bar + line + scatter |
-| 3 | `cost-sheet`  | 원가 분석 (Cost analysis)         | 7  | 3 KPI + combo + 2 TOP-10 bars + table |
-| 4 | `deliv-sheet` | 납기 현황 (Delivery status)       | 10 | 5 KPI + bars + line + table |
+| 1 | `eff-sheet`   | Production efficiency | 8  | Gauge + 3 KPI + bars + line + heatmap |
+| 2 | `qual-sheet`  | Quality analysis      | 8  | 4 KPI (one w/ sparkline) + pie + TOP-10 bar + line + scatter |
+| 3 | `cost-sheet`  | Cost analysis         | 7  | 3 KPI + combo + 2 TOP-10 bars + table |
+| 4 | `deliv-sheet` | Delivery status       | 10 | 5 KPI + bars + line + table |
 
 **11 datasets**, all from the same account/region. Note the deliberate split
 between **single-row KPI datasets** (`eff-kpi`, `qual-kpi`, `cost-kpi`,
@@ -86,7 +86,7 @@ Each pattern below links to where it appears in the JSON.
    (`dashboard-patterns.md` §3).
 
 7. **Reference line for a target.** `line-15` draws a dashed red reference line
-   at `85.0` ("목표 85%") on the utilization trend.
+   at `85.0` ("Target 85%") on the utilization trend.
 
 8. **Currency formatting.** Cost visuals use `Prefix: "₩"` +
    `NumberScale: "AUTO"` + thousands separator (`dashboard-patterns.md` §11).
@@ -111,7 +111,7 @@ otherwise byte-faithful to the deployed definition.
 After the answer-key export (Parts A–C) and the adapt-to-your-domain guide (Part
 D), two improvement parts: **Part E** turns each "known improvement" into a
 concrete, copy-paste JSON patch; **Part F** adds research-driven, best-in-class
-manufacturing enhancements (defect-cause Pareto, Korean 억/만 units, color
+manufacturing enhancements (defect-cause Pareto, Myriad man/eok units, color
 discipline, OEE framing). Parts E–F are patches *on top of a copy* — Parts A–C
 stay byte-faithful.
 
@@ -137,7 +137,7 @@ envelope (`Status`/`DashboardId`/`RequestId` are response metadata).
 {
   "Status": 200,
   "DashboardId": "hansung-mfg-dashboard",
-  "Name": "한성 제조 통합 대시보드",
+  "Name": "Hansung Manufacturing Integrated Dashboard",
   "ResourceStatus": "CREATION_SUCCESSFUL",
   "ThemeArn": "arn:aws:quicksight:us-east-1:730335655603:theme/hansung-theme",
   "Definition": {
@@ -213,7 +213,7 @@ grain-level marts.
 
 # Part B — Sheets & visuals
 
-## Sheet 1 — `eff-sheet` 생산 효율 (Production Efficiency)
+## Sheet 1 — `eff-sheet` Production Efficiency
 
 8 visuals: a hero gauge (utilization vs 85% target), three single-row KPI
 cards, a per-line bar, a daily trend line with a target reference line, a
@@ -221,7 +221,7 @@ shift-defect bar, and a line×date heatmap. Datasets: `eff-kpi` (single-row) for
 the cards/gauge, `line-daily` (grain) for the bar/line/heatmap, `shift` for the
 shift bar.
 
-### `gauge-3` — GaugeChartVisual — 가동률 vs 목표(85%)
+### `gauge-3` — GaugeChartVisual — Utilization vs Target (85%)
 
 **Pattern #2 — gauge with a real target.** `Values` = actual `avg_utilization_pct`; `TargetValues` = `target_utilization_pct` (a real column). `ArcAngle: 270.0` is one of the only accepted angles. `ComparisonMethod: DIFFERENCE` shows the gap to target. KPI dataset → `MIN` aggregation (single row). Both wells format with a `%` suffix.
 
@@ -232,7 +232,7 @@ shift bar.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "가동률 vs 목표(85%)"
+        "PlainText": "Utilization vs Target (85%)"
       }
     },
     "Subtitle": {
@@ -308,9 +308,9 @@ shift bar.
 ```
 
 
-### `kpi-5` — KPIVisual — 평균 Cycle Time
+### `kpi-5` — KPIVisual — Average Cycle Time
 
-**Pattern #1 — single-row KPI card.** `eff-kpi.avg_cycle_time_sec` with `MIN` aggregation, `초` (seconds) suffix, 1 decimal, thousands separator. `FontSize.Relative: EXTRA_LARGE` makes it a hero number. Empty `TargetValues`/`TrendGroups` — a plain KPI needs neither.
+**Pattern #1 — single-row KPI card.** `eff-kpi.avg_cycle_time_sec` with `MIN` aggregation, `sec` (seconds) suffix, 1 decimal, thousands separator. `FontSize.Relative: EXTRA_LARGE` makes it a hero number. Empty `TargetValues`/`TrendGroups` — a plain KPI needs neither.
 
 ```json
 {
@@ -319,7 +319,7 @@ shift bar.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "평균 Cycle Time"
+        "PlainText": "Average Cycle Time"
       }
     },
     "Subtitle": {
@@ -341,7 +341,7 @@ shift bar.
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "초",
+                    "Suffix": "sec",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -376,7 +376,7 @@ shift bar.
 ```
 
 
-### `kpi-7` — KPIVisual — 총 생산량
+### `kpi-7` — KPIVisual — Total Production
 
 Single-row KPI: total production qty, ` EA` suffix, 0 decimals.
 
@@ -387,7 +387,7 @@ Single-row KPI: total production qty, ` EA` suffix, 0 decimals.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 생산량"
+        "PlainText": "Total Production"
       }
     },
     "Subtitle": {
@@ -444,7 +444,7 @@ Single-row KPI: total production qty, ` EA` suffix, 0 decimals.
 ```
 
 
-### `kpi-9` — KPIVisual — 불량률(가중)
+### `kpi-9` — KPIVisual — Defect Rate (weighted)
 
 **Pattern #5 — conditional formatting by aggregation expression.** Defect rate KPI colored red when `MIN({defect_rate_pct}) > 2.5`, green when `<= 2.0`. The expression uses an **aggregation** (`MIN`), never a raw FieldId — that is the rule (`dashboard-patterns.md` §11).
 
@@ -455,7 +455,7 @@ Single-row KPI: total production qty, ` EA` suffix, 0 decimals.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "불량률(가중)"
+        "PlainText": "Defect Rate (weighted)"
       }
     },
     "Subtitle": {
@@ -530,7 +530,7 @@ Single-row KPI: total production qty, ` EA` suffix, 0 decimals.
 ```
 
 
-### `bar-12` — BarChartVisual — 라인별 가동률
+### `bar-12` — BarChartVisual — Utilization by Line
 
 Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows). `Category` = `line_code`, `Values` = `AVERAGE` of `utilization_pct`. `CategorySort` DESC on the measure. Vertical, data labels on.
 
@@ -541,7 +541,7 @@ Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "라인별 가동률"
+        "PlainText": "Utilization by Line"
       }
     },
     "Subtitle": {
@@ -612,9 +612,9 @@ Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows
 ```
 
 
-### `line-15` — LineChartVisual — 일별 전체 가동률 추세
+### `line-15` — LineChartVisual — Daily Overall Utilization Trend
 
-**Pattern #7 — reference line target.** Daily utilization trend (`DateDimensionField`, `DateGranularity: DAY`, with a `DateTimeHierarchy`). A `ReferenceLines` entry draws a dashed red static line at `85.0` labeled “목표 85%”. Note the matching `ColumnHierarchies` entry — date fields with a `HierarchyId` must declare the hierarchy.
+**Pattern #7 — reference line target.** Daily utilization trend (`DateDimensionField`, `DateGranularity: DAY`, with a `DateTimeHierarchy`). A `ReferenceLines` entry draws a dashed red static line at `85.0` labeled “Target 85%”. Note the matching `ColumnHierarchies` entry — date fields with a `HierarchyId` must declare the hierarchy.
 
 ```json
 {
@@ -623,7 +623,7 @@ Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "일별 전체 가동률 추세"
+        "PlainText": "Daily Overall Utilization Trend"
       }
     },
     "Subtitle": {
@@ -690,7 +690,7 @@ Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows
           },
           "LabelConfiguration": {
             "CustomLabelConfiguration": {
-              "CustomLabel": "목표 85%"
+              "CustomLabel": "Target 85%"
             },
             "FontConfiguration": {
               "FontSize": {
@@ -717,9 +717,9 @@ Bar chart from the **grain-level** `line-daily` mart (it needs the per-line rows
 ```
 
 
-### `bar-22` — BarChartVisual — 작업조별 불량률 [인사이트]
+### `bar-22` — BarChartVisual — Defect Rate by Work Shift [insight]
 
-Defect rate by work shift, from the `shift` mart. `[인사이트]` in the title marks an insight-bearing visual (a project convention, not a schema feature).
+Defect rate by work shift, from the `shift` mart. `[insight]` in the title marks an insight-bearing visual (a project convention, not a schema feature).
 
 ```json
 {
@@ -728,7 +728,7 @@ Defect rate by work shift, from the `shift` mart. `[인사이트]` in the title 
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "작업조별 불량률 [인사이트]"
+        "PlainText": "Defect Rate by Work Shift [insight]"
       }
     },
     "Subtitle": {
@@ -799,7 +799,7 @@ Defect rate by work shift, from the `shift` mart. `[인사이트]` in the title 
 ```
 
 
-### `heat-19` — HeatMapVisual — 라인 × 일자 가동률 히트맵
+### `heat-19` — HeatMapVisual — Line × Date Utilization Heatmap
 
 **HeatMap** — line × date utilization. `HeatMapAggregatedFieldWells` uses `Rows` (line_code), `Columns` (date), `Values` (AVERAGE utilization). Like the line chart it declares a `DateTimeHierarchy`.
 
@@ -810,7 +810,7 @@ Defect rate by work shift, from the `shift` mart. `[인사이트]` in the title 
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "라인 × 일자 가동률 히트맵"
+        "PlainText": "Line × Date Utilization Heatmap"
       }
     },
     "Subtitle": {
@@ -961,14 +961,14 @@ The 36-column `GridLayout`. Each element ties a `VisualId` to a `ColumnIndex`/`C
 
 ---
 
-## Sheet 2 — `qual-sheet` 품질 분석 (Quality Analysis)
+## Sheet 2 — `qual-sheet` Quality Analysis
 
 8 visuals. The standout is `kpi-25`, the **only KPI card backed by a
 grain-level dataset** — it needs daily rows for its sparkline. The rest follow
 the single-row pattern. Includes a donut, a TOP-10 bar, a multi-series line,
 and a scatter correlating MES floor defects with QMEL notifications.
 
-### `kpi-25` — KPIVisual — 불량률 추세
+### `kpi-25` — KPIVisual — Defect Rate Trend
 
 **Pattern #3 — KPI with sparkline + trend arrow.** This card pulls from the **grain-level** `quality-daily` mart (NOT a single-row KPI dataset) precisely because a sparkline needs the daily rows. `TrendGroups` carries a `DateDimensionField` (`production_date`, DAY) from that same dataset, and `KPIOptions` enables `TrendArrows` + a LINE `Sparkline`. Aggregation is `AVERAGE` (averaging the daily rate), not `MIN`.
 
@@ -979,7 +979,7 @@ and a scatter correlating MES floor defects with QMEL notifications.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "불량률 추세"
+        "PlainText": "Defect Rate Trend"
       }
     },
     "Subtitle": {
@@ -1056,7 +1056,7 @@ and a scatter correlating MES floor defects with QMEL notifications.
 ```
 
 
-### `kpi-27` — KPIVisual — 총 불량수량
+### `kpi-27` — KPIVisual — Total Defect Quantity
 
 Single-row KPI from `qual-kpi`: total defect qty, ` EA`.
 
@@ -1067,7 +1067,7 @@ Single-row KPI from `qual-kpi`: total defect qty, ` EA`.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 불량수량"
+        "PlainText": "Total Defect Quantity"
       }
     },
     "Subtitle": {
@@ -1124,7 +1124,7 @@ Single-row KPI from `qual-kpi`: total defect qty, ` EA`.
 ```
 
 
-### `kpi-29` — KPIVisual — 불량 자재 수
+### `kpi-29` — KPIVisual — Defective Material Count
 
 Single-row KPI: defect material **count**. In the source mart this is pre-computed as `COUNT(DISTINCT material_key)` so the card can safely read it with `MIN` — the distinct-count fix lives in the pipeline, not the field well (`dashboard-patterns.md` §8 root-cause #4).
 
@@ -1135,7 +1135,7 @@ Single-row KPI: defect material **count**. In the source mart this is pre-comput
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "불량 자재 수"
+        "PlainText": "Defective Material Count"
       }
     },
     "Subtitle": {
@@ -1157,7 +1157,7 @@ Single-row KPI: defect material **count**. In the source mart this is pre-comput
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "개",
+                    "Suffix": "count",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -1192,9 +1192,9 @@ Single-row KPI: defect material **count**. In the source mart this is pre-comput
 ```
 
 
-### `kpi-31` — KPIVisual — QMEL 통보
+### `kpi-31` — KPIVisual — QMEL Notifications
 
-Single-row KPI: QMEL notification count (`건`). This is the KPI that famously showed 3,527 (8.3× overcount) when fed a multi-grain mart; here it reads the single-row `qual-kpi` (§8/§10).
+Single-row KPI: QMEL notification count (`count`). This is the KPI that famously showed 3,527 (8.3× overcount) when fed a multi-grain mart; here it reads the single-row `qual-kpi` (§8/§10).
 
 ```json
 {
@@ -1203,7 +1203,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "QMEL 통보"
+        "PlainText": "QMEL Notifications"
       }
     },
     "Subtitle": {
@@ -1225,7 +1225,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "건",
+                    "Suffix": "cases",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -1260,7 +1260,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
 ```
 
 
-### `pie-34` — PieChartVisual — 불량 유형별 수량
+### `pie-34` — PieChartVisual — Quantity by Defect Type
 
 **Donut/Pie** — defect qty by defect type. `DonutOptions.ArcOptions.ArcThickness: MEDIUM` makes it a donut. Category + measure labels both visible.
 
@@ -1271,7 +1271,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "불량 유형별 수량"
+        "PlainText": "Quantity by Defect Type"
       }
     },
     "Subtitle": {
@@ -1342,7 +1342,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
 ```
 
 
-### `bar-37` — BarChartVisual — 자재별 불량수량 TOP10
+### `bar-37` — BarChartVisual — Top 10 Defect Quantity by Material
 
 **Pattern #4 — TOP-10.** Defect qty by material: `CategorySort` DESC + `CategoryItemsLimit {ItemsLimit: 10, OtherCategories: EXCLUDE}`, `Orientation: HORIZONTAL`. The empty `ColorItemsLimit`/`SmallMultiplesLimitConfiguration` blocks are emitted by the export but harmless.
 
@@ -1353,7 +1353,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "자재별 불량수량 TOP10"
+        "PlainText": "Top 10 Defect Quantity by Material"
       }
     },
     "Subtitle": {
@@ -1439,7 +1439,7 @@ Single-row KPI: QMEL notification count (`건`). This is the KPI that famously s
 ```
 
 
-### `line-41` — LineChartVisual — 일별 불량유형별 추세
+### `line-41` — LineChartVisual — Daily Trend by Defect Type
 
 Multi-series line: daily defect qty by `defect_name` (the series split lives in `Colors`). `SUM` of `defect_qty` over the `quality-daily` mart.
 
@@ -1450,7 +1450,7 @@ Multi-series line: daily defect qty by `defect_name` (the series split lives in 
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "일별 불량유형별 추세"
+        "PlainText": "Daily Trend by Defect Type"
       }
     },
     "Subtitle": {
@@ -1530,7 +1530,7 @@ Multi-series line: daily defect qty by `defect_name` (the series split lives in 
 ```
 
 
-### `sc-45` — ScatterPlotVisual — MES 현장불량 vs QMEL 통보 [인사이트]
+### `sc-45` — ScatterPlotVisual — MES Field Defects vs QMEL Notifications [insight]
 
 **ScatterPlot** — MES floor defects (X) vs QMEL notifications (Y) per material. `ScatterPlotCategoricallyAggregatedFieldWells` with X/Y measures + a `Category` dimension. Note X uses `SUM`, Y uses `MAX`.
 
@@ -1541,7 +1541,7 @@ Multi-series line: daily defect qty by `defect_name` (the series split lives in 
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "MES 현장불량 vs QMEL 통보 [인사이트]"
+        "PlainText": "MES Field Defects vs QMEL Notifications [insight]"
       }
     },
     "Subtitle": {
@@ -1722,13 +1722,13 @@ The 36-column `GridLayout`. Each element ties a `VisualId` to a `ColumnIndex`/`C
 
 ---
 
-## Sheet 3 — `cost-sheet` 원가 분석 (Cost Analysis)
+## Sheet 3 — `cost-sheet` Cost Analysis
 
 7 visuals, all about money — every measure uses the `₩` + `NumberScale: AUTO`
 currency format. Three KPI cards, a standard-vs-actual combo chart, two TOP-10
 bars, and a variance comparison table.
 
-### `kpi-47` — KPIVisual — 총 소비원가
+### `kpi-47` — KPIVisual — Total Consumption Cost
 
 **Pattern #8 — currency.** Total consumption cost: `Prefix: "₩"`, `NumberScale: "AUTO"` (renders ₩1.2B / ₩340M), thousands separator, 1 decimal. Single-row `cost-kpi`, `MIN`.
 
@@ -1739,7 +1739,7 @@ bars, and a variance comparison table.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 소비원가"
+        "PlainText": "Total Consumption Cost"
       }
     },
     "Subtitle": {
@@ -1797,7 +1797,7 @@ bars, and a variance comparison table.
 ```
 
 
-### `kpi-49` — KPIVisual — 총 스크랩량
+### `kpi-49` — KPIVisual — Total Scrap Quantity
 
 Single-row KPI: total scrap qty (` EA`).
 
@@ -1808,7 +1808,7 @@ Single-row KPI: total scrap qty (` EA`).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 스크랩량"
+        "PlainText": "Total Scrap Quantity"
       }
     },
     "Subtitle": {
@@ -1865,7 +1865,7 @@ Single-row KPI: total scrap qty (` EA`).
 ```
 
 
-### `kpi-51` — KPIVisual — 총 스크랩 손실 [인사이트]
+### `kpi-51` — KPIVisual — Total Scrap Loss [insight]
 
 Single-row KPI: total scrap **loss** in ₩ (insight metric).
 
@@ -1876,7 +1876,7 @@ Single-row KPI: total scrap **loss** in ₩ (insight metric).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 스크랩 손실 [인사이트]"
+        "PlainText": "Total Scrap Loss [insight]"
       }
     },
     "Subtitle": {
@@ -1934,7 +1934,7 @@ Single-row KPI: total scrap **loss** in ₩ (insight metric).
 ```
 
 
-### `combo-55` — ComboChartVisual — 제품군별 표준 vs 실제원가
+### `combo-55` — ComboChartVisual — Standard vs Actual Cost by Product Group
 
 **Pattern #9 — combo chart.** Standard vs actual cost by product group. `BarValues` = `sap_standard_cost_kwon`, `LineValues` = `finance_actual_cost_kwon`, sharing one `Category`. Separate `BarDataLabels` and `LineDataLabels` blocks. From the grain-level `cost-comparison` mart.
 
@@ -1945,7 +1945,7 @@ Single-row KPI: total scrap **loss** in ₩ (insight metric).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "제품군별 표준 vs 실제원가"
+        "PlainText": "Standard vs Actual Cost by Product Group"
       }
     },
     "Subtitle": {
@@ -2056,7 +2056,7 @@ Single-row KPI: total scrap **loss** in ₩ (insight metric).
 ```
 
 
-### `bar-58` — BarChartVisual — 자재별 소비원가 TOP10
+### `bar-58` — BarChartVisual — Top 10 Consumption Cost by Material
 
 TOP-10 material consumption cost (₩, AUTO scale). Same TOP-N pattern as `bar-37`.
 
@@ -2067,7 +2067,7 @@ TOP-10 material consumption cost (₩, AUTO scale). Same TOP-N pattern as `bar-3
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "자재별 소비원가 TOP10"
+        "PlainText": "Top 10 Consumption Cost by Material"
       }
     },
     "Subtitle": {
@@ -2155,7 +2155,7 @@ TOP-10 material consumption cost (₩, AUTO scale). Same TOP-N pattern as `bar-3
 ```
 
 
-### `bar-61` — BarChartVisual — 자재별 스크랩 손실 TOP10 [인사이트]
+### `bar-61` — BarChartVisual — Top 10 Scrap Loss by Material [insight]
 
 TOP-10 material scrap loss (₩). Insight visual.
 
@@ -2166,7 +2166,7 @@ TOP-10 material scrap loss (₩). Insight visual.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "자재별 스크랩 손실 TOP10 [인사이트]"
+        "PlainText": "Top 10 Scrap Loss by Material [insight]"
       }
     },
     "Subtitle": {
@@ -2254,7 +2254,7 @@ TOP-10 material scrap loss (₩). Insight visual.
 ```
 
 
-### `tbl-66` — TableVisual — 표준 vs 실제 원가 비교표
+### `tbl-66` — TableVisual — Standard vs Actual Cost Comparison Table
 
 **TableVisual** — standard vs actual vs variance%. `TableAggregatedFieldWells` with `GroupBy` (product group) + three `Values`. Mixed formatting: two ₩ columns + one `%` column (`variance_pct`, AVERAGE). Tables have no `ColumnHierarchies` key.
 
@@ -2265,7 +2265,7 @@ TOP-10 material scrap loss (₩). Insight visual.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "표준 vs 실제 원가 비교표"
+        "PlainText": "Standard vs Actual Cost Comparison Table"
       }
     },
     "Subtitle": {
@@ -2456,14 +2456,14 @@ The 36-column `GridLayout`. Each element ties a `VisualId` to a `ColumnIndex`/`C
 
 ---
 
-## Sheet 4 — `deliv-sheet` 납기 현황 (Delivery Status)
+## Sheet 4 — `deliv-sheet` Delivery Status
 
 10 visuals (the densest sheet). Five KPI cards (three with conditional
 formatting), then four charts that all **count orders via
 `CategoricalMeasureField`** (because `order_key` is a string), and a detail
 table of the worst-delayed orders.
 
-### `kpi-68` — KPIVisual — 납기 준수율
+### `kpi-68` — KPIVisual — On-Time Delivery Rate
 
 **Conditional formatting (good/bad).** On-time rate: green when `MIN({on_time_rate_pct}) >= 80`, red when `< 50`. Single-row `deliv-kpi`.
 
@@ -2474,7 +2474,7 @@ table of the worst-delayed orders.
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "납기 준수율"
+        "PlainText": "On-Time Delivery Rate"
       }
     },
     "Subtitle": {
@@ -2549,9 +2549,9 @@ table of the worst-delayed orders.
 ```
 
 
-### `kpi-70` — KPIVisual — 총 생산오더
+### `kpi-70` — KPIVisual — Total Production Orders
 
-Single-row KPI: total production orders (`건`).
+Single-row KPI: total production orders (`cases`).
 
 ```json
 {
@@ -2560,7 +2560,7 @@ Single-row KPI: total production orders (`건`).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "총 생산오더"
+        "PlainText": "Total Production Orders"
       }
     },
     "Subtitle": {
@@ -2582,7 +2582,7 @@ Single-row KPI: total production orders (`건`).
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "건",
+                    "Suffix": "cases",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -2617,9 +2617,9 @@ Single-row KPI: total production orders (`건`).
 ```
 
 
-### `kpi-72` — KPIVisual — 지연 건수
+### `kpi-72` — KPIVisual — Late Order Count
 
-Single-row KPI: late orders (`건`), red when `MIN({late_orders}) > 400`. The correct population filter (`WHERE is_on_time = false`) is baked into the mart, not the field well (§8 root-cause #3).
+Single-row KPI: late orders (`cases`), red when `MIN({late_orders}) > 400`. The correct population filter (`WHERE is_on_time = false`) is baked into the mart, not the field well (§8 root-cause #3).
 
 ```json
 {
@@ -2628,7 +2628,7 @@ Single-row KPI: late orders (`건`), red when `MIN({late_orders}) > 400`. The co
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "지연 건수"
+        "PlainText": "Late Order Count"
       }
     },
     "Subtitle": {
@@ -2650,7 +2650,7 @@ Single-row KPI: late orders (`건`), red when `MIN({late_orders}) > 400`. The co
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "건",
+                    "Suffix": "cases",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -2699,7 +2699,7 @@ Single-row KPI: late orders (`건`), red when `MIN({late_orders}) > 400`. The co
 ```
 
 
-### `kpi-74` — KPIVisual — 평균 지연일수
+### `kpi-74` — KPIVisual — Average Delay Days
 
 Single-row KPI: avg delay **days, late only**. The mart excludes early completions (`AVG(CASE WHEN delay_days > 0 …)`) so negatives don't dilute it (§8 root-cause #5).
 
@@ -2710,7 +2710,7 @@ Single-row KPI: avg delay **days, late only**. The mart excludes early completio
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "평균 지연일수"
+        "PlainText": "Average Delay Days"
       }
     },
     "Subtitle": {
@@ -2732,7 +2732,7 @@ Single-row KPI: avg delay **days, late only**. The mart excludes early completio
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "일",
+                    "Suffix": "days",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -2767,9 +2767,9 @@ Single-row KPI: avg delay **days, late only**. The mart excludes early completio
 ```
 
 
-### `kpi-76` — KPIVisual — 계획일 누락
+### `kpi-76` — KPIVisual — Missing Planned Date
 
-Single-row KPI: orders missing a planned date (`건`).
+Single-row KPI: orders missing a planned date (`cases`).
 
 ```json
 {
@@ -2778,7 +2778,7 @@ Single-row KPI: orders missing a planned date (`건`).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "계획일 누락"
+        "PlainText": "Missing Planned Date"
       }
     },
     "Subtitle": {
@@ -2800,7 +2800,7 @@ Single-row KPI: orders missing a planned date (`건`).
               "FormatConfiguration": {
                 "FormatConfiguration": {
                   "NumberDisplayFormatConfiguration": {
-                    "Suffix": "건",
+                    "Suffix": "cases",
                     "SeparatorConfiguration": {
                       "ThousandsSeparator": {
                         "Symbol": "COMMA",
@@ -2835,7 +2835,7 @@ Single-row KPI: orders missing a planned date (`건`).
 ```
 
 
-### `bar-79` — BarChartVisual — 납기 상태별 건수
+### `bar-79` — BarChartVisual — Count by Delivery Status
 
 **Pattern #6 — `CategoricalMeasureField` COUNT.** Order count by `on_time_label`. `order_key` is a STRING, so it uses `CategoricalMeasureField` with `AggregationFunction: "COUNT"` and the `NumericFormatConfiguration` shape — NOT `NumericalMeasureField` (which rejects STRING columns). This exact mismatch is a top gotcha (`dashboard-patterns.md` §3).
 
@@ -2846,7 +2846,7 @@ Single-row KPI: orders missing a planned date (`건`).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "납기 상태별 건수"
+        "PlainText": "Count by Delivery Status"
       }
     },
     "Subtitle": {
@@ -2920,7 +2920,7 @@ Single-row KPI: orders missing a planned date (`건`).
 ```
 
 
-### `line-83` — LineChartVisual — 계획 마감일별 지연 추이
+### `line-83` — LineChartVisual — Delay Trend by Planned Due Date
 
 Delay trend by planned finish date, series split by `on_time_label`. Again a `CategoricalMeasureField` COUNT of `order_key`.
 
@@ -2931,7 +2931,7 @@ Delay trend by planned finish date, series split by `on_time_label`. Again a `Ca
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "계획 마감일별 지연 추이"
+        "PlainText": "Delay Trend by Planned Due Date"
       }
     },
     "Subtitle": {
@@ -3009,7 +3009,7 @@ Delay trend by planned finish date, series split by `on_time_label`. Again a `Ca
 ```
 
 
-### `bar-86` — BarChartVisual — 자재그룹별 납기상태
+### `bar-86` — BarChartVisual — Delivery Status by Material Group
 
 Order count by material group (`CategoricalMeasureField` COUNT).
 
@@ -3020,7 +3020,7 @@ Order count by material group (`CategoricalMeasureField` COUNT).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "자재그룹별 납기상태"
+        "PlainText": "Delivery Status by Material Group"
       }
     },
     "Subtitle": {
@@ -3094,7 +3094,7 @@ Order count by material group (`CategoricalMeasureField` COUNT).
 ```
 
 
-### `bar-89` — BarChartVisual — 공장별 납기상태
+### `bar-89` — BarChartVisual — Delivery Status by Plant
 
 Order count by plant (`CategoricalMeasureField` COUNT).
 
@@ -3105,7 +3105,7 @@ Order count by plant (`CategoricalMeasureField` COUNT).
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "공장별 납기상태"
+        "PlainText": "Delivery Status by Plant"
       }
     },
     "Subtitle": {
@@ -3179,9 +3179,9 @@ Order count by plant (`CategoricalMeasureField` COUNT).
 ```
 
 
-### `tbl-93` — TableVisual — 지연 상위 오더 [인사이트]
+### `tbl-93` — TableVisual — Top Delayed Orders [insight]
 
-Detail table — top delayed orders. `GroupBy` material + plant; `Values` = `MAX(delay_days)` with a `일` (days) suffix.
+Detail table — top delayed orders. `GroupBy` material + plant; `Values` = `MAX(delay_days)` with a `days` suffix.
 
 ```json
 {
@@ -3190,7 +3190,7 @@ Detail table — top delayed orders. `GroupBy` material + plant; `Values` = `MAX
     "Title": {
       "Visibility": "VISIBLE",
       "FormatText": {
-        "PlainText": "지연 상위 오더 [인사이트]"
+        "PlainText": "Top Delayed Orders [insight]"
       }
     },
     "Subtitle": {
@@ -3233,7 +3233,7 @@ Detail table — top delayed orders. `GroupBy` material + plant; `Values` = `MAX
                 "FormatConfiguration": {
                   "FormatConfiguration": {
                     "NumberDisplayFormatConfiguration": {
-                      "Suffix": "일",
+                      "Suffix": "days",
                       "SeparatorConfiguration": {
                         "ThousandsSeparator": {
                           "Symbol": "COMMA",
@@ -3564,7 +3564,7 @@ structure. Work top-down:
 
 ### 3. Titles, suffixes/prefixes, currency
 - Retitle visuals (`FormatText.PlainText`) and sheet `Name`s in your language.
-- Replace unit suffixes (`초`, `EA`, `건`, `일`, `%`) and the `₩` prefix /
+- Replace unit suffixes (`sec`, `EA`, `cases`, `days`, `%`) and the `₩` prefix /
   `NumberScale: AUTO` with your locale's units and currency.
 
 ### 4. Targets, thresholds, reference lines
@@ -3622,13 +3622,13 @@ JSON above. After applying any of them, run the §4 STRICT probe before deploy.
 
 Every visual ships `"Subtitle": {"Visibility": "VISIBLE"}` with no text, which
 leaves a dead caption slot. Either give it one line (`FormatText.PlainText`, a
-`LongFormatText`) or hide it. Example for `kpi-5` (평균 Cycle Time):
+`LongFormatText`) or hide it. Example for `kpi-5` (Average Cycle Time):
 
 ```json
 {
   "Subtitle": {
     "Visibility": "VISIBLE",
-    "FormatText": { "PlainText": "최근 30일 · 라인 평균" }
+    "FormatText": { "PlainText": "Last 30 days · line average" }
   }
 }
 ```
@@ -3667,7 +3667,7 @@ the gradient readable. Merge into `heat-19`'s `ChartConfiguration`:
 
 ### E3 — Tables (`tbl-93`, `tbl-66`): sort, paginate, conditional-format
 
-`tbl-93` is titled "지연 상위 오더" (top delayed orders) but ships an empty
+`tbl-93` is titled "Top Delayed Orders" (top delayed orders) but ships an empty
 `SortConfiguration`, so "top" is arbitrary. Sort by `delay_days` DESC and bound
 the page. Note tables use `RowSort` (NOT `CategorySort`) and
 `PaginationConfiguration`. Merge into `tbl-93`'s `ChartConfiguration`:
@@ -3683,7 +3683,7 @@ the page. Note tables use `RowSort` (NOT `CategorySort`) and
 }
 ```
 
-`tbl-66` (표준 vs 실제 원가 비교표) can flag over-budget rows. Tables take a
+`tbl-66` (Standard vs Actual Cost Comparison Table) can flag over-budget rows. Tables take a
 top-level `ConditionalFormatting` (`TableVisual.ConditionalFormatting`, verified
 present on `TableVisual`, not just pivot tables) → `Cell` → `TextFormat`. Add to
 the `tbl-66` visual root (sibling of `ChartConfiguration`):
@@ -3719,20 +3719,20 @@ the fix is **documentation**: pattern #1 at the top of this file and §10 of
 `SUM` thinking it's a bug (that's how the 8.3× overcount got introduced on a
 *multi*-row mart — the lesson is the dataset shape, not the function).
 
-### E5 — Native `InsightVisual` for the `[인사이트]` tiles
+### E5 — Native `InsightVisual` for the `[insight]` tiles
 
-Sheets tag insight tiles with `[인사이트]` in the title but use ordinary
+Sheets tag insight tiles with `[insight]` in the title but use ordinary
 charts. A native `InsightVisual` with a computed narrative would lift them — but
 `CustomNarrative.Narrative` must be **valid XML**, not plain text, or it fails
 with `Content not allowed in prolog` (§3), and `TopBottomRanked` requires
 `ResultSize`. Because this is a §3 "probe-first" visual type, build it in the UI,
 export, and paste the validated shape rather than hand-authoring it here.
 
-### E6 — Pie (`pie-34`): bound the slices with a TOP-N + 기타
+### E6 — Pie (`pie-34`): bound the slices with a TOP-N + Other
 
 If defect types are many, an unbounded donut turns to confetti. `PieChartSort
 Configuration` accepts `CategoryItemsLimit`; keep `OtherCategories: INCLUDE` to
-roll the tail into a "기타" slice (vs `EXCLUDE`, which drops it). Merge into
+roll the tail into a "Other" slice (vs `EXCLUDE`, which drops it). Merge into
 `pie-34`'s `SortConfiguration`:
 
 ```json
@@ -3765,7 +3765,7 @@ into its `ChartConfiguration`:
       },
       "StyleConfiguration": { "Pattern": "DASHED", "Color": "#D1242F" },
       "LabelConfiguration": {
-        "CustomLabelConfiguration": { "CustomLabel": "불량률 목표 2.5%" },
+        "CustomLabelConfiguration": { "CustomLabel": "Defect rate target 2.5%" },
         "FontColor": "#D1242F",
         "HorizontalPosition": "RIGHT",
         "VerticalPosition": "ABOVE"
@@ -3826,7 +3826,7 @@ Prerequisite — a cumulative-% measure. Add it as a `CalculatedField` on
 `defect-cause` (functions verified — `runningSum`, `percentOfTotal`):
 ```json
 {
-  "Name": "누적_불량_비율",
+  "Name": "cumulative_defect_ratio",
   "DataSetIdentifier": "defect-cause",
   "Expression": "runningSum(percentOfTotal(sum({mes_defect_qty})), [percentOfTotal(sum({mes_defect_qty})) DESC])"
 }
@@ -3852,7 +3852,7 @@ to "move it" there.
     "VisualId": "pareto-defect",
     "Title": {
       "Visibility": "VISIBLE",
-      "FormatText": { "PlainText": "불량 원인 Pareto (누적 80%)" }
+      "FormatText": { "PlainText": "Defect-cause Pareto (cumulative 80%)" }
     },
     "Subtitle": { "Visibility": "HIDDEN" },
     "ChartConfiguration": {
@@ -3889,7 +3889,7 @@ to "move it" there.
             {
               "NumericalMeasureField": {
                 "FieldId": "m-px3",
-                "Column": { "DataSetIdentifier": "defect-cause", "ColumnName": "누적_불량_비율" },
+                "Column": { "DataSetIdentifier": "defect-cause", "ColumnName": "cumulative_defect_ratio" },
                 "AggregationFunction": { "SimpleNumericalAggregation": "MAX" },
                 "FormatConfiguration": {
                   "FormatConfiguration": {
@@ -3925,10 +3925,10 @@ to "move it" there.
         "Visibility": "VISIBLE",
         "AxisLabelOptions": [
           {
-            "CustomLabel": "누적 비율",
+            "CustomLabel": "Cumulative ratio",
             "ApplyTo": {
               "FieldId": "m-px3",
-              "Column": { "DataSetIdentifier": "defect-cause", "ColumnName": "누적_불량_비율" }
+              "Column": { "DataSetIdentifier": "defect-cause", "ColumnName": "cumulative_defect_ratio" }
             }
           }
         ]
@@ -3969,32 +3969,32 @@ to "move it" there.
 > to 0–100% above) and `SecondaryYAxisLabelOptions` (label) — both verified
 > members of `ComboChartConfiguration`.
 
-### F2 — Korean **억/만** units on money cards (not B/M/K)
+### F2 — Myriad (man/eok) units on money cards (not B/M/K)
 
 `kpi-47`/`kpi-51` and the cost bars use `NumberScale: AUTO`, which renders
-`₩1.2B` / `₩340M`. Korean groups by 4 digits (만 10⁴, 억 10⁸, 조 10¹²), so a
-Korean reader parses `억/만`, not `B/M/K` (Microsoft globalization, ko-KR). Quick
-has no native 억/만 scale, so divide upstream and label the unit. `CalculatedField`
+`₩1.2B` / `₩340M`. CJK/Korean groups by 4 digits (man 10⁴, eok 10⁸, jo 10¹²), so a
+CJK/Korean reader parses `man/eok`, not `B/M/K` (Microsoft globalization, ko-KR). Quick
+has no native man/eok scale, so divide upstream and label the unit. `CalculatedField`
 on the single-row `cost-kpi` (keep `MIN`, per pattern #1):
 
 ```json
 {
-  "Name": "총소비원가_억원",
+  "Name": "total_consumption_cost_100m",
   "DataSetIdentifier": "cost-kpi",
   "Expression": "min({total_consumption_cost_kwon}) / 100000000"
 }
 ```
 
-Then point `kpi-47`'s value well at `총소비원가_억원`, drop `NumberScale`, set 1
-decimal, and put the unit in the title (`총 소비원가 (억원)`). The card reads
-`12.4` under a `(억원)` header instead of `₩1.2B`.
+Then point `kpi-47`'s value well at `total_consumption_cost_100m`, drop `NumberScale`, set 1
+decimal, and put the unit in the title (`Total Consumption Cost (100M KRW)`). The card reads
+`12.4` under a `(100M KRW)` header instead of `₩1.2B`.
 
 ### F3 — Color discipline (sequential vs categorical; gray for context)
 
 - **Heatmaps / gauges → single-hue sequential** (`ColorScale GRADIENT`, one hue
   light→dark) — applied in E2. Ordered magnitude must not use a categorical
   multi-hue palette.
-- **Status (가동률 vs 목표, 불량률, 납기) → traffic-light** red/amber/green, and
+- **Status (Utilization vs Target, Defect Rate, Delivery) → traffic-light** red/amber/green, and
   *only* there — already done correctly on `kpi-9/68/72` via aggregation-expr
   conditional formatting.
 - **Everything else → 2–3 base hues + gray.** Render secondary/context series
@@ -4006,7 +4006,7 @@ decimal, and put the unit in the title (`총 소비원가 (억원)`). The card r
 
 ### F4 — OEE framing for the efficiency sheet
 
-The efficiency sheet leads with 가동률 (utilization) but not the full **OEE =
+The efficiency sheet leads with utilization but not the full **OEE =
 Availability × Performance × Quality** decomposition that manufacturing readers
 expect. If the marts can supply the three factors, a KPI row of A/P/Q each with a
 `TargetValues` well (world-class **A 90% · P 95% · Q 99.9%**, composite **OEE

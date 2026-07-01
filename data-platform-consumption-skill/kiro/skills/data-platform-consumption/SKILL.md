@@ -7,8 +7,6 @@ description: |
   and AI-powered chat agents for business users. Triggers: "Quick Sight setup",
   "dashboard", "Amazon Quick", "data visualization", "BI setup", "chat agent",
   "natural language analytics", "connect to Quick Sight".
-  Korean triggers: "대시보드 만들기", "퀵사이트 설정", "데이터 시각화",
-  "BI 설정", "챗 에이전트", "자연어 분석", "아마존 퀵 설정".
 ---
 
 # Data Platform Consumption (Amazon Quick)
@@ -58,7 +56,7 @@ This skill is self-contained: it never assumes any other skill has run. It creat
 > | Genuinely ambiguous synonym mapping ("I found 3 possible mappings. Which one?") | Auto-retry on transient errors; update `ARCHITECTURE.md` / `platform.yaml` |
 > | "This error persists after 3 retries: [error]. Need your input." | — |
 >
-> Note: Features like AI commentary (Bedrock) are NOT proactively offered. They activate only when the user explicitly requests them (e.g., "AI 코멘트 추가해줘"). See the reference-files routing table for keyword triggers.
+> Note: Features like AI commentary (Bedrock) are NOT proactively offered. They activate only when the user explicitly requests them (e.g., "add AI commentary"). See the reference-files routing table for keyword triggers.
 >
 > **KEY principle:** **Any decision that affects what the USER sees in the final dashboard MUST be approved first** (architecture pattern, region, dashboard plan, gauge targets, restricted topics). **Execution / infrastructure decisions are autonomous** (install, synth, deploy, IAM, SPICE refresh, dataset creation, validation). When unsure which side a decision falls on, ask: *"does the customer see the difference in the dashboard?"* — if yes, stop and confirm.
 >
@@ -75,10 +73,10 @@ The core below is the default flow. Pull in a reference file when you reach its 
 | `reference/region-constraints.md` | Picking a region, hitting the chat/Topics availability gate, SPICE per-region capacity, or the identity-region error |
 | `reference/quicksight-cdk.md` | Writing any CDK — `CfnDataSource`, `CfnDataSet` (Hive `relationalTable` or Iceberg `customSql`), `CfnRefreshSchedule`, `CfnDashboard`, native S3 Tables connector, RLS |
 | `reference/dashboard-patterns.md` | Designing dashboards — domain layouts, the definition gotchas table, STRICT validation, the 3-step update flow |
-| `reference/dashboard-definitions.md` | Building a dashboard? → read this for a complete working 4-sheet example — a real deployed, STRICT-clean definition (33 visuals across 생산효율/품질/원가/납기) annotated with every key pattern (KPI single-row dataset, gauge target, sparkline, TOP-N sorting) plus a "how to adapt" guide |
+| `reference/dashboard-definitions.md` | Building a dashboard? → read this for a complete working 4-sheet example — a real deployed, STRICT-clean definition (33 visuals across production-efficiency / quality / cost / delivery) annotated with every key pattern (KPI single-row dataset, gauge target, sparkline, TOP-N sorting) plus a "how to adapt" guide |
 | `reference/chat-agent.md` | Building the chat agent — persona, topic creation, the 256-char limit, semantic model (synonyms/calculated fields/named entities), test cases |
 | `reference/iam-permissions.md` | Any IAM — service role, managed-role patch, S3 allowlist, `s3tables:*` grants, Lake Formation, account/namespace setup, data-source discovery, Spaces/RLS |
-| `reference/ai-commentary.md` | Need AI-generated Korean commentary on the dashboard? → read `reference/ai-commentary.md` — Bedrock → InsightVisual `CustomNarrative` injection via `UpdateDashboard` + `UpdateDashboardPublishedVersion`, EventBridge/Lambda, no external DB |
+| `reference/ai-commentary.md` | Need AI-generated commentary on the dashboard? → read `reference/ai-commentary.md` — Bedrock → InsightVisual `CustomNarrative` injection via `UpdateDashboard` + `UpdateDashboardPublishedVersion`, EventBridge/Lambda, no external DB |
 
 ---
 
@@ -107,7 +105,7 @@ What is the current state of your analytics layer?
 ### Ask FIRST — region
 
 > Before `project_prefix`, before `data_source_type`, before anything else, ask:
-> > "어떤 AWS 리전에서 Quick Sight를 운영하시나요? (예: us-east-1, ap-northeast-2)"
+> > "Which AWS region will you run Quick Sight in? (e.g., us-east-1, ap-northeast-2)"
 >
 > Region is first because it determines: the resource region, the SPICE capacity location, **chat-agent / Topics availability** (not all regions support them), and the QuickSight identity region. A wrong region invalidates almost every later decision. Pin it, then run the region availability gate (`reference/region-constraints.md` §2).
 
@@ -119,8 +117,8 @@ What is the current state of your analytics layer?
 | `data_source_type` | `athena` / `redshift` / `s3` / `other` | Drives the data source connector. |
 | `data_source_details` | see below | Glue DB + workgroup, OR Redshift endpoint, OR S3 manifest. |
 | `project_prefix` | `acme` | Optional. If set and matches `{prefix}_db` in Glue, the skill auto-discovers tables. |
-| `business_questions` | "월별 검사 불량률 추세, 거래처별 불량 TOP5, 다음달 불량률 예측" | Drives dashboards, topics, chat agent test cases. |
-| `target_users` | "품질팀 5명, 임원 2명" | Drives Space layout and persona scoping. |
+| `business_questions` | "Monthly defect-rate trend, Top 5 defects by supplier, next-month defect-rate forecast" | Drives dashboards, topics, chat agent test cases. |
+| `target_users` | "5 quality-team members, 2 executives" | Drives Space layout and persona scoping. |
 
 **`data_source_details` shape by type:**
 - **Athena**: `{ glue_database, workgroup, results_bucket }`
@@ -137,17 +135,17 @@ What is the current state of your analytics layer?
 | 3 | Dashboard style? (executive summary / detailed operational / both) | **Both** — one executive summary sheet + one operational detail sheet per business question |
 | 4 | Existing dashboards/reports to replicate? | **No — build fresh** (optimized for Quick Sight's native visual types) |
 | 5 | How many Spaces (isolated groups)? | **1 Space** (single team; add more as the user base grows) |
-| 6 | Chat agent restricted topics? | **Refuse predictions/forecasts** ("다음 달 예측" → "예측은 지원하지 않습니다") |
-| 7 | 대시보드 형태? (KPI 요약 / 상세 운영 / 트렌드 / 비교) | **KPI 요약 + 트렌드** (one KPI-card sheet, one trend sheet with time-series + comparisons) |
-| 8 | 데이터에서 기대하는 인사이트? (구조를 보고 제안 가능) | **데이터 구조 기반 제안** — scan tables/columns and suggest time-series (date+numeric), comparisons (category+metric), anomaly candidates (high-variance), TOP-N rankings (dimension+metric) |
-| 9 | 추세 분석을 위한 데이터 기간이 어느 정도인가요? (일/주/월/분기) | **데이터의 distinct 날짜 수를 확인하고 적절한 입도 결정** — single-month data makes "월별 추세" a single point; query the actual distinct-date count before choosing the trend grain. |
-| 10 | 각 핵심 지표의 목표값/임계값이 있나요? (예: 가동률 85%, 불량률 2%) | **있으면 제공, 없으면 기준선 없이 진행** — gauges, reference lines, and conditional colors all need a real target. NEVER substitute a meaningless column (e.g. a line count) as a gauge target. |
+| 6 | Chat agent restricted topics? | **Refuse predictions/forecasts** ("next-month forecast" → "Forecasting is not supported") |
+| 7 | Dashboard format? (KPI summary / detailed operational / trend / comparison) | **KPI summary + trend** (one KPI-card sheet, one trend sheet with time-series + comparisons) |
+| 8 | What insights do you expect from the data? (I can propose based on structure) | **Structure-based proposals** — scan tables/columns and suggest time-series (date+numeric), comparisons (category+metric), anomaly candidates (high-variance), TOP-N rankings (dimension+metric) |
+| 9 | What data period do you have for trend analysis? (day/week/month/quarter) | **Check the distinct date count in the data and pick the right grain** — single-month data makes a "monthly trend" a single point; query the actual distinct-date count before choosing the trend grain. |
+| 10 | Is there a target/threshold for each key metric? (e.g., utilization 85%, defect rate 2%) | **Use it if provided, otherwise proceed with no baseline** — gauges, reference lines, and conditional colors all need a real target. NEVER substitute a meaningless column (e.g. a line count) as a gauge target. |
 
-When the user picks "제안받기" on Q8, enumerate columns from the dataset and propose 4–6 specific insights using those patterns. Don't propose insights for columns that don't exist — confirm against `aws glue get-table` first.
+When the user picks "get proposals" on Q8, enumerate columns from the dataset and propose 4–6 specific insights using those patterns. Don't propose insights for columns that don't exist — confirm against `aws glue get-table` first.
 
 > **Q9 matters because** single-period data silently degrades trend visuals to one point — confirm the real date range (`SELECT COUNT(DISTINCT date_col)`) and pick day/week/month/quarter to match. **Q10 matters because** a gauge or reference line with no real target tempts the agent to fill garbage (a gauge "utilization target" was once set to a `line_count` of 11 instead of 85%). No target → omit the gauge/reference line, don't fabricate one.
 
-> **Interaction pattern:** present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "추천대로" / "just use the defaults", accept ALL defaults and proceed.
+> **Interaction pattern:** present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept ALL defaults and proceed.
 
 ### Account preconditions — run before building
 
@@ -252,36 +250,36 @@ The dashboard design phase is ITERATIVE — not a single approval gate.
 
 Based on the user's business questions, propose:
 ```
-대시보드 초안:
+Dashboard draft:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 Tab 1: [이름] (추천 이유: ...)
-  - Visual 1: [타입] — [설명] (추천: 이 지표가 가장 중요하므로 KPI 카드로)
-  - Visual 2: [타입] — [설명] (추천: 시계열 트렌드가 있으므로 Line chart)
+📊 Tab 1: [name] (why recommended: ...)
+  - Visual 1: [type] — [description] (recommended: this is the most important metric, so a KPI card)
+  - Visual 2: [type] — [description] (recommended: there's a time-series trend, so a Line chart)
   ...
-📊 Tab 2: [이름] (추천 이유: ...)
+📊 Tab 2: [name] (why recommended: ...)
   - Visual 1: ...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-데이터셋: [이름] (SPICE, 갱신: daily)
-필터: [공통 필터 추천]
+Dataset: [name] (SPICE, refresh: daily)
+Filters: [recommended common filters]
 
-추천 이유를 설명하고, 유저의 피드백을 기다립니다.
-"이 구성이 괜찮으신가요? 수정하고 싶은 부분이 있으면 말씀해주세요."
+Explain the reasoning, then wait for the user's feedback.
+"Does this layout look good? Let me know if there's anything you'd like to change."
 ```
 
 **Step 2: Iterate based on user feedback**
 
 User might say:
-- "Tab 2에 TOP-N 차트도 추가해줘"
-- "KPI 카드를 5개로 늘려줘"
-- "Tab 3 필요 없어"
-- "이 지표는 게이지로 보여줘, 목표값은 85%"
+- "Add a TOP-N chart to Tab 2 as well"
+- "Increase the KPI cards to 5"
+- "Tab 3 isn't needed"
+- "Show this metric as a gauge, target 85%"
 
-→ Adjust the plan and show the updated version. Repeat until user says "좋아" or "진행해."
+→ Adjust the plan and show the updated version. Repeat until the user says "looks good" or "go ahead."
 
 **Step 3: Confirm final plan**
 
 Show the FINAL plan one more time:
-"최종 확인: [plan]. 이대로 빌드 시작할까요?"
+"Final confirmation: [plan]. Shall I start the build with this?"
 
 **Step 4: Execute autonomously**
 
@@ -290,8 +288,8 @@ Once approved, build everything without further questions (unless hitting a tech
 **Key rules:**
 - NEVER build a dashboard without showing the plan first
 - ALWAYS explain WHY you recommend each visual type (not just WHAT)
-- If user's request is vague ("매출 대시보드 만들어줘"), YOU propose the structure based on the available data
-- Suggest things the user might not have thought of (e.g., "이 데이터에 시계열이 있어서 추세 차트도 추가하면 좋을 것 같습니다")
+- If user's request is vague ("build me a sales dashboard"), YOU propose the structure based on the available data
+- Suggest things the user might not have thought of (e.g., "this data has a time-series, so a trend chart would be a good addition")
 
 Template + approval flow detail → `reference/dashboard-patterns.md` §1.
 - **KPI cards read a single-row KPI dataset, not a multi-grain mart.** A KPI card aggregates over the whole dataset; if the dataset has multiple rows per entity, SUM/COUNT double- or triple-counts. Point KPI visuals at `mart_kpi_summary` (1 row, every measure pre-aggregated with the correct function incl. `COUNT(DISTINCT …)`); point trend/ranking visuals at the grain-level mart. → `reference/dashboard-patterns.md` §10.

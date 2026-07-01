@@ -11,21 +11,21 @@
 ### When to use — decision tree (follow this exactly)
 
 ```
-고객이 대시보드에 텍스트 코멘트를 원하는가?
-├── NO → skip (차트/KPI만)
-└── YES → 어떤 종류?
-    ├── 영어 OK + 정형 수치 요약만 (최대/최소/증감률)
+Does the customer want text commentary on the dashboard?
+├── NO → skip (charts/KPIs only)
+└── YES → what kind?
+    ├── English OK + structured numeric summary only (max/min/change rate)
     │   → Classic Narratives (InsightVisual + Computations)
-    │   → reference/dashboard-definitions.md의 InsightVisual 참조
+    │   → see the InsightVisual in reference/dashboard-definitions.md
     │
-    └── 한국어 필요 OR 자유형 분석 (원인 추론, 비교, 권장 조치)
-        → Bedrock Lambda (이 파일의 Architecture 따름)
+    └── Localized (e.g. Korean) needed OR free-form analysis (cause inference, comparison, recommended actions)
+        → Bedrock Lambda (follow the Architecture in this file)
         → Korean explicitly NOT supported by Classic Narratives (AWS docs)
 ```
 
 > **This is a USER-facing decision — present the choice and get approval before building** (see the escalation table in `SKILL.md`). The customer sees the result inside the dashboard, so the agent does not pick the approach silently.
 
-In one line: when the customer needs auto-generated Korean AI commentary (e.g., 전일대비 GAP 분석, 매체별 비교 코멘트) or free-form analysis that goes beyond Quick Sight's native Narratives capability, take the Bedrock branch.
+In one line: when the customer needs auto-generated localized AI commentary (e.g., day-over-day GAP analysis, per-channel comparison commentary) or free-form analysis that goes beyond Quick Sight's native Narratives capability, take the Bedrock branch.
 
 ### Why not Classic Narratives alone?
 - Classic Narratives = **template-based, NOT LLM-generated** (no free-form reasoning)
@@ -100,10 +100,10 @@ def handler(event, context):
     # 1. Query yesterday vs today KPIs
     kpi_data = run_athena_query(athena, "SELECT ...")  # your KPI comparison query
 
-    # 2. Generate Korean commentary via Bedrock
-    prompt = f"""다음 광고 성과 데이터를 분석하여 한국어로 전일대비 GAP 분석 코멘트를 작성해주세요.
-    데이터: {json.dumps(kpi_data, ensure_ascii=False)}
-    규칙: 추측하지 말고 데이터에 기반한 분석만 작성. 마케팅 전문 용어 사용."""
+    # 2. Generate commentary via Bedrock (write in the target users' language)
+    prompt = f"""Analyze the following ad-performance data and write a day-over-day GAP analysis comment.
+    Data: {json.dumps(kpi_data, ensure_ascii=False)}
+    Rules: do not speculate; base the analysis only on the data. Use marketing terminology."""
 
     response = bedrock.invoke_model(
         modelId='anthropic.claude-sonnet-4-20250514',
@@ -137,11 +137,11 @@ def handler(event, context):
 
 > **Note:** `Narrative` is required and capped at 150000 chars — truncate Bedrock output before injecting. `UpdateDashboard` requires `Name` (max 2048 chars), so pass the existing dashboard name. The narrative-injection update is the same 3-call flow documented in `dashboard-patterns.md` §6 (update → permissions → publish); permissions are unchanged here so only update + publish are needed.
 
-### Prompt design tips (for Korean marketing commentary)
-- Include the customer's 마케팅 용어집 in the system prompt
-- Specify tone: "광고주 보고서 스타일, 객관적, 데이터 기반"
-- Include period context: "2026년 6월 7일 기준 전일(6/6) 대비 분석"
-- Request structured output: "요약 → GAP 원인 분석 → 권장 조치" format
+### Prompt design tips (for marketing commentary)
+- Include the customer's marketing glossary in the system prompt
+- Specify tone: "advertiser report style, objective, data-driven"
+- Include period context: "analysis as of 2026-06-07 vs. the prior day (6/6)"
+- Request structured output: "summary → GAP cause analysis → recommended actions" format
 
 ### Limitations
 - InsightVisual cannot render HTML/markdown — plain text only
