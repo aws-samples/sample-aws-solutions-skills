@@ -639,9 +639,9 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <div class="card teal">
       <h3>👥 팀·사용자 생성 (SSO 매핑)</h3>
       <ul style="margin-top:2px">
-        <li><b>자동 경로(기본)</b>: SSO 권한세트 로그인 → Token Lambda가 <code>team_alias</code> lookup-or-create</li>
-        <li><b>수동 경로</b>: UI <b>Teams → + New Team</b> 또는 <code>POST /team/new</code>로 선점 생성</li>
-        <li><code>team_alias</code>는 Lambda 상수와 정확히 일치해야 함 — 오타 시 별도 팀 생성됨</li>
+        <li><b>자동 경로(기본)</b>: SSO 권한세트 로그인 → Token Lambda가 권한세트명과 <b>동일한</b> <code>team_alias</code>로 lookup-or-create (1:1 무분기 매칭)</li>
+        <li><b>수동 경로</b>: UI <b>Teams → + New Team</b> 또는 <code>POST /team/new</code>로 선점 생성 — <code>team_alias</code>를 권한세트명과 동일하게 입력</li>
+        <li><code>team_alias</code>는 <b>권한세트명 자체</b>와 정확히 일치해야 함(Lambda 상수 아님) — 오타 시 의도한 팀이 아닌 별도 팀으로 조용히 연결됨</li>
       </ul>
     </div>
   </div>

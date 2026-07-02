@@ -70,44 +70,50 @@ flow before creating anything manually in the UI, so you don't fight the automat
 
 This is what actually provisions users/teams in this architecture, end to end:
 
-1. An operator provisions an IdC **permission set** per tier/org (e.g. `ClaudeCodeUser`, `ClaudeCodeEconomy`,
-   or org-named ones like `TeamResearch`) and assigns it to a **group** — see `sso-setup.md`.
+1. An operator provisions an IdC **permission set** per tier/org, **named identically to the LiteLLM team
+   it should map to** (e.g. permission set `ClaudeCodeEconomy` → team `ClaudeCodeEconomy`, or an org-named
+   one like `TeamResearch` → team `TeamResearch`) and assigns it to a **group** — see `sso-setup.md`.
 2. A developer runs `aws sso login` and calls the gateway. The Token Lambda (`lambda/token-service/handler.py`)
-   parses the permission set out of the signed SSO ARN and calls **lookup-or-create** against LiteLLM:
+   parses the permission set out of the signed SSO ARN and calls **lookup-or-create** against LiteLLM,
+   **using the permission set name directly as the `team_alias`** (no separate mapping table, no per-org
+   branch in code):
    - `GET /team/list` → does a team with this `team_alias` already exist?
-   - If not: `POST /team/new` with `team_alias`, optional `models` (allowlist) and `max_budget` (cap), and the
+   - If not: `POST /team/new` with `team_alias` (= the permission set name), optional `models` (allowlist)
+     and `max_budget` (cap) seeded from `TIER_CONFIG` if this permission set has an entry there, and the
      `object_permission.mcp_access_groups` for web-search access.
 3. `POST /key/generate` issues the developer a **virtual key** scoped to that `team_id` — this is the
    "user" that shows up in the Admin UI's Keys/Usage views.
 
-So: **creating a new tier/org = provisioning a new SSO permission set + group**, not clicking "New Team" in
-the UI first. The team is created lazily on that group's first login. Full worked example (constants to
-edit, exact code path): `shared/examples/economy-tiering.md`.
+So: **creating a new tier/org = provisioning a new SSO permission set + group named the same as the team you
+want**, not clicking "New Team" in the UI first (though you can — see §2.2). The team is created lazily on
+that group's first login if it doesn't already exist. Full worked example: `shared/examples/economy-tiering.md`.
 
 ### 2.2 Creating a team manually (UI or API) — when you need it upfront
 
 Useful when you want the team to exist (with its budget/allowlist already set) **before** the first user
 logs in, e.g. to pre-configure billing separation.
 
-**Admin UI**: `/ui/` → **Teams** → **+ New Team** → set `Team Alias` (must match the alias the Token Lambda
-will look up — keep it in sync with `STANDARD_TEAM_ALIAS`/`ECONOMY_TEAM_ALIAS`-style constants in
-`lambda/token-service/handler.py`), optionally set `Models` (allowlist) and `Max Budget`.
+**Admin UI**: `/ui/` → **Teams** → **+ New Team** → set `Team Alias` **to exactly the permission set name**
+the group will log in with (this is the *only* thing that connects IdC identity to this team — there is no
+Lambda-side constant to keep in sync), optionally set `Models` (allowlist) and `Max Budget`.
 
 **API equivalent**:
 ```bash
 curl -s -X POST "$LITELLM_BASE/team/new" \
   -H "Authorization: Bearer $MASTER_KEY" -H "Content-Type: application/json" \
   -d '{
-    "team_alias": "team-research",
+    "team_alias": "TeamResearch",
     "models": ["claude-sonnet-4-6", "claude-haiku-4-5"],
     "max_budget": 200.0,
     "object_permission": {"mcp_access_groups": ["default_tools"]}
   }' | jq .
 ```
 
-> The `team_alias` string is the join key between IdC and LiteLLM — a typo here silently creates a second,
+> The `team_alias` string **is** the permission set name — it's the *only* join key between IdC and LiteLLM
+> (no Lambda-side constant, no separate mapping table). A typo in either one silently creates/resolves an
 > unrelated team instead of erroring. If a developer's key isn't getting the budget/allowlist you expect,
-> the first thing to check is whether `_resolve_team_id`'s alias matches exactly (`GET /team/list`).
+> the first thing to check is whether the team you set up in the Admin UI (`GET /team/list`) has a
+> `team_alias` that matches their IdC permission set name **exactly**.
 
 ### 2.3 Creating an individual key/user manually (rare — SSO users never need this)
 
@@ -221,11 +227,10 @@ dropdown for the exact enum it supports).
 ### 4.2 Per-key budget (per-individual cap, or a one-off override)
 
 If the governance model requires each person to have their *own* $N cap (not a shared team pool), set
-`max_budget` on the **key** at issuance time. This is already wired in the reference Token Lambda —
-`ECONOMY_MAX_BUDGET_USD` is passed as the **team's** `max_budget` in the reference implementation
-(`economy-tiering.md`), which makes it a **shared pool** across the team. If you need strict per-person caps
-instead, set `max_budget` in the `body` passed to `POST /key/generate` in `_create_virtual_key` (per-key,
-not per-team):
+`max_budget` on the **key** at issuance time. The reference Token Lambda's `TIER_CONFIG` seeds `max_budget`
+onto the **team** (a shared pool across everyone in it) when that team is first created — see
+`economy-tiering.md`. If you need strict per-person caps instead, set `max_budget` in the `body` passed to
+`POST /key/generate` in `_create_virtual_key` (per-key, not per-team):
 
 ```bash
 curl -s -X POST "$LITELLM_BASE/key/generate" \
