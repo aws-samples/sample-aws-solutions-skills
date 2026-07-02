@@ -263,6 +263,67 @@ scheduled `team/info`/`key/info` poll) if you want advance warning before the ha
 
 ---
 
+---
+
+## 5. Four common Admin UI tasks (quick reference)
+
+Condensed operator checklist for the four tasks asked about most — each maps 1:1 to an Admin UI screen and
+an official LiteLLM doc page. Use these when you just need the click-path, not the full design rationale in
+§1–4 above.
+
+### 5.1 Model setup (including Bedrock)
+
+**Admin UI** → **Models** → **Add Model** → fill in `model_name` and `litellm_params`.
+
+- General model management (add/edit/delete, `model_name` vs. `litellm_params.model` distinction):
+  <https://docs.litellm.ai/docs/proxy/model_management>
+- Bedrock-specific parameters (model ID prefix e.g. `bedrock/`, AWS region, AWS credentials/role):
+  <https://docs.litellm.ai/docs/providers/bedrock>
+
+> In this gateway, Bedrock auth is via the ECS **Task Role** (SigV4) — do not paste static AWS access
+> keys into `litellm_params` here; leave credential fields empty so LiteLLM falls back to the task's IAM
+> role, consistent with Hard Constraint #6 (tokenless model auth). Only `model_name`/`model`/`aws_region_name`
+> need to be set per the Bedrock docs above.
+
+### 5.2 Per-user budget
+
+**Admin UI** → **Internal Users** → select a user → set `max_budget` and `budget_duration`.
+
+- <https://docs.litellm.ai/docs/proxy/users>
+
+> "Internal Users" here is a **different scoping level than Team budgets** (§4 above): a Team `max_budget`
+> caps everyone on that team combined, while an Internal User budget caps that one login/key regardless of
+> team. Pick whichever matches the governance model you actually want — see the "team pool vs. per-person
+> cap" callout in §4.2.
+
+### 5.3 Viewing user prompts (request/response bodies)
+
+**Admin UI** → **Logs** → Settings (gear icon) → enable **"Store Prompts in Spend Logs"** → **Save**.
+No restart required — takes effect on the next request.
+
+- Spend-log prompt storage setting: <https://docs.litellm.ai/docs/proxy/ui_spend_log_settings>
+- Logs UI in general (filtering, drill-down): <https://docs.litellm.ai/docs/proxy/ui_logs>
+
+> This stores the raw prompt/response **in LiteLLM's own DB** (Aurora, via the spend logs table) — it's a
+> lighter-weight alternative to standing up Langfuse (§3.2) when you only need occasional prompt inspection
+> rather than full distributed tracing. Treat this the same as Langfuse's raw-content warning: it may
+> capture sensitive customer content, so scope Admin UI access accordingly once enabled.
+
+### 5.4 Per-customer usage
+
+**Admin UI** → **Usage** → **Customer Usage** tab → view spend by customer, daily spend trend, and
+model-mix breakdown per customer.
+
+- Customer usage tab: <https://docs.litellm.ai/docs/proxy/customer_usage>
+- Spend tracking in general (how LiteLLM computes/attributes cost): <https://docs.litellm.ai/docs/proxy/cost_tracking>
+
+> "Customer" is a LiteLLM concept distinct from Team/Internal User — it's typically used when the gateway's
+> caller is itself multi-tenant (e.g. billing an end-customer of the SSO'd developer, not the developer
+> directly). If this gateway's deployment only tracks SSO users/teams and never sets a `customer_id` on
+> requests, this tab will show no data — that's expected, not a bug.
+
+---
+
 ## Related documents
 
 - `shared/reference/sso-setup.md` — provisioning the IdC permission sets/groups that drive team creation

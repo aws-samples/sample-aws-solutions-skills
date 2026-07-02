@@ -106,3 +106,57 @@ Then the key helper (`apiKeyHelper`/`auth.command`) fetches the virtual key auto
 - **Password activation is console-only** — plan a human handoff step; full automation isn't possible for the built-in directory.
 - **Teams**: assign a **group** (PrincipalType=GROUP) instead of per-user assignments — scales and is easier to revoke.
 - **Non-SSO callers are rejected (403)** by design — verify with `aws sts get-caller-identity` that the assumed role is `AWSReservedSSO_...` before debugging the gateway.
+
+## End-to-end: new user/group → LiteLLM permissions + budget
+
+**The question that matters for an admin: once the gateway is deployed, can a new org/team be onboarded
+entirely through IdC + LiteLLM Admin UI clicks, or does someone have to edit and redeploy Lambda code every
+time?** With the reference `handler.py` (`economy-tiering.md`) as shipped, it's the latter — every new
+tier/org means adding a Python constant and redeploying. That is **not required by LiteLLM or IAM Identity
+Center** — it's just how the sample code happens to branch. Set it up the way described below instead, and
+onboarding becomes pure console work with **zero code changes per new org**, forever, after one small
+one-time edit.
+
+### Recommended: console-only onboarding (one-time code edit, then never again)
+
+Make the permission-set name **be** the `team_alias` (e.g. permission set `team-research` → LiteLLM team
+`team-research`), and change `_resolve_team_id` **once** to always call
+`_ensure_team(endpoint, master_key, permission_set, models=None, max_budget=None)` — no `if permission_set
+in {...}` branching, no per-tier constant. After that one edit + redeploy, every future onboarding is:
+
+1. **IdC console → Users → Add user** (skip if the person already has an IdC identity).
+2. **IdC console → Groups → Create group** matching the team name you want (e.g. `team-research`) →
+   **Add users to group**.
+3. **IdC console → Permission sets → Create**, name it identically to the group/team (no underscore) →
+   attach the `execute-api:Invoke`-only inline policy → **AWS accounts → assign** it to the group.
+4. **LiteLLM Admin UI → Teams → + New Team**, `team_alias` = the same name → set `Models` (allowlist) and
+   `Max Budget`/`Budget Duration` right there in the UI. (Or skip this and let the Lambda auto-create the
+   team with no restrictions on first login, then edit budget/models in the UI afterward.)
+5. **IdC console → Reset password** for the new user (console-only, no API) → user runs `aws sso login`.
+
+None of that touches `handler.py` again. Raising a team's budget, changing its model allowlist, or adding
+another org later is **also** pure UI (`Teams` → edit) or IdC console work — an admin can do all of it
+without a developer.
+
+### If you don't make this change: what you're signing up for
+
+The as-shipped `economy-tiering.md` code branches on specific permission-set names
+(`ECONOMY_PERMISSION_SETS = {"ClaudeCodeEconomy"}`) with their `models`/`max_budget` written directly into
+`handler.py`. Every new org/tier means: edit the constant → `cdk deploy` (or redeploy the Lambda) → only
+then does the console-side provisioning above take effect. This requires someone with repo access and
+deploy permissions, not just IdC/LiteLLM admin access — plan for that dependency if you keep the sample
+code as-is.
+
+(A third option — an external DynamoDB/SSM mapping table instead of in-code constants — also removes the
+per-onboarding redeploy, at the cost of extra infrastructure to build once. Only worth it over the
+recommended approach above if you need an audit trail of tier assignments outside of IdC/LiteLLM
+themselves.)
+
+The LiteLLM team itself can be pre-created via Admin UI (**Teams → + New Team**) or left to auto-create on
+the group's first login — see `shared/reference/litellm-admin-guide.md` §2.
+
+Whichever path you're on, the most common failure mode is the same: the IdC side looks fully provisioned
+(user, group, permission set, account assignment all correct), but calls silently land in the
+**default/standard team** with no budget cap or model restriction, because nothing told `_resolve_team_id`
+how to route that permission set. Verify with: `aws sso login` → first gateway call → Admin UI **Teams**
+shows the expected `team_id`/`max_budget` for that login.

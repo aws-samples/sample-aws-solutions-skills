@@ -128,21 +128,33 @@ RESPONSE_KEY = os.environ.get("RESPONSE_KEY", "api_key")
 #      A teamless key can only use allow_all_keys servers, so MCP scope control does not work.
 MCP_ACCESS_GROUPS = ["default_tools"]
 
-# Tier routing by SSO permission set → LiteLLM team.
-#   - Standard: all models, no extra budget cap.
-#   - Economy:  cheaper models only (GPT-5.4 instead of 5.5; no Opus/Fable) + a
-#     budget cap. Admins assign the economy permission set in IAM Identity Center
-#     to economy users/orgs. Both tiers inherit the "default_tools" MCP group.
-# WHY: the "tier" is decided by the SSO permission set name. Since permission set assignment
-#      is managed by an admin in IAM Identity Center, the model allowlist/budget policy is
-#      bound 1:1 with the identity system (IdC) — no separate user management at the gateway.
-STANDARD_TEAM_ALIAS = "sso-users"
-ECONOMY_TEAM_ALIAS = "sso-economy"
-# SSO permission set name(s) routed to the economy tier (edit to match your IdC).
-ECONOMY_PERMISSION_SETS = {"ClaudeCodeEconomy"}
-# Economy allowlist excludes the priciest models (gpt-5.5, claude-opus-4-8, claude-fable-5).
-ECONOMY_MODELS = ["gpt-5.4", "claude-sonnet-4-6", "claude-haiku-4-5"]
-ECONOMY_MAX_BUDGET_USD = 50.0
+# Tier routing: the SSO permission set name *is* the LiteLLM team_alias, 1:1, no
+# code-side branching. Onboarding a new org/team is therefore pure console work:
+#   1) IdC: create a group + a permission set named identically to the team you want
+#      (e.g. permission set "team-research" -> LiteLLM team "team-research")
+#   2) LiteLLM Admin UI: Teams -> + New Team, team_alias = the same name, set Models
+#      (allowlist) + Max Budget/Budget Duration right there in the UI
+#   3) assign the group to the account with that permission set
+# No Lambda edit, no redeploy, for step 1-3 above -- ever. `_resolve_team_id` below
+# never branches on a specific permission-set name; it always resolves 1:1.
+#
+# WHY (identity-bound governance, zero-touch onboarding): tier assignment is owned
+#      entirely by IAM Identity Center (who's in which group) + the LiteLLM Admin UI
+#      (what that team's models/budget are). The Lambda is just plumbing between them
+#      and never needs to know org/tier names in advance.
+#
+# TIER_CONFIG is OPTIONAL and only matters for the very first time a given team is
+# auto-created (i.e. before anyone has set it up via the Admin UI yet): if a
+# permission_set has an entry here, the team is created with that initial
+# models/max_budget instead of "no restriction". This exists purely to let this
+# skill's Discovery phase seed a couple of starter tiers (e.g. "economy" for interns)
+# without requiring the operator to click through the UI before the first login.
+# Once the team exists, every future change to its budget/allowlist happens in the
+# Admin UI (Teams -> edit) -- this dict is never read again for that team_alias.
+TIER_CONFIG: dict[str, dict[str, Any]] = {
+    # Example seeded by Discovery answers -- delete or add entries as needed.
+    # "team-economy": {"models": ["gpt-5.4", "claude-sonnet-4-6", "claude-haiku-4-5"], "max_budget": 50.0},
+}
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -292,7 +304,7 @@ def _create_virtual_key(
         #      which SSO identity/account/permission set made the call (audit trail).
         "metadata": {"sso_arn": user_arn, "account": account, "permission_set": permission_set},
     }
-    # Assign the key to its tier team (standard/economy) so it inherits the team's
+    # Assign the key to its team (same name as the permission set) so it inherits the
     # MCP access group, model allowlist, and budget. Scoped MCP permissions require
     # team membership in LiteLLM; failure to resolve the team degrades gracefully
     # (key is still issued, just without team scoping).
@@ -306,15 +318,19 @@ def _create_virtual_key(
 
 
 def _resolve_team_id(endpoint: str, master_key: str, permission_set: str) -> Optional[str]:
-    """Map the caller's SSO permission set to a tier team (lookup-or-create)."""
-    # WHY: if the permission set is in the economy set, route to the economy team (model restriction + budget cap),
-    #      otherwise to the standard team (all models, no extra budget cap).
-    if permission_set in ECONOMY_PERMISSION_SETS:
-        return _ensure_team(
-            endpoint, master_key, ECONOMY_TEAM_ALIAS,
-            models=ECONOMY_MODELS, max_budget=ECONOMY_MAX_BUDGET_USD,
-        )
-    return _ensure_team(endpoint, master_key, STANDARD_TEAM_ALIAS, models=None, max_budget=None)
+    """Map the caller's SSO permission set directly to a same-named LiteLLM team (lookup-or-create).
+
+    No branching on specific permission-set names: the permission set IS the team_alias.
+    This is what makes future onboarding console-only (IdC group/permission-set + LiteLLM
+    Admin UI team) instead of a Lambda code change + redeploy. TIER_CONFIG only supplies an
+    initial models/max_budget if this exact team doesn't exist yet (first-ever login for it);
+    once a human has touched the team in the Admin UI, this dict is irrelevant to it.
+    """
+    seed = TIER_CONFIG.get(permission_set, {})
+    return _ensure_team(
+        endpoint, master_key, permission_set,
+        models=seed.get("models"), max_budget=seed.get("max_budget"),
+    )
 
 
 def _ensure_team(
@@ -343,7 +359,8 @@ def _ensure_team(
         logger.warning("team lookup failed for alias=%s", alias, exc_info=True)
     # 2. Create it if missing.
     # WHY: create the team if absent. Grant the MCP scope via object_permission.mcp_access_groups,
-    #      and add models/max_budget only for economy (if None, no constraint is applied to the key).
+    #      and add models/max_budget only if TIER_CONFIG seeded them for this team's first creation
+    #      (if None, no constraint is applied — an admin can still add them later via the Admin UI).
     try:
         new_team = {"team_alias": alias, "object_permission": {"mcp_access_groups": MCP_ACCESS_GROUPS}}
         if models is not None:
@@ -395,7 +412,8 @@ def _resp(status: int, body: dict[str, Any]) -> dict[str, Any]:
 - [ ] The `_SSO_ARN_RE` regex enforces `AWSReservedSSO_` → non-SSO gets **403**.
 - [ ] DynamoDB single-item cache: `pk=USER#<username>`, `sk=VIRTUAL_KEY`, `ttl`.
 - [ ] The master key is from Secrets Manager (`LITELLM_MASTER_KEY_ARN`), the endpoint from SSM (`LITELLM_ENDPOINT_SSM`).
-- [ ] permission set → team (standard/economy) mapping inherits the **model allowlist + budget cap + MCP access group**.
+- [ ] `permission_set` maps **1:1, unbranched** to a same-named LiteLLM team — no `if permission_set in {...}` tier logic in code. `TIER_CONFIG` only seeds a first-time team's initial `models`/`max_budget`; it is not consulted again once the team exists.
+- [ ] Onboarding a new org/tier is IdC (group + permission set) + LiteLLM Admin UI (Teams → edit) only — regenerating/redeploying this Lambda is never part of the steady-state onboarding flow.
 - [ ] Even if team resolution fails, the key is still issued (**graceful degradation**).
 - [ ] A `key_alias` collision (400) is handled idempotently by recovering the existing key.
 
@@ -405,10 +423,10 @@ def _resp(status: int, body: dict[str, Any]) -> dict[str, Any]:
 - **A cache read failure = treated as a miss**: `_get_cached_key` also swallows exceptions and returns `None`. This is intentional so that auth does not depend on cache availability, but if the cache dies, the LiteLLM load can spike.
 - **`urlopen` timeout=10 is fixed**: if LiteLLM (ALB→ECS) is slow, it cuts off after 10 seconds. With a cold start + team creation overlapping, a single request accumulates multiple calls `team/list` → `team/new` → `key/generate`, so set the Lambda timeout generously (e.g. 30s+).
 - **SSM/Secrets endpoint reachability**: if the Lambda is inside a VPC, there must be a path (VPC Endpoint or NAT) to SSM/Secrets Manager/DynamoDB. Without it, `get_parameter`/`get_secret_value` will hang on timeout. (The reference provides Interface Endpoints in the Network Stack.)
-- **Regex group extraction trap**: if the permission set name contains `_`, `([^_/]+)` cuts off at the first `_`. If you use underscores in IdC permission set names, `ECONOMY_PERMISSION_SETS` matching can go wrong, so mind the naming convention.
+- **Regex group extraction trap, now doubly important**: if the permission set name contains `_`, `([^_/]+)` cuts off at the first `_`. Since the permission set name **is** the `team_alias` now (no separate mapping to catch a typo/truncation against), an underscore silently creates/resolves the wrong team with no error. Enforce no-underscore permission-set names at IdC-provisioning time (see `sso-setup.md` Gotchas), not just as an internal-code convention.
 - **Master key format compatibility**: parsing diverges depending on whether the secret is `{"key": "..."}` JSON or plaintext. If you change the secret creation format in CDK, verify this handler's parsing along with it.
 - **team/list response schema drift**: on a LiteLLM upgrade, the response may change among `list`/`{"teams"}`/`{"data"}`. Defensive parsing is in place, but if a new format appears, lookup can silently fail (→ create attempted every time → possible 400), so validate on version bumps.
-- **Economy policy depends on IdC**: `ECONOMY_PERMISSION_SETS`/`ECONOMY_MODELS`/`ECONOMY_MAX_BUDGET_USD` are code constants. They must exactly match the actual permission set names in IAM Identity Center for economy routing to work.
+- **`TIER_CONFIG` is a one-time seed, not an allowlist**: it is only consulted the moment a team is auto-created for the first time. If an operator later changes a team's budget/models in the Admin UI and then someone edits `TIER_CONFIG` for the same key expecting it to take effect, it won't — the team already exists, so `_ensure_team`'s lookup branch returns early. This is by design (Admin UI is the source of truth post-creation) but is a common point of confusion; document it where `TIER_CONFIG` is edited.
 
 ---
 

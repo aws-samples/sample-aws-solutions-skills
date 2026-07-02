@@ -146,7 +146,7 @@
       <span class="pill">LiteLLM</span><span class="pill">Amazon Bedrock</span><span class="pill">AgentCore</span>
       <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO · Guardrails · Data Residency</span>
     </div>
-    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 17 슬라이드</p>
+    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 19 슬라이드</p>
   </div>
 </section>
 
@@ -625,7 +625,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
 
 <!-- 15 LITELLM ADMIN OPS -->
 <section class="slide">
-  <div class="kicker">배포 후 운영 · LiteLLM Admin Ops</div>
+  <div class="kicker">배포 후 운영 · LiteLLM Admin Ops (1/2)</div>
   <h2>배포 이후 <span class="u">운영자</span>가 하는 일</h2>
   <div class="two">
     <div class="card gold">
@@ -645,48 +645,65 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
       </ul>
     </div>
   </div>
-  <div class="grid g3" style="margin-top:14px;flex:1;min-height:0">
-    <div class="shot">
-      <div class="shot-head">📜 <h3>로그·트레이스 3계층</h3></div>
-      <div class="shot-body">
-        <img src="screenshots/litellm-usage-logs.png" alt="LiteLLM Usage 화면 캡처"
-             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
-          <span class="placeholder-icon">🖼️</span>
-          <span class="placeholder-txt">LiteLLM UI → Langfuse → CloudWatch<br>3계층 로그 화면 캡처 삽입 위치</span>
-          <span class="placeholder-path">screenshots/litellm-usage-logs.png</span>
-        </div>
-      </div>
-    </div>
-    <div class="shot">
-      <div class="shot-head">💰 <h3>예산(budget) 적용</h3></div>
-      <div class="shot-body">
-        <img src="screenshots/litellm-team-budget.png" alt="LiteLLM Team budget 설정 캡처"
-             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
-          <span class="placeholder-icon">🖼️</span>
-          <span class="placeholder-txt">Teams/Virtual Keys → Max Budget<br>설정 화면 캡처 삽입 위치</span>
-          <span class="placeholder-path">screenshots/litellm-team-budget.png</span>
-        </div>
-      </div>
-    </div>
-    <div class="shot">
-      <div class="shot-head">🔎 <h3>현재 사용량 확인</h3></div>
-      <div class="shot-body">
-        <img src="screenshots/litellm-spend-view.png" alt="LiteLLM spend 확인 캡처"
-             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
-          <span class="placeholder-icon">🖼️</span>
-          <span class="placeholder-txt">Teams/Virtual Keys 목록의<br>spend vs max_budget 화면 캡처 삽입 위치</span>
-          <span class="placeholder-path">screenshots/litellm-spend-view.png</span>
-        </div>
-      </div>
-    </div>
-  </div>
-  <p class="src">근거: shared/reference/litellm-admin-guide.md · Enterprise 라이선스 불필요(Admin UI·팀·budget 모두 OSS 기능) · 캡처 이미지는 <code>screenshots/</code>에 넣으면 자동 표시(없으면 placeholder)</p>
+  <p class="src" style="margin-top:14px">이후 자주 쓰는 4가지 Admin UI 작업(모델 설정·예산·프롬프트 확인·사용량)은 다음 슬라이드 · 근거: shared/reference/litellm-admin-guide.md</p>
 </section>
 
-<!-- 16 REAL PROOF -->
+<!-- 16 LITELLM ADMIN OPS TASKS -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · LiteLLM Admin Ops (2/2)</div>
+  <h2>자주 쓰는 <span class="u">4가지 Admin UI 작업</span></h2>
+  <div class="grid g2" style="flex:1;min-height:0;gap:12px">
+    <div class="card gold">
+      <h3>1️⃣ 모델 설정 (Bedrock 포함)</h3>
+      <p style="margin:4px 0 8px">Admin UI → <b>Models</b> → <b>Add Model</b> → <code>model_name</code>, <code>litellm_params</code> 입력</p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Model 관리: <a href="https://docs.litellm.ai/docs/proxy/model_management" style="color:#9af5d8">docs.litellm.ai/docs/proxy/model_management</a></p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Bedrock 전용 파라미터(model prefix, AWS credentials 등): <a href="https://docs.litellm.ai/docs/providers/bedrock" style="color:#9af5d8">docs.litellm.ai/docs/providers/bedrock</a></p>
+    </div>
+    <div class="card teal">
+      <h3>2️⃣ 사용자별 예산 지정</h3>
+      <p style="margin:4px 0 8px">Admin UI → <b>Internal Users</b> → 사용자 선택 → <code>max_budget</code>, <code>budget_duration</code> 설정</p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">가이드: <a href="https://docs.litellm.ai/docs/proxy/users" style="color:#9af5d8">docs.litellm.ai/docs/proxy/users</a></p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Team budget(공유 pool)과는 다른 스코프 — 개인별 cap이 필요하면 이 경로 사용</p>
+    </div>
+    <div class="card pink">
+      <h3>3️⃣ 사용자 프롬프트(요청/응답) 확인</h3>
+      <p style="margin:4px 0 8px">Admin UI → <b>Logs</b> → Settings(⚙️) → <b>"Store Prompts in Spend Logs"</b> 활성화 → Save <span style="color:#9af5d8">(재시작 불필요)</span></p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">설정: <a href="https://docs.litellm.ai/docs/proxy/ui_spend_log_settings" style="color:#9af5d8">docs.litellm.ai/docs/proxy/ui_spend_log_settings</a></p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">로그 조회 전반: <a href="https://docs.litellm.ai/docs/proxy/ui_logs" style="color:#9af5d8">docs.litellm.ai/docs/proxy/ui_logs</a></p>
+    </div>
+    <div class="card gold">
+      <h3>4️⃣ 사용자별 사용량 확인</h3>
+      <p style="margin:4px 0 8px">Admin UI → <b>Usage</b> → <b>Customer Usage</b> 탭 → 고객별 spend, 일별 추이, 모델별 사용 비중 확인</p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Customer Usage: <a href="https://docs.litellm.ai/docs/proxy/customer_usage" style="color:#9af5d8">docs.litellm.ai/docs/proxy/customer_usage</a></p>
+      <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Spend Tracking 전반: <a href="https://docs.litellm.ai/docs/proxy/cost_tracking" style="color:#9af5d8">docs.litellm.ai/docs/proxy/cost_tracking</a></p>
+    </div>
+  </div>
+  <p class="src">근거: shared/reference/litellm-admin-guide.md §5 · Enterprise 라이선스 불필요(Admin UI·팀·budget 모두 OSS 기능)</p>
+</section>
+
+<!-- 17 SSO USER GROUP LITELLM MAPPING -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · SSO 사용자·그룹 → LiteLLM 권한/예산</div>
+  <h2>새 사용자·그룹 온보딩 — <span class="u">IdC + Admin UI만으로 반복 가능</span></h2>
+  <div class="card teal" style="margin-bottom:10px">
+    <h3>✅ 관리자가 알아야 할 결론</h3>
+    <p style="margin:2px 0"><b>최초 1회</b>만 코드를 살짝 손보면(권한세트명 = LiteLLM <code>team_alias</code>로 통일), 그 이후 새 조직·팀이 생겨도 <b>개발자 없이 IdC 콘솔 + LiteLLM Admin UI 클릭만으로</b> 온보딩·예산변경·모델 제한이 끝납니다. (예시 코드 그대로 쓰면 매번 Python 상수를 고치고 재배포해야 함 — 이건 LiteLLM/IAM 제약이 아니라 예시 코드의 설계일 뿐이라 바꿀 수 있습니다.)</p>
+  </div>
+  <div class="timeline" style="flex:none">
+    <div class="tl"><div class="n">1</div><div><div class="b">IdC에서 사용자 추가</div><div class="d">IAM Identity Center 콘솔 → <b>Users → Add user</b> — 이미 있는 사용자면 스킵</div></div><div class="gv">사용자 생성</div></div>
+    <div class="tl"><div class="n">2</div><div><div class="b">IdC에서 그룹 추가 + 사용자 배정</div><div class="d">IdC 콘솔 → <b>Groups → Create group</b> (팀명 그대로, 예: <code>team-research</code>) → <b>Add users to group</b></div></div><div class="gv">그룹 구성</div></div>
+    <div class="tl"><div class="n">3</div><div><div class="b">권한세트 생성 + 계정 할당</div><div class="d">IdC 콘솔 → <b>Permission sets → Create</b>, <b>그룹과 동일한 이름</b>(밑줄 금지) → <code>execute-api:Invoke</code>-only 정책 → <b>AWS accounts</b>에서 그룹에 배정</div></div><div class="gv">IAM 매핑</div></div>
+    <div class="tl"><div class="n">4</div><div><div class="b">LiteLLM Admin UI에서 팀 생성 + 예산·모델 설정</div><div class="d">Admin UI → <b>Teams → + New Team</b>, <code>team_alias</code> = 3번과 동일한 이름 → <code>Models</code>(allowlist), <code>Max Budget</code>/<code>Budget Duration</code>을 <b>화면에서 직접 입력</b> — 코드/배포 없음</div></div><div class="gv">권한·예산 확정</div></div>
+    <div class="tl"><div class="n">5</div><div><div class="b">비밀번호 활성화 + 검증</div><div class="d">IdC 콘솔(전용) → <b>Reset password</b> → 사용자가 <code>aws sso login</code> 후 첫 호출 시 Admin UI <b>Teams</b>에서 반영 확인</div></div><div class="gv">활성화·확인</div></div>
+  </div>
+  <div class="card gold" style="margin-top:10px">
+    <h3>🔧 이걸 가능하게 하는 최초 1회 코드 수정</h3>
+    <p style="margin:2px 0"><code>lambda/token-service/handler.py</code>의 <code>_resolve_team_id</code>에서 권한세트명별 if/else 분기(<code>ECONOMY_PERMISSION_SETS</code> 등)를 지우고, <b>항상</b> <code>_ensure_team(endpoint, master_key, permission_set)</code>만 호출하도록 한 줄로 바꿉니다. 이후로는 이 파일을 다시 열 일이 없습니다 — 예시 코드(<code>economy-tiering.md</code>)처럼 상수를 그대로 쓰면, 새 조직마다 코드 수정+재배포가 필요해 개발자가 매번 개입해야 합니다.</p>
+  </div>
+  <p class="src">잊지 말 것: 4번을 건너뛰면 조용히 default team으로 빠져 예산·allowlist가 적용 안 됨 · 근거: shared/reference/sso-setup.md · shared/reference/litellm-admin-guide.md §2</p>
+</section>
+
+<!-- 18 REAL PROOF -->
 <section class="slide">
   <div class="kicker">검증된 자산 · 실제 배포 결과</div>
   <h2>레퍼런스는 <span class="u">실제 배포·검증</span>됨</h2>
@@ -709,7 +726,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   <p class="src">실 배포에서 발견한 이슈(리전·UI 리다이렉트·키 레이스)는 모두 Skill에 역반영</p>
 </section>
 
-<!-- 17 CLOSING -->
+<!-- 19 CLOSING -->
 <section class="slide">
   <div style="margin:auto 0;text-align:center">
     <div class="kicker" style="margin:0 auto 16px">시작하기</div>
@@ -740,7 +757,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   <div class="brand"><b>LLM Gateway Governance</b> · AWS Solution Skill</div>
   <div class="nav">
     <button onclick="go(cur-1)">← 이전</button>
-    <span class="count" id="count">1 / 17</span>
+    <span class="count" id="count">1 / 19</span>
     <button onclick="go(cur+1)">다음 →</button>
   </div>
 </footer>
