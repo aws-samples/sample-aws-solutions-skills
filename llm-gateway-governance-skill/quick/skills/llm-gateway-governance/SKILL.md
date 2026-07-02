@@ -35,11 +35,13 @@ not, which models, which tiers, **which region**, web search on/off).
 
 Read these before generating. All real knowledge lives in `shared/`:
 
+- `shared/reference/prerequisites.md` — **check before Phase 1**: local tooling (Docker, Node, CDK CLI, AWS CLI), AWS account access/IAM, Bedrock model access, IdC readiness, custom-domain/Route53 needs
 - `shared/reference/architecture.md` — the **11-stack** architecture, request lifecycle, and the "why"
 - `shared/reference/decision-tree.md` — map Discovery answers → `config/dev.json` + stack choices (region, web search, Mantle)
 - `shared/reference/aws-services.md` — service/model catalog (verify volatile IDs via MCP)
 - `shared/reference/constraints.md` — failure modes & gotchas (bootstrap, CFR4, Mantle guardrail, secrets, AgentCore web search, Mantle peering, Marketplace, region)
 - `shared/reference/sso-setup.md` — IAM Identity Center Discovery + provisioning + the generated `config.sso` block & AuthStack outputs
+- `shared/reference/litellm-admin-guide.md` — **post-deploy operations**: Admin UI login, creating teams/users (SSO permission set → team mapping), checking logs/traces (LiteLLM UI, Langfuse, CloudWatch), applying per-team/per-key budgets
 - `shared/patterns/cdk-stacks.md` — full CDK source for the platform stacks + interfaces + config validation
 - `shared/patterns/agentcore-websearch.md` — **AgentCore Web Search gateway** stack (Gateway + built-in `web-search` connector) + LiteLLM wiring (replaces Tavily)
 - `shared/patterns/mantle-peering.md` — **Bedrock Mantle in us-east-1 via cross-region VPC peering** (MantleNetworkStack + MantlePeeringRoutesStack)
@@ -51,6 +53,7 @@ Read these before generating. All real knowledge lives in `shared/`:
 ## Workflow
 
 ### Phase 1: Discovery (ask only what you don't know)
+0. **Prerequisites check** — before asking anything else, confirm the operator has what `shared/reference/prerequisites.md` lists: Docker daemon running, Node/CDK CLI/AWS CLI v2 installed, deploy access to the target account, Bedrock model access requested (gateway region for Claude, us-east-1 for GPT-5.x/Mantle), and IdC enabled (required for the SSO path — see #6). Surface any gap now rather than discovering it mid-deploy.
 1. **Domain?** Custom domain + Route53 hosted zone, or domain-less (default `*.cloudfront.net`)?
 2. **Models?** Which Claude / GPT(Mantle) models? **Per-org governance (optional)**: which SSO groups/teams (typically named by org/team) should get their own budget cap + model allowlist? Map each org SSO group → its own LiteLLM team. ("economy/standard" is just one worked example of this pattern — not a required split.)
 3. **Observability?** Langfuse (prompt/trace level) on, or CloudWatch only?
@@ -95,6 +98,7 @@ After a successful deploy you **MUST** end by presenting a ready-to-paste setup 
 - **Region (no hardcode)**: the token helper derives the SigV4 signing region from the Token Service URL host, so it works in **any** deploy region with no edit.
 - **Quick admin test (no SSO)**: for a single operator, use the LiteLLM master key directly as the bearer against `https://<cloudfront-domain>/v1` (skips the Token Service).
 - **Verify**: `scripts/healthcheck.sh`, `GET /v1/models` (expect the configured aliases incl. GPT-5.x), and `GET /v1/mcp/tools` (expect the websearch tool).
+- **Hand the operator `shared/reference/litellm-admin-guide.md`** alongside the onboarding guide — it covers logging into the LiteLLM Admin UI (`/ui/`, master key from Secrets Manager), creating/adjusting teams (SSO permission set → team mapping), checking request logs/traces (LiteLLM UI, Langfuse if enabled, CloudWatch), and applying per-team/per-key budgets. This is what the operator needs *after* the first developer is onboarded, distinct from the one-time deploy steps above.
 
 ## Hard Constraints
 

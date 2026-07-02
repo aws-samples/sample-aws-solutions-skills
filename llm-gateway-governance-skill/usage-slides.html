@@ -108,6 +108,27 @@
   .flow{font-family:Consolas,monospace;font-size:14.5px;line-height:1.9;border-radius:14px;padding:16px 18px;color:#d4e3f7;overflow:auto;white-space:pre;
     background:linear-gradient(160deg,rgba(20,32,56,.85),rgba(12,20,38,.9));border:1px solid rgba(255,255,255,.10)}
   .flow b{color:var(--gold)} .flow .p{color:#c4b5fd}
+  /* ---- terminal window ---- */
+  .term{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.14);box-shadow:0 14px 34px rgba(0,0,0,.38);display:flex;flex-direction:column;min-height:0}
+  .term-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:linear-gradient(180deg,#2b2f3a,#20232c);border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0}
+  .term-dot{width:11px;height:11px;border-radius:50%}
+  .term-dot.r{background:#ff5f57} .term-dot.y{background:#febc2e} .term-dot.g{background:#28c840}
+  .term-title{margin-left:8px;font-size:12px;color:#9aa4b2;font-family:Consolas,monospace}
+  .term-body{background:#12141c;padding:12px 16px;overflow-y:auto;font-family:Consolas,monospace;font-size:12.8px;line-height:1.68;color:#d7e2f2;white-space:pre-wrap;word-break:break-word}
+  .term-body::-webkit-scrollbar{width:9px} .term-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:5px}
+  .term-body::-webkit-scrollbar-track{background:transparent}
+  .term-body .c{color:#6ee7c7} .term-body .cm{color:#6b7a92} .term-body .ok{color:#6ee7c7;font-weight:700} .term-body .prompt{color:#5aa6ff}
+  .term-body .h{color:#ffe08a;font-weight:700} .term-body .out{color:#aebfd6}
+  /* ---- screenshot placeholder ---- */
+  .shot{position:relative;border-radius:14px;overflow:hidden;border:1.5px dashed rgba(255,255,255,.22);
+    background:linear-gradient(160deg,rgba(255,255,255,.05),rgba(255,255,255,.015));display:flex;flex-direction:column;min-height:0}
+  .shot .shot-head{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.10);flex-shrink:0}
+  .shot .shot-head h3{margin:0;font-size:14px;color:#fff}
+  .shot .shot-body{flex:1;min-height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:10px;position:relative}
+  .shot .shot-body img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top}
+  .shot .placeholder-icon{font-size:30px;opacity:.5}
+  .shot .placeholder-txt{font-size:11.5px;color:#8aa0bd;text-align:center;line-height:1.5}
+  .shot .placeholder-path{font-family:Consolas,monospace;font-size:10.5px;color:#6ee7c7;background:rgba(0,0,0,.25);padding:3px 9px;border-radius:6px;margin-top:2px}
 </style>
 </head>
 <body>
@@ -119,13 +140,13 @@
   <div style="margin:auto 0">
     <div class="kicker">AWS Solution Skill · 사용 가이드</div>
     <h1>LLM Gateway Governance<br><span class="g-text">Skill</span></h1>
-    <p class="lead">AI(Claude Code · Kiro · Amazon Quick)와 대화하며, 사내 개발자용<br>
+    <p class="lead">AI(Kiro · Claude Code · Amazon Quick Desktop)와 대화하며, 사내 개발자용<br>
       <b style="color:#fff">LLM 거버넌스 게이트웨이</b>를 AWS에 구축하는 Skill</p>
     <div style="margin-top:16px">
       <span class="pill">LiteLLM</span><span class="pill">Amazon Bedrock</span><span class="pill">AgentCore</span>
       <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO · Guardrails · Data Residency</span>
     </div>
-    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 16 슬라이드</p>
+    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 17 슬라이드</p>
   </div>
 </section>
 
@@ -191,39 +212,112 @@
   </div>
 </section>
 
-<!-- 4 COMPONENT RESPONSIBILITIES -->
-<section class="slide">
-  <div class="kicker">각 컴포넌트가 하는 일</div>
-  <h2>11개 스택 · <span class="u">책임 분리</span></h2>
-  <div class="grid g4" style="flex:1">
-    <div class="card teal"><h3>Network</h3><p>VPC·3계층 서브넷, SG 체인(누가 누구에게 어떤 포트), Gateway/Interface 엔드포인트로 트래픽 VPC 내 유지</p></div>
-    <div class="card pink"><h3>Data</h3><p>Aurora Serverless v2(격리 서브넷·암호화). LiteLLM/Langfuse DB 시크릿 분리 + db-init 커스텀 리소스</p></div>
-    <div class="card gold"><h3>Guardrail</h3><p>Bedrock Guardrail 생성: 콘텐츠 필터·PII 차단·금지 토픽. LiteLLM이 ID/버전으로 참조</p></div>
-    <div class="card teal"><h3>LiteLLM</h3><p>게이트웨이 본체. ECS Fargate(Graviton)+내부 ALB. Task Role SigV4로 Bedrock 호출. master key 소유</p></div>
-    <div class="card pink"><h3>Langfuse <small style="color:#9bb0cc">(선택)</small></h3><p>프롬프트/트레이스 관측. 자가호스팅 ECS. <code>enableLangfuse</code> 토글</p></div>
-    <div class="card gold"><h3>Auth</h3><p>SSO Token Service. API GW(IAM)+Lambda가 SSO ARN 검증→가상키 발급, DynamoDB 캐시, 팀 매핑</p></div>
-    <div class="card teal"><h3>Observability</h3><p>CloudWatch 대시보드(ALB 요청/5xx, Token Service, Langfuse 링크)</p></div>
-    <div class="card"><h3>CDN</h3><p>CloudFront(VPC Origin→내부 ALB). 유일한 공개 진입점·TLS 종단. Location 재작성 함수</p></div>
-  </div>
-  <p class="src">cross-stack는 append-only <code>*Exports</code> 인터페이스 계약 + 런타임 SSM으로 결합(순환 의존성 0)</p>
-</section>
-
-<!-- 5 DATA FLOW -->
+<!-- 4 DATA FLOW -->
 <section class="slide">
   <div class="kicker">데이터 흐름 · 거버넌스 체크포인트</div>
   <h2>요청 1건이 거치는 <span class="u">통제 지점</span></h2>
-  <div class="timeline">
-    <div class="tl"><div class="n">1</div><div><div class="b">SSO 로그인 → 키 helper</div><div class="d">aws sso login 후 boto3 SigV4 서명(리전은 Token URL에서 파싱)</div></div><div class="gv">신원 확보</div></div>
-    <div class="tl"><div class="n">2</div><div><div class="b">API Gateway (IAM/SigV4)</div><div class="d">서명된 caller ARN만 통과 — 미서명/무권한 거부</div></div><div class="gv">엣지 인가</div></div>
-    <div class="tl"><div class="n">3</div><div><div class="b">Token Lambda — SSO ARN 검증</div><div class="d"><code>AWSReservedSSO_</code> 접두사 확인, 비-SSO는 403. 권한셋→팀(standard/economy) 매핑</div></div><div class="gv">신원 강제 · 티어링</div></div>
-    <div class="tl"><div class="n">4</div><div><div class="b">가상키 발급·캐시 (DynamoDB)</div><div class="d">LiteLLM /key/generate(master key는 Secrets Manager) → 키별 모델 allowlist·예산·MCP 그룹</div></div><div class="gv">키 거버넌스</div></div>
-    <div class="tl"><div class="n">5</div><div><div class="b">CloudFront(TLS) → 내부 ALB → LiteLLM</div><div class="d">ALB는 인터넷 비노출, CloudFront VPC Origin만 접근</div></div><div class="gv">네트워크 격리</div></div>
-    <div class="tl"><div class="n">6</div><div><div class="b">Guardrail 통과 → Bedrock 호출</div><div class="d">Claude는 시크릿탐지+Bedrock Guardrail 적용. Task Role SigV4(토큰 없음)</div></div><div class="gv">콘텐츠 안전</div></div>
-    <div class="tl"><div class="n">7</div><div><div class="b">트레이스/사용량 기록</div><div class="d">Langfuse(프롬프트·트레이스) + CloudWatch(인프라) + 키별 사용량/예산</div></div><div class="gv">감사·관측</div></div>
-  </div>
+  <svg viewBox="0 0 1220 560" style="width:100%;flex:1;min-height:0" preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#6ee7c7"/>
+      </marker>
+      <linearGradient id="nodeGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(255,255,255,.14)"/><stop offset="100%" stop-color="rgba(255,255,255,.03)"/>
+      </linearGradient>
+    </defs>
+    <!-- row 1: steps 1-4 -->
+    <g font-family="Noto Sans KR, sans-serif">
+      <!-- step boxes generator via manual placement -->
+      <!-- Step 1 -->
+      <rect x="20" y="30" width="250" height="108" rx="12" fill="url(#nodeGrad)" stroke="#8B5CF6" stroke-width="1.4"/>
+      <circle cx="46" cy="56" r="14" fill="#8B5CF6"/><text x="46" y="61" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">1</text>
+      <text x="68" y="60" fill="#fff" font-size="15" font-weight="700">SSO 로그인 → 키 helper</text>
+      <text x="36" y="84" fill="#aebfd6" font-size="11.5">aws sso login 후 boto3</text>
+      <text x="36" y="100" fill="#aebfd6" font-size="11.5">SigV4 서명(리전은 Token</text>
+      <text x="36" y="116" fill="#aebfd6" font-size="11.5">URL에서 파싱)</text>
+      <rect x="185" y="118" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="223" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">신원 확보</text>
+
+      <path d="M270,84 H320" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Step 2 -->
+      <rect x="320" y="30" width="250" height="108" rx="12" fill="url(#nodeGrad)" stroke="#3B82F6" stroke-width="1.4"/>
+      <circle cx="346" cy="56" r="14" fill="#3B82F6"/><text x="346" y="61" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">2</text>
+      <text x="368" y="60" fill="#fff" font-size="15" font-weight="700">API Gateway (IAM/SigV4)</text>
+      <text x="336" y="84" fill="#aebfd6" font-size="11.5">서명된 caller ARN만</text>
+      <text x="336" y="100" fill="#aebfd6" font-size="11.5">통과 — 미서명/무권한</text>
+      <text x="336" y="116" fill="#aebfd6" font-size="11.5">거부</text>
+      <rect x="485" y="118" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="523" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">엣지 인가</text>
+
+      <path d="M570,84 H620" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Step 3 -->
+      <rect x="620" y="30" width="270" height="108" rx="12" fill="url(#nodeGrad)" stroke="#F2C94C" stroke-width="1.4"/>
+      <circle cx="646" cy="56" r="14" fill="#F2C94C"/><text x="646" y="61" text-anchor="middle" fill="#0c1020" font-size="14" font-weight="800">3</text>
+      <text x="668" y="60" fill="#fff" font-size="15" font-weight="700">Token Lambda — SSO 검증</text>
+      <text x="636" y="84" fill="#aebfd6" font-size="11.5">AWSReservedSSO_ 접두사</text>
+      <text x="636" y="100" fill="#aebfd6" font-size="11.5">확인, 비-SSO는 403. 권한셋</text>
+      <text x="636" y="116" fill="#aebfd6" font-size="11.5">→팀(standard/economy) 매핑</text>
+      <rect x="775" y="118" width="106" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="828" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">신원 강제·티어링</text>
+
+      <path d="M890,84 H940" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Step 4 -->
+      <rect x="940" y="30" width="260" height="108" rx="12" fill="url(#nodeGrad)" stroke="#EC4899" stroke-width="1.4"/>
+      <circle cx="966" cy="56" r="14" fill="#EC4899"/><text x="966" y="61" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">4</text>
+      <text x="988" y="60" fill="#fff" font-size="15" font-weight="700">가상키 발급·캐시</text>
+      <text x="956" y="84" fill="#aebfd6" font-size="11.5">LiteLLM /key/generate</text>
+      <text x="956" y="100" fill="#aebfd6" font-size="11.5">(master key는 Secrets Mgr)</text>
+      <text x="956" y="116" fill="#aebfd6" font-size="11.5">→ 모델 allowlist·예산·MCP</text>
+      <rect x="1105" y="118" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="1143" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">키 거버넌스</text>
+
+      <!-- down connector from step4 to step5 (row2, right to left visually but keep simple vertical then horizontal) -->
+      <path d="M1065,138 V178 H1065" stroke="#6ee7c7" stroke-width="2"/>
+      <path d="M1065,178 H1130 V228" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- row 2: steps 5-7, right to left to visually continue the flow -->
+      <!-- Step 5 -->
+      <rect x="940" y="238" width="260" height="108" rx="12" fill="url(#nodeGrad)" stroke="#3B82F6" stroke-width="1.4"/>
+      <circle cx="966" cy="264" r="14" fill="#3B82F6"/><text x="966" y="269" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">5</text>
+      <text x="988" y="268" fill="#fff" font-size="15" font-weight="700">CloudFront → ALB → LiteLLM</text>
+      <text x="956" y="292" fill="#aebfd6" font-size="11.5">ALB는 인터넷 비노출,</text>
+      <text x="956" y="308" fill="#aebfd6" font-size="11.5">CloudFront VPC Origin만</text>
+      <text x="956" y="324" fill="#aebfd6" font-size="11.5">접근 허용</text>
+      <rect x="1105" y="326" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="1143" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">네트워크 격리</text>
+
+      <path d="M940,292 H890" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Step 6 -->
+      <rect x="620" y="238" width="270" height="108" rx="12" fill="url(#nodeGrad)" stroke="#EC4899" stroke-width="1.4"/>
+      <circle cx="646" cy="264" r="14" fill="#EC4899"/><text x="646" y="269" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">6</text>
+      <text x="668" y="268" fill="#fff" font-size="15" font-weight="700">Guardrail 통과 → Bedrock</text>
+      <text x="636" y="292" fill="#aebfd6" font-size="11.5">Claude는 시크릿탐지+</text>
+      <text x="636" y="308" fill="#aebfd6" font-size="11.5">Bedrock Guardrail 적용.</text>
+      <text x="636" y="324" fill="#aebfd6" font-size="11.5">Task Role SigV4(토큰 없음)</text>
+      <rect x="775" y="326" width="106" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="828" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">콘텐츠 안전</text>
+
+      <path d="M620,292 H570" stroke="#6ee7c7" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <!-- Step 7 -->
+      <rect x="320" y="238" width="250" height="108" rx="12" fill="url(#nodeGrad)" stroke="#2DD4BF" stroke-width="1.4"/>
+      <circle cx="346" cy="264" r="14" fill="#2DD4BF"/><text x="346" y="269" text-anchor="middle" fill="#0c1020" font-size="14" font-weight="800">7</text>
+      <text x="368" y="268" fill="#fff" font-size="15" font-weight="700">트레이스·사용량 기록</text>
+      <text x="336" y="292" fill="#aebfd6" font-size="11.5">Langfuse(프롬프트·트레이스)</text>
+      <text x="336" y="308" fill="#aebfd6" font-size="11.5">+ CloudWatch(인프라) +</text>
+      <text x="336" y="324" fill="#aebfd6" font-size="11.5">키별 사용량/예산</text>
+      <rect x="475" y="326" width="86" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
+      <text x="518" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">감사·관측</text>
+    </g>
+    <text x="20" y="420" fill="#7e93ad" font-size="12">1→4: 신원 확보·인가·발급 (Auth 스택) · 5→6: 네트워크 경유·모델 호출 (CDN·LiteLLM 스택) · 7: 관측 (Observability·Langfuse)</text>
+  </svg>
 </section>
 
-<!-- 6 GOVERNANCE -->
+<!-- 5 GOVERNANCE -->
 <section class="slide">
   <div class="kicker">거버넌스 · Governance</div>
   <h2>누가 · 무엇을 · 얼마나 · 어떻게 <span class="u">통제</span>되는가</h2>
@@ -237,32 +331,7 @@
   </div>
 </section>
 
-<!-- 7 SSO PREP -->
-<section class="slide">
-  <div class="kicker">전제조건 · IAM Identity Center (SSO)</div>
-  <h2>SSO 사용자·권한 <span class="u">준비</span> (게이트웨이 사용 전 1회)</h2>
-  <div class="two">
-    <div class="card gold">
-      <h3>🔎 디스커버리 질문</h3>
-      <ul style="margin-top:2px">
-        <li>IdC 활성화 여부 · <b>리전</b>은?</li>
-        <li>자격 소스: IdC 디렉터리 / 외부 IdP(Okta·Entra)</li>
-        <li>권한세트 → <b>티어</b> 매핑(standard / economy)</li>
-        <li>전용 사용자 vs 기존 사용자 / <b>그룹</b>(팀 권장)</li>
-      </ul>
-    </div>
-    <div class="timeline" style="flex:none">
-      <div class="tl"><div class="n">1</div><div><div class="b">권한세트 생성 <span style="color:#ff9">(이름에 밑줄 금지)</span></div><div class="d"><code>execute-api:Invoke</code>-only 인라인 정책(토큰 서비스 API ARN)</div></div></div>
-      <div class="tl"><div class="n">2</div><div><div class="b">계정 할당</div><div class="d">사용자 또는 <b>그룹</b> → 계정 (자동 프로비저닝)</div></div></div>
-      <div class="tl"><div class="n">3</div><div><div class="b">사용자 생성</div><div class="d">identitystore (또는 기존 사용자/그룹 사용)</div></div></div>
-      <div class="tl"><div class="n">4</div><div><div class="b">비밀번호 활성화 <span style="color:#ff9">(콘솔 전용)</span></div><div class="d">IdC 콘솔 → Reset password → 이메일/1회용 비번 — 공개 API 없음(핸드오프)</div></div></div>
-      <div class="tl"><div class="n">5</div><div><div class="b">클라이언트 SSO 프로필</div><div class="d"><code>aws configure sso</code> → <code>aws sso login</code> → 키 helper 자동</div></div></div>
-    </div>
-  </div>
-  <p class="src">권한세트명 무밑줄(Lambda 정규식) · 최소권한 execute-api · 비-SSO 호출 403(설계) · IdC 리전 ≠ 게이트웨이 리전 OK — 근거: shared/reference/sso-setup.md</p>
-</section>
-
-<!-- 8 DATA RESIDENCY & ISOLATION -->
+<!-- 6 DATA RESIDENCY & ISOLATION -->
 <section class="slide">
   <div class="kicker">데이터 레지던시 · 네트워크 격리</div>
   <h2>데이터는 <span class="u">어디에 머무는가</span></h2>
@@ -292,7 +361,7 @@
   <p class="src">데이터 레지던시 요건이 있으면 배포 리전을 고정하고 모든 영속 데이터가 그 리전에 머무름을 위 경로로 보장</p>
 </section>
 
-<!-- 8 GUARDRAILS -->
+<!-- 7 GUARDRAILS -->
 <section class="slide">
   <div class="kicker">가드레일 · Defense in Depth</div>
   <h2>요청마다 <span class="u">3계층</span> 방어</h2>
@@ -307,10 +376,19 @@
   <p class="src">⚠️ Bedrock Guardrail은 <b>bedrock-runtime(Claude) 전용</b> → GPT(Mantle) 경로는 Layer 1로 보완하고 정책 공백을 문서화(constraints.md)</p>
 </section>
 
-<!-- 9 OPTIONS -->
+<!-- 8 OPTIONS -->
 <section class="slide">
   <div class="kicker">무엇을 선택하는가 · 7개 구성축</div>
   <h2>대화로 정하는 <span class="u">선택지</span></h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 10px">
+    <div class="card teal" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">🌐</div><h3 style="font-size:12.5px;margin-top:4px">① 커스텀 도메인</h3></div>
+    <div class="card pink" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">📊</div><h3 style="font-size:12.5px;margin-top:4px">② 관측성 깊이</h3></div>
+    <div class="card gold" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">🎯</div><h3 style="font-size:12.5px;margin-top:4px">③ 모델·비용 티어</h3></div>
+    <div class="card teal" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">🤖</div><h3 style="font-size:12.5px;margin-top:4px">④ 제공 모델</h3></div>
+    <div class="card pink" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">🌏</div><h3 style="font-size:12.5px;margin-top:4px">⑤ 리전</h3></div>
+    <div class="card gold" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">💰</div><h3 style="font-size:12.5px;margin-top:4px">⑥ 용량·비용</h3></div>
+    <div class="card teal" style="flex:1;min-width:120px;text-align:center;padding:12px 8px"><div style="font-size:22px">🧱</div><h3 style="font-size:12.5px;margin-top:4px">⑦ 부트스트랩</h3></div>
+  </div>
   <table>
     <thead><tr><th style="width:34px">#</th><th>선택축</th><th>config 필드</th><th>옵션</th></tr></thead>
     <tbody>
@@ -326,7 +404,7 @@
   <p class="src">추가 토글: <code>awsRegion</code>(리전 선택) · <code>guardrail.enabled</code> · <code>observability.dashboardEnabled</code> · <code>agentcore</code>(AgentCore 웹검색) · <code>mantle</code>(GPT-5.x 피어링) · <code>sso</code> · <code>auth.keyCacheTtlSeconds</code></p>
 </section>
 
-<!-- 10 WORKFLOW -->
+<!-- 9 WORKFLOW -->
 <section class="slide">
   <div class="kicker">어떻게 쓰는가 · 워크플로우</div>
   <h2>Discovery → Deploy, <span class="u">게이트(GATE)</span>로 확인하며 진행</h2>
@@ -345,13 +423,13 @@
   <p class="src">근거: SKILL.md (Phase 1~6)</p>
 </section>
 
-<!-- 11 GENERATED OUTPUT -->
+<!-- 10 GENERATED OUTPUT -->
 <section class="slide">
   <div class="kicker">어떤 형태로 구축되는가 · 산출물</div>
   <h2>Skill이 <span class="u">생성</span>하는 완성형 CDK 앱</h2>
   <div class="two">
     <div class="flow">project/
-├─ bin/app.ts            <span class="p"># 8 스택 와이어링</span>
+├─ bin/app.ts            <span class="p"># 11 스택 와이어링</span>
 ├─ config/dev.json       <span class="p"># 선택값(런타임 검증)</span>
 ├─ lib/
 │  ├─ *-stack.ts         <span class="p"># Network ~ CDN</span>
@@ -376,7 +454,7 @@
   </div>
 </section>
 
-<!-- 12 BEST PRACTICES -->
+<!-- 11 BEST PRACTICES -->
 <section class="slide">
   <div class="kicker">내장된 베스트 프랙티스 · 함정 회피</div>
   <h2>실전에서 막히는 지점을 <span class="u">코드+문서</span>로 예방</h2>
@@ -391,21 +469,224 @@
   <p class="src">근거: shared/reference/constraints.md (실 배포에서 발견·역반영된 항목)</p>
 </section>
 
-<!-- 13 INSTALL -->
+<!-- 12 PREREQUISITES -->
+<section class="slide">
+  <div class="kicker">전제조건 · Discovery 전에 확인할 것들</div>
+  <h2>배포 시작 전 <span class="u">계정 · 권한 · SSO</span> 준비</h2>
+  <div class="grid g2" style="flex:1">
+    <div class="card teal">
+      <h3>☁️ AWS 계정 · 권한</h3>
+      <ul style="margin-top:2px">
+        <li>대상 계정에 <b>VPC/ECS/RDS/Lambda/APIGW/CloudFront/IAM</b> 생성 권한</li>
+        <li><b>게이트웨이 리전 + us-east-1</b> 양쪽 모두 <code>cdk bootstrap</code> 가능</li>
+        <li><b>Bedrock 모델 액세스</b> 활성화 — Claude(게이트웨이 리전), GPT-5.x/Mantle(us-east-1)</li>
+        <li><b>AWS Marketplace</b> 구독 가능(Mantle 첫 호출 자동 구독)</li>
+      </ul>
+    </div>
+    <div class="card gold">
+      <h3>🪪 IAM Identity Center (SSO) — SSO 경로 필수</h3>
+      <ul style="margin-top:2px">
+        <li>Token Service는 <code>AWSReservedSSO_</code> 신원만 허용 — 비-SSO 우회 경로 없음(설계)</li>
+        <li><b>IdC 활성화 여부 · 리전</b> 확인</li>
+        <li><b>자격 소스</b>: 내장 디렉터리 / 외부 IdP(Okta·Entra)</li>
+        <li>배정할 <b>그룹 또는 사용자</b> 존재 여부(팀 권장) — 미비 시 GATE 1에서 즉시 블로커로 표기</li>
+      </ul>
+    </div>
+  </div>
+  <div class="card pink" style="margin-top:12px">
+    <h3>🔎 SSO 1회 준비 절차 (게이트웨이 사용 전)</h3>
+    <div class="steps" style="margin-top:6px">
+      <div class="step"><span class="n">1</span><b>권한세트 생성</b><span>이름에 밑줄 금지 · execute-api:Invoke only</span></div>
+      <div class="step"><span class="n">2</span><b>계정 할당</b><span>사용자/그룹 → 계정</span></div>
+      <div class="step"><span class="n">3</span><b>사용자 생성</b><span>identitystore (또는 기존 사용)</span></div>
+      <div class="step"><span class="n">4</span><b>비밀번호 활성화</b><span>IdC 콘솔 전용 · 핸드오프</span></div>
+      <div class="step"><span class="n">5</span><b>SSO 프로필</b><span><code>aws sso login</code> → 키 helper</span></div>
+    </div>
+  </div>
+  <p class="src">근거: shared/reference/prerequisites.md · shared/reference/sso-setup.md — 로컬 툴체인(Docker/Node/CDK/AWS CLI) 설치는 다음 슬라이드</p>
+</section>
+
+<!-- 13 PREREQUISITES OS INSTALL -->
+<section class="slide">
+  <div class="kicker">전제조건 · 로컬 툴체인 설치</div>
+  <h2>Docker · Node · CDK · AWS CLI — <span class="u">OS별 설치 + 확인</span></h2>
+  <div class="grid g3" style="flex:1;min-height:0">
+    <div class="term">
+      <div class="term-bar"><span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span><span class="term-title">🍎 macOS — zsh</span></div>
+      <div class="term-body">
+<span class="cm"># 1) Docker Desktop 설치 (데몬 필수)</span>
+<span class="prompt">$</span> brew install --cask docker
+<span class="cm"># 설치 후 Applications에서 Docker.app 1회 실행 → 데몬 기동</span>
+
+<span class="cm"># 2) Node.js 20 LTS</span>
+<span class="prompt">$</span> brew install node@20
+<span class="cm"># 또는 nvm 사용 시:</span>
+<span class="prompt">$</span> nvm install 20 <span class="cm">&&</span> nvm use 20
+
+<span class="cm"># 3) AWS CDK CLI v2</span>
+<span class="prompt">$</span> npm install -g aws-cdk
+
+<span class="cm"># 4) AWS CLI v2 + jq</span>
+<span class="prompt">$</span> brew install awscli jq
+
+<span class="cm"># ── 설치 확인 ──────────────────────</span>
+<span class="prompt">$</span> docker info <span class="cm">| head -1</span>
+<span class="out">Client: Docker Desktop</span>
+<span class="prompt">$</span> node -v
+<span class="out">v20.18.1</span>
+<span class="prompt">$</span> cdk --version
+<span class="out">2.170.0 (build abcd123)</span>
+<span class="prompt">$</span> aws --version
+<span class="out">aws-cli/2.22.9 Python/3.13.1 Darwin/24.1.0</span>
+<span class="ok">✅ 4개 모두 출력되면 준비 완료</span></div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span><span class="term-title">🐧 Linux — bash (Ubuntu/Debian)</span></div>
+      <div class="term-body">
+<span class="cm"># 1) Docker Engine (배포판 docker.io는 구버전이라 비권장)</span>
+<span class="cm"># 공식 가이드: docs.docker.com/engine/install/ubuntu</span>
+<span class="prompt">$</span> curl -fsSL https://get.docker.com <span class="cm">-o get-docker.sh</span>
+<span class="prompt">$</span> sudo sh get-docker.sh
+<span class="prompt">$</span> sudo usermod -aG docker $USER <span class="cm"># 재로그인 필요</span>
+<span class="prompt">$</span> sudo systemctl enable --now docker
+
+<span class="cm"># 2) Node.js 20 (nvm 권장 — 배포판 패키지는 구버전)</span>
+<span class="prompt">$</span> curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh <span class="cm">|</span> bash
+<span class="prompt">$</span> source ~/.bashrc <span class="cm">&&</span> nvm install 20
+
+<span class="cm"># 3) AWS CDK CLI v2</span>
+<span class="prompt">$</span> npm install -g aws-cdk
+
+<span class="cm"># 4) AWS CLI v2 (x86_64 / --linux-aarch64.zip on ARM)</span>
+<span class="prompt">$</span> curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+<span class="prompt">$</span> unzip awscliv2.zip <span class="cm">&&</span> sudo ./aws/install
+<span class="prompt">$</span> sudo apt-get update <span class="cm">&&</span> sudo apt-get install -y jq
+
+<span class="cm"># ── 설치 확인 ──────────────────────</span>
+<span class="prompt">$</span> docker info <span class="cm">| head -1</span>
+<span class="out">Client: Docker Engine - Community</span>
+<span class="prompt">$</span> node -v <span class="cm">&&</span> cdk --version <span class="cm">&&</span> aws --version
+<span class="out">v20.18.1
+2.170.0 (build abcd123)
+aws-cli/2.22.9 Python/3.13.1 Linux/6.8.0</span>
+<span class="ok">✅ 4개 모두 출력되면 준비 완료</span></div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span><span class="term-title">🪟 Windows — PowerShell / WSL2</span></div>
+      <div class="term-body">
+<span class="cm"># 권장: WSL2 안에서 위 Linux 절차 그대로 실행</span>
+<span class="prompt">PS&gt;</span> wsl --install <span class="cm"># 관리자 PowerShell, 재부팅 후</span>
+<span class="prompt">PS&gt;</span> wsl --status
+<span class="out">기본 배포판: Ubuntu ...</span>
+
+<span class="cm"># Docker Desktop (WSL2 엔진 필수 — 아래는 native PowerShell 경로)</span>
+<span class="cm"># 1) docker.com/products/docker-desktop 설치 후</span>
+<span class="cm">#    Settings → General → "Use the WSL 2 based engine" 체크</span>
+<span class="cm">#    Settings → Resources → WSL Integration → 배포판 활성화</span>
+
+<span class="cm"># 2) Node.js 20 LTS</span>
+<span class="prompt">PS&gt;</span> winget install OpenJS.NodeJS.LTS
+
+<span class="cm"># 3) AWS CDK CLI v2 (WSL·PowerShell 중 실제 배포할 셸에서)</span>
+<span class="prompt">PS&gt;</span> npm install -g aws-cdk
+
+<span class="cm"># 4) AWS CLI v2 + jq</span>
+<span class="prompt">PS&gt;</span> winget install Amazon.AWSCLI
+<span class="prompt">PS&gt;</span> winget install jqlang.jq
+
+<span class="cm"># ── 설치 확인 ──────────────────────</span>
+<span class="prompt">PS&gt;</span> docker info
+<span class="out">Client: Docker Desktop 4.x (WSL2 backend)</span>
+<span class="prompt">PS&gt;</span> node -v; cdk --version; aws --version
+<span class="out">v20.18.1
+2.170.0 (build abcd123)
+aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
+<span class="ok">✅ 4개 모두 출력되면 준비 완료</span>
+<span class="h">⚠️ WSL과 PowerShell을 섞지 말 것 — cdk deploy를 실행할 셸 한쪽에만 설치</span></div>
+    </div>
+  </div>
+  <p class="src">스크롤하여 전체 출력 확인 · 하나라도 ❌면 Phase 1 Discovery 진행 금지 · 근거: shared/reference/prerequisites.md §1</p>
+</section>
+
+<!-- 14 INSTALL -->
 <section class="slide">
   <div class="kicker">설치 · 3개 도구 공통</div>
   <h2>한 SKILL.md, <span class="u">세 곳에 설치</span></h2>
   <div class="grid g3" style="margin-top:4px">
-    <div class="card teal"><h3>Claude Code</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.claude/skills/<br>llm-gateway-governance</p></div>
     <div class="card pink"><h3>Kiro</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.kiro/skills/<br>llm-gateway-governance</p></div>
-    <div class="card gold"><h3>Amazon Quick</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.quickwork/skills/<br>llm-gateway-governance</p></div>
+    <div class="card teal"><h3>Claude Code</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.claude/skills/<br>llm-gateway-governance</p></div>
+    <div class="card gold"><h3>Amazon Quick Desktop</h3><p style="font-family:Consolas,monospace;font-size:12.5px">~/.quickwork/skills/<br>llm-gateway-governance</p></div>
   </div>
   <p style="margin-top:16px">세 곳의 <code>SKILL.md</code>는 <b>md5 동일</b>(CI 검증) · 지식은 <code>shared/</code>에 1벌만 작성(<code>sync-skills.sh</code>).</p>
+  <p style="margin-top:6px">Amazon Quick Desktop: <a href="https://aws.amazon.com/ko/quick/desktop/" style="color:#9af5d8">aws.amazon.com/ko/quick/desktop</a></p>
   <p style="margin-top:6px">트리거 예: <span class="g-text" style="font-weight:800">"사내 개발자용 LLM 게이트웨이 만들어줘"</span> · "Govern Bedrock access for developers"</p>
   <p class="src">설치 후 SKILL.md description으로 자동 활성화(트리거 매칭)</p>
 </section>
 
-<!-- 14 REAL PROOF -->
+<!-- 15 LITELLM ADMIN OPS -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · LiteLLM Admin Ops</div>
+  <h2>배포 이후 <span class="u">운영자</span>가 하는 일</h2>
+  <div class="two">
+    <div class="card gold">
+      <h3>🔐 Admin UI 로그인</h3>
+      <ul style="margin-top:2px">
+        <li><code>https://&lt;cloudfront-domain&gt;/ui/</code></li>
+        <li>자격증명은 <b>master key 단 하나</b> — Secrets Manager에서 조회(CDK 출력·로그에 절대 노출 안 함)</li>
+        <li>developer는 master key 불필요 — SSO 가상키만 사용</li>
+      </ul>
+    </div>
+    <div class="card teal">
+      <h3>👥 팀·사용자 생성 (SSO 매핑)</h3>
+      <ul style="margin-top:2px">
+        <li><b>자동 경로(기본)</b>: SSO 권한세트 로그인 → Token Lambda가 <code>team_alias</code> lookup-or-create</li>
+        <li><b>수동 경로</b>: UI <b>Teams → + New Team</b> 또는 <code>POST /team/new</code>로 선점 생성</li>
+        <li><code>team_alias</code>는 Lambda 상수와 정확히 일치해야 함 — 오타 시 별도 팀 생성됨</li>
+      </ul>
+    </div>
+  </div>
+  <div class="grid g3" style="margin-top:14px;flex:1;min-height:0">
+    <div class="shot">
+      <div class="shot-head">📜 <h3>로그·트레이스 3계층</h3></div>
+      <div class="shot-body">
+        <img src="screenshots/litellm-usage-logs.png" alt="LiteLLM Usage 화면 캡처"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span class="placeholder-icon">🖼️</span>
+          <span class="placeholder-txt">LiteLLM UI → Langfuse → CloudWatch<br>3계층 로그 화면 캡처 삽입 위치</span>
+          <span class="placeholder-path">screenshots/litellm-usage-logs.png</span>
+        </div>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-head">💰 <h3>예산(budget) 적용</h3></div>
+      <div class="shot-body">
+        <img src="screenshots/litellm-team-budget.png" alt="LiteLLM Team budget 설정 캡처"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span class="placeholder-icon">🖼️</span>
+          <span class="placeholder-txt">Teams/Virtual Keys → Max Budget<br>설정 화면 캡처 삽입 위치</span>
+          <span class="placeholder-path">screenshots/litellm-team-budget.png</span>
+        </div>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-head">🔎 <h3>현재 사용량 확인</h3></div>
+      <div class="shot-body">
+        <img src="screenshots/litellm-spend-view.png" alt="LiteLLM spend 확인 캡처"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span class="placeholder-icon">🖼️</span>
+          <span class="placeholder-txt">Teams/Virtual Keys 목록의<br>spend vs max_budget 화면 캡처 삽입 위치</span>
+          <span class="placeholder-path">screenshots/litellm-spend-view.png</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="src">근거: shared/reference/litellm-admin-guide.md · Enterprise 라이선스 불필요(Admin UI·팀·budget 모두 OSS 기능) · 캡처 이미지는 <code>screenshots/</code>에 넣으면 자동 표시(없으면 placeholder)</p>
+</section>
+
+<!-- 16 REAL PROOF -->
 <section class="slide">
   <div class="kicker">검증된 자산 · 실제 배포 결과</div>
   <h2>레퍼런스는 <span class="u">실제 배포·검증</span>됨</h2>
@@ -419,7 +700,7 @@
       <li><b>UI</b> LiteLLM·Langfuse 로그인 동작(도메인리스)</li>
     </ul></div>
     <div class="grid g2" style="gap:12px">
-      <div class="card gold" style="text-align:center"><div class="big">8/8</div><p>스택 배포</p></div>
+      <div class="card gold" style="text-align:center"><div class="big">11/11</div><p>스택 배포</p></div>
       <div class="card pink" style="text-align:center"><div class="big">3계층</div><p>Guardrail</p></div>
       <div class="card teal" style="text-align:center"><div class="big">100%</div><p>토큰리스 SigV4</p></div>
       <div class="card" style="text-align:center"><div class="big">3툴</div><p>md5 동일 SKILL</p></div>
@@ -428,7 +709,7 @@
   <p class="src">실 배포에서 발견한 이슈(리전·UI 리다이렉트·키 레이스)는 모두 Skill에 역반영</p>
 </section>
 
-<!-- 15 CLOSING -->
+<!-- 17 CLOSING -->
 <section class="slide">
   <div style="margin:auto 0;text-align:center">
     <div class="kicker" style="margin:0 auto 16px">시작하기</div>
@@ -448,7 +729,7 @@
       </a>
       <p class="src" style="margin-top:12px">llm-gateway.daradat.cloud/llm-gateway-governance-skill.zip</p>
     </div>
-    <p class="src" style="margin-top:14px">llm-gateway-governance-skill · Claude Code · Kiro · Amazon Quick</p>
+    <p class="src" style="margin-top:14px">llm-gateway-governance-skill · Kiro · Claude Code · Amazon Quick Desktop</p>
   </div>
 </section>
 
@@ -459,7 +740,7 @@
   <div class="brand"><b>LLM Gateway Governance</b> · AWS Solution Skill</div>
   <div class="nav">
     <button onclick="go(cur-1)">← 이전</button>
-    <span class="count" id="count">1 / 16</span>
+    <span class="count" id="count">1 / 17</span>
     <button onclick="go(cur+1)">다음 →</button>
   </div>
 </footer>

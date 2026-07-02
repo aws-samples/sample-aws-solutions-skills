@@ -76,7 +76,7 @@ This skill generates a complete CDK app:
 ## Knowledge sources
 
 All real knowledge lives in [`shared/`](./shared/):
-- `shared/reference/` — architecture, decision tree, AWS service/model catalog, constraints
+- `shared/reference/` — **prerequisites** (Docker/CLI/IAM/Bedrock model access/IdC readiness), architecture, decision tree, AWS service/model catalog, constraints, SSO setup, **LiteLLM admin operations** (Admin UI login, team/user creation via SSO mapping, log/trace inspection, budget management)
 - `shared/patterns/` — CDK stacks, Lambda handlers, LiteLLM gateway config, developer onboarding
 - `shared/examples/` — industry/domain instantiations
 
