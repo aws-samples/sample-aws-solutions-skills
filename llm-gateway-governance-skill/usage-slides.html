@@ -687,7 +687,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   <h2>새 사용자·그룹 온보딩 — <span class="u">IdC + Admin UI만으로 반복 가능</span></h2>
   <div class="card teal" style="margin-bottom:10px">
     <h3>✅ 관리자가 알아야 할 결론</h3>
-    <p style="margin:2px 0"><b>최초 1회</b>만 코드를 살짝 손보면(권한세트명 = LiteLLM <code>team_alias</code>로 통일), 그 이후 새 조직·팀이 생겨도 <b>개발자 없이 IdC 콘솔 + LiteLLM Admin UI 클릭만으로</b> 온보딩·예산변경·모델 제한이 끝납니다. (예시 코드 그대로 쓰면 매번 Python 상수를 고치고 재배포해야 함 — 이건 LiteLLM/IAM 제약이 아니라 예시 코드의 설계일 뿐이라 바꿀 수 있습니다.)</p>
+    <p style="margin:2px 0">이 스킬로 생성된 게이트웨이는 <b>기본값부터</b> 권한세트명 = LiteLLM <code>team_alias</code>로 1:1 매칭되도록 코드가 생성됩니다. 그래서 새 조직·팀이 생겨도 <b>개발자 개입·코드 수정·재배포 없이, IdC 콘솔 + LiteLLM Admin UI 클릭만으로</b> 온보딩·예산변경·모델 제한이 끝납니다.</p>
   </div>
   <div class="timeline" style="flex:none">
     <div class="tl"><div class="n">1</div><div><div class="b">IdC에서 사용자 추가</div><div class="d">IAM Identity Center 콘솔 → <b>Users → Add user</b> — 이미 있는 사용자면 스킵</div></div><div class="gv">사용자 생성</div></div>
@@ -697,10 +697,10 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <div class="tl"><div class="n">5</div><div><div class="b">비밀번호 활성화 + 검증</div><div class="d">IdC 콘솔(전용) → <b>Reset password</b> → 사용자가 <code>aws sso login</code> 후 첫 호출 시 Admin UI <b>Teams</b>에서 반영 확인</div></div><div class="gv">활성화·확인</div></div>
   </div>
   <div class="card gold" style="margin-top:10px">
-    <h3>🔧 이걸 가능하게 하는 최초 1회 코드 수정</h3>
-    <p style="margin:2px 0"><code>lambda/token-service/handler.py</code>의 <code>_resolve_team_id</code>에서 권한세트명별 if/else 분기(<code>ECONOMY_PERMISSION_SETS</code> 등)를 지우고, <b>항상</b> <code>_ensure_team(endpoint, master_key, permission_set)</code>만 호출하도록 한 줄로 바꿉니다. 이후로는 이 파일을 다시 열 일이 없습니다 — 예시 코드(<code>economy-tiering.md</code>)처럼 상수를 그대로 쓰면, 새 조직마다 코드 수정+재배포가 필요해 개발자가 매번 개입해야 합니다.</p>
+    <h3>🔧 왜 코드 수정·재배포가 필요 없는가</h3>
+    <p style="margin:2px 0">이 스킬이 생성하는 <code>lambda/token-service/handler.py</code>의 <code>_resolve_team_id</code>는 권한세트명별 if/else 분기 없이 <b>항상</b> <code>_ensure_team(endpoint, master_key, permission_set)</code>만 호출합니다 — 권한세트명이 곧 LiteLLM <code>team_alias</code>이기 때문입니다. (참고: <code>economy-tiering.md</code>는 이 메커니즘을 설명하는 예시일 뿐이며, 실제 생성 코드는 그 안의 <code>ECONOMY_PERMISSION_SETS</code> 같은 하드코딩 분기를 쓰지 않습니다.)</p>
   </div>
-  <p class="src">잊지 말 것: 4번을 건너뛰면 조용히 default team으로 빠져 예산·allowlist가 적용 안 됨 · 근거: shared/reference/sso-setup.md · shared/reference/litellm-admin-guide.md §2</p>
+  <p class="src">잊지 말 것: 4번을 건너뛰면 조용히 default team으로 빠져 예산·allowlist가 적용 안 됨 · 근거: shared/patterns/lambda-handlers.md · shared/reference/sso-setup.md · shared/reference/litellm-admin-guide.md §2</p>
 </section>
 
 <!-- 18 REAL PROOF -->
