@@ -697,8 +697,8 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <div class="tl"><div class="n">5</div><div><div class="b">비밀번호 활성화 + 검증</div><div class="d">IdC 콘솔(전용) → <b>Reset password</b> → 사용자가 <code>aws sso login</code> 후 첫 호출 시 Admin UI <b>Teams</b>에서 반영 확인</div></div><div class="gv">활성화·확인</div></div>
   </div>
   <div class="card gold" style="margin-top:10px">
-    <h3>🔧 왜 코드 수정·재배포가 필요 없는가</h3>
-    <p style="margin:2px 0">이 스킬이 생성하는 <code>lambda/token-service/handler.py</code>의 <code>_resolve_team_id</code>는 권한세트명별 if/else 분기 없이 <b>항상</b> <code>_ensure_team(endpoint, master_key, permission_set)</code>만 호출합니다 — 권한세트명이 곧 LiteLLM <code>team_alias</code>이기 때문입니다. (참고: <code>economy-tiering.md</code>는 이 메커니즘을 설명하는 예시일 뿐이며, 실제 생성 코드는 그 안의 <code>ECONOMY_PERMISSION_SETS</code> 같은 하드코딩 분기를 쓰지 않습니다.)</p>
+    <h3>🔧 권한세트명과 team명이 같아야 하는 이유</h3>
+    <p style="margin:2px 0">이 스킬이 생성하는 Token Lambda(<code>_resolve_team_id</code>)는 권한세트명을 <b>그대로</b> LiteLLM <code>team_alias</code>로 사용합니다 — 별도의 매핑 테이블이나 if/else 분기가 없습니다. 그래서 3번(권한세트)과 4번(LiteLLM 팀)의 이름을 다르게 지으면 그 그룹의 로그인은 엉뚱한(또는 새로) 팀으로 연결되어 의도한 예산·모델 제한이 적용되지 않습니다. <b>이름을 똑같이 맞추는 것 자체가 유일한 연결 고리</b>이므로, 온보딩 때마다 3·4번의 이름 일치만 지키면 코드를 열어볼 일이 없습니다.</p>
   </div>
   <p class="src">잊지 말 것: 4번을 건너뛰면 조용히 default team으로 빠져 예산·allowlist가 적용 안 됨 · 근거: shared/patterns/lambda-handlers.md · shared/reference/sso-setup.md · shared/reference/litellm-admin-guide.md §2</p>
 </section>
