@@ -94,8 +94,8 @@ Useful when you want the team to exist (with its budget/allowlist already set) *
 logs in, e.g. to pre-configure billing separation.
 
 **Admin UI**: `/ui/` → **Teams** → **+ New Team** → set `Team Alias` **to exactly the permission set name**
-the group will log in with (this is the *only* thing that connects IdC identity to this team — there is no
-Lambda-side constant to keep in sync), optionally set `Models` (allowlist) and `Max Budget`.
+the group will log in with — that name match is what connects IdC identity to this team — optionally set
+`Models` (allowlist) and `Max Budget`.
 
 **API equivalent**:
 ```bash
@@ -109,10 +109,10 @@ curl -s -X POST "$LITELLM_BASE/team/new" \
   }' | jq .
 ```
 
-> The `team_alias` string **is** the permission set name — it's the *only* join key between IdC and LiteLLM
-> (no Lambda-side constant, no separate mapping table). A typo in either one silently creates/resolves an
-> unrelated team instead of erroring. If a developer's key isn't getting the budget/allowlist you expect,
-> the first thing to check is whether the team you set up in the Admin UI (`GET /team/list`) has a
+> The `team_alias` string **is** the permission set name — it's the *only* join key between IdC and LiteLLM.
+> A typo in either one silently creates/resolves an unrelated team instead of erroring. If a developer's key
+> isn't getting the budget/allowlist you expect, the first thing to check is whether the team you set up in
+> the Admin UI (`GET /team/list`) has a
 > `team_alias` that matches their IdC permission set name **exactly**.
 
 ### 2.3 Creating an individual key/user manually (rare — SSO users never need this)
