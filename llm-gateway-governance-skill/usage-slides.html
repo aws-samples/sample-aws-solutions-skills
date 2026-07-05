@@ -395,7 +395,7 @@
       <tr><td>1</td><td><b>커스텀 도메인</b></td><td><code>litellm.certMode</code></td><td>acm-dns(도메인+ACM+Route53) / 도메인리스(기본 cloudfront.net)</td></tr>
       <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만</td></tr>
       <tr><td>3</td><td><b>모델·비용 티어</b></td><td>Token Lambda 팀 매핑</td><td>standard(전 모델) / economy(allowlist + 예산캡)</td></tr>
-      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude(bedrock/) + GPT(bedrock_mantle/) 조합</td></tr>
+      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT-5.x(bedrock_mantle) 조합</td></tr>
       <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>CDK_DEFAULT_REGION</code></td><td>메인 리전 고정 · CDN은 us-east-1</td></tr>
       <tr><td>6</td><td><b>용량·비용</b></td><td><code>data.* · litellm.* · natGateways</code></td><td>Aurora ACU · Fargate 크기 · NAT 수</td></tr>
       <tr><td>7</td><td><b>부트스트랩</b></td><td><code>bootstrapQualifier</code></td><td>기본 / 커스텀(충돌 회피)</td></tr>
