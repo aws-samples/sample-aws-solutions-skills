@@ -1,13 +1,13 @@
 # LiteLLM Admin Operations Guide (Admin UI + API)
 
 Operator-facing guide for running the deployed gateway day-to-day: logging into the LiteLLM Admin UI,
-creating users/teams (and mapping them to SSO), checking request logs/traces, and applying per-user budgets.
+creating users/teams (and mapping them to IdC auth units), checking request logs/traces, and applying per-user budgets.
 This complements `shared/patterns/litellm-gateway.md` (config.yaml/routing/auth design) and
 `shared/reference/sso-setup.md` (IdC provisioning) — this doc is about **operating** the already-deployed
 LiteLLM proxy, mostly through its built-in Admin UI at `/ui/`.
 
-> Everything here talks to the **LiteLLM proxy itself** (`POST/GET https://<cloudfront-domain>/...` or the
-> Admin UI at `https://<cloudfront-domain>/ui/`) — not the AWS CDK stacks. No LiteLLM Enterprise license is
+> Everything here talks to the **LiteLLM proxy itself** (`POST/GET <gateway-url>/...` or the
+> Admin UI at `<gateway-url>/ui/`, where `<gateway-url>` is the `GatewayUrl` output = the ALB domain — `https://…` for `certMode='acm'`, `http://…` for `http`) — not the AWS CDK stacks. No LiteLLM Enterprise license is
 > required for any of this (Admin UI, teams, budgets are OSS features).
 
 ---
@@ -29,30 +29,30 @@ aws secretsmanager get-secret-value --secret-id <secret-name-or-arn> --query Sec
 ```
 
 > Only operators who need admin access should have `secretsmanager:GetSecretValue` on this secret. Developers
-> never need it — they authenticate via SSO virtual keys (see `sso-setup.md`), not the master key.
+> never need it — they authenticate via identity-backed virtual keys (`org-sso` or `cognito-native`), not the master key.
 
 ### 1.2 Open the Admin UI
 
 ```
-https://<cloudfront-domain>/ui/
+<gateway-url>/ui/        # e.g. https://llmgw.example.com/ui/ (acm) or http://<alb-dns>/ui/ (http)
 ```
 
 - Login form asks for the master key as the password (username field can be left as `admin` or blank
   depending on the LiteLLM version — the master key is what's checked).
-- If you see a redirect to a dead/default host after login, that's the known CloudFront-Location-rewrite
-  gotcha (Hard Constraint #8) — it's a client-visible symptom of a missing/misconfigured
-  `PROXY_BASE_URL`/viewer-response Function, not a credential problem. Fix at the infra level, not by
-  retrying login.
+- If you see a redirect to a dead/default host after login, that's the known redirect gotcha (Hard
+  Constraint #8) — a client-visible symptom of a misconfigured `PROXY_BASE_URL` (the SPA's only
+  absolute-URL source; the pinned image has no `--forwarded-allow-ips` option, so don't chase
+  forwarded-header settings), not a credential problem. Fix at the infra level, not by retrying login.
 - The UI is served by the same ECS Fargate task as the API — if `/ui/` 502s but `/v1/models` works, check
   the LiteLLM proxy's `--ui` flag / static assets rather than networking.
 
 ### 1.3 Master-key API access (no UI, for scripting)
 
 Everything the UI does is also a REST call authenticated with `Authorization: Bearer <master-key>` against
-the same CloudFront domain — useful for scripting the operations below instead of clicking through the UI:
+the same gateway URL — useful for scripting the operations below instead of clicking through the UI:
 
 ```bash
-export LITELLM_BASE=https://<cloudfront-domain>
+export LITELLM_BASE=<gateway-url>   # https://… (acm) or http://<alb-dns> (http)
 export MASTER_KEY=<value from Secrets Manager>
 
 curl -s "$LITELLM_BASE/v1/models" -H "Authorization: Bearer $MASTER_KEY" | jq .
@@ -63,29 +63,23 @@ curl -s "$LITELLM_BASE/v1/models" -H "Authorization: Bearer $MASTER_KEY" | jq .
 ## 2. Creating teams and mapping them to SSO groups
 
 In this gateway, **"users" are governed at the team level**, and team membership is derived automatically
-from the caller's SSO permission set — you rarely create individual LiteLLM users by hand. Understand this
+from the caller's authorization unit — permission set in `org-sso`, Cognito User Pool Group in `cognito-native` — so you rarely create individual LiteLLM users by hand. Understand this
 flow before creating anything manually in the UI, so you don't fight the automation.
 
-### 2.1 The automatic path (recommended — SSO permission set → team)
+### 2.1 The automatic path (recommended — authorization unit → team)
 
 This is what actually provisions users/teams in this architecture, end to end:
 
-1. An operator provisions an IdC **permission set** per tier/org, **named identically to the LiteLLM team
-   it should map to** (e.g. permission set `ClaudeCodeEconomy` → team `ClaudeCodeEconomy`, or an org-named
-   one like `TeamResearch` → team `TeamResearch`) and assigns it to a **group** — see `sso-setup.md`.
-2. A developer runs `aws sso login` and calls the gateway. The Token Lambda (`lambda/token-service/handler.py`)
-   parses the permission set out of the signed SSO ARN and calls **lookup-or-create** against LiteLLM,
-   **using the permission set name directly as the `team_alias`** (no separate mapping table, no per-org
-   branch in code):
+1. An operator provisions the authorization unit per team, **named identically to the LiteLLM team it should map to**. In `org-sso`, this is a permission set assigned to a group (see `sso-setup.md`). In `cognito-native`, this is a Cognito User Pool Group whose name matches `teamGroupPrefix` (see `account-instance-setup.md`).
+2. A developer authenticates with the selected mode and calls the gateway. The Token Lambda (`lambda/token-service/handler.py`) parses the permission set from the signed SSO ARN (`org-sso`) or reads the `cognito:groups` claim from the API-Gateway-verified Cognito JWT (`cognito-native`) and calls **lookup-or-create** against LiteLLM, **using that name directly as the `team_alias`** (no separate mapping table, no per-org branch in code):
    - `GET /team/list` → does a team with this `team_alias` already exist?
-   - If not: `POST /team/new` with `team_alias` (= the permission set name), optional `models` (allowlist)
-     and `max_budget` (cap) seeded from `TIER_CONFIG` if this permission set has an entry there, and the
+   - If not: `POST /team/new` with `team_alias` (= the permission set / group name), optional `models` (allowlist)
+     and `max_budget` (cap) seeded from `TIER_CONFIG` if this team alias has an entry there, and the
      `object_permission.mcp_access_groups` for web-search access.
 3. `POST /key/generate` issues the developer a **virtual key** scoped to that `team_id` — this is the
    "user" that shows up in the Admin UI's Keys/Usage views.
 
-So: **creating a new tier/org = provisioning a new SSO permission set + group named the same as the team you
-want**, not clicking "New Team" in the UI first (though you can — see §2.2). The team is created lazily on
+So: **creating a new tier/org = provisioning the IdC auth unit/group named the same as the LiteLLM team you want**, not clicking "New Team" in the UI first (though you can — see §2.2). The team is created lazily on
 that group's first login if it doesn't already exist. Full worked example: `shared/examples/economy-tiering.md`.
 
 ### 2.2 Creating a team manually (UI or API) — when you need it upfront
@@ -93,8 +87,7 @@ that group's first login if it doesn't already exist. Full worked example: `shar
 Useful when you want the team to exist (with its budget/allowlist already set) **before** the first user
 logs in, e.g. to pre-configure billing separation.
 
-**Admin UI**: `/ui/` → **Teams** → **+ New Team** → set `Team Alias` **to exactly the permission set name**
-the group will log in with — that name match is what connects IdC identity to this team — optionally set
+**Admin UI**: `/ui/` → **Teams** → **+ New Team** → set `Team Alias` **to exactly the authorization-unit name** (permission set for `org-sso`, Cognito User Pool Group name for `cognito-native`) — that name match is what connects the caller's identity to this team — optionally set
 `Models` (allowlist) and `Max Budget`.
 
 **API equivalent**:
@@ -103,17 +96,17 @@ curl -s -X POST "$LITELLM_BASE/team/new" \
   -H "Authorization: Bearer $MASTER_KEY" -H "Content-Type: application/json" \
   -d '{
     "team_alias": "TeamResearch",
-    "models": ["claude-sonnet-4-6", "claude-haiku-4-5"],
+    "models": ["claude-sonnet-5", "claude-haiku-4-5"],
     "max_budget": 200.0,
     "object_permission": {"mcp_access_groups": ["default_tools"]}
   }' | jq .
 ```
 
-> The `team_alias` string **is** the permission set name — it's the *only* join key between IdC and LiteLLM.
+> The `team_alias` string **is** the authorization-unit name — permission set in `org-sso`, Cognito User Pool Group name in `cognito-native`. It is the *only* join key between identity and LiteLLM.
 > A typo in either one silently creates/resolves an unrelated team instead of erroring. If a developer's key
 > isn't getting the budget/allowlist you expect, the first thing to check is whether the team you set up in
 > the Admin UI (`GET /team/list`) has a
-> `team_alias` that matches their IdC permission set name **exactly**.
+> `team_alias` that matches their IdC permission set or group display name **exactly**.
 
 ### 2.3 Creating an individual key/user manually (rare — SSO users never need this)
 
@@ -142,20 +135,21 @@ team/key is calling which model" without leaving the browser.
 
 - Filter by team or key to isolate one developer/org's traffic.
 - A request that never appears here (but the client got an error) means it failed **before** reaching
-  LiteLLM — check the SSO Token Service / CloudFront / ALB layer instead (see §4 CloudWatch).
+  LiteLLM — check the SSO Token Service / ALB layer instead (see §4 CloudWatch).
 - A request that appears with a 4xx (e.g. budget/allowlist rejection) confirms LiteLLM-level governance is
   working as designed — this is not an infra bug.
 
-### 3.2 Langfuse (optional, prompt/response trace level) — only if `enableLangfuse=true`
+### 3.2 Langfuse (optional, prompt/response trace level) — only if `enableLangfuse=true` (requires `certMode='acm'`)
 
 If Observability was answered "Langfuse" in Phase 1, `LangfuseStack` self-hosts Langfuse (own Aurora-backed
-DB, own admin login via Secrets Manager) and LiteLLM is wired to send traces to it (`success_callback`/
+DB, own admin login via Secrets Manager) behind **its own internet-facing ALB + ACM cert** and LiteLLM is wired to send traces to it (`success_callback`/
 `failure_callback` in `config.yaml`). Langfuse gives you the **full prompt + response + intermediate steps**
 per call, not just the summary row the LiteLLM UI shows — use it when you need to debug *why* a model
-answered a certain way, not just *that* it was called.
+answered a certain way, not just *that* it was called. (Langfuse is deployed **only** with `certMode='acm'`;
+`http` deploys are CloudWatch-only.)
 
 ```
-https://<langfuse-domain-or-cloudfront-path>/
+https://<langfuse-acm-domain>/
 ```
 Login credentials are the Langfuse admin secret (Secrets Manager, same pattern as the LiteLLM master key —
 see `cdk-stacks.md` → `LangfuseExports`). Trace-level detail: per-request spans, token counts per step, and
@@ -167,7 +161,7 @@ domain exists before checking `config.enableLangfuse` in the deployed `config/de
 
 ### 3.3 CloudWatch — infrastructure-level logs (everything LiteLLM doesn't see)
 
-For requests that fail before/outside LiteLLM (SSO auth rejection, CloudFront/ALB errors, Lambda errors in
+For requests that fail before/outside LiteLLM (SSO auth rejection, ALB errors, Lambda errors in
 the Token Service, ECS task crash-loop):
 
 ```bash
@@ -177,12 +171,12 @@ aws logs tail /ecs/<litellm-log-group-name> --follow
 # Token Service Lambda logs (SSO ARN parsing, team resolution, /key/generate failures)
 aws logs tail /aws/lambda/<token-service-function-name> --follow
 
-# CloudFront access — check the distribution's logging config / real-time logs if enabled
+# ALB access — enable ALB access logging to S3 (PROD) and query via Athena at the failure timestamp
 ```
 
 Use this layer when the symptom is a **403/500 the developer sees before any model call happens**, or when
-you need to confirm which SSO permission set a specific caller's ARN resolved to (the Token Lambda logs the
-parsed `permission_set` and resolved `team_id` on each call — see `_resolve_team_id` in
+you need to confirm which permission set (`org-sso`) or Cognito User Pool Group (`cognito-native`) a specific caller resolved to (the Token Lambda logs the
+resolved `team`/`team_id` on each call — see `_resolve_team_id` in
 `shared/examples/economy-tiering.md`).
 
 ### Decision guide — which layer to check first
@@ -202,7 +196,7 @@ parsed `permission_set` and resolved `team_id` on each call — see `_resolve_te
 "User" in this gateway = **virtual key**, scoped to a **team**. Budgets can be set at either level; team-level
 is the primary governance lever (matches the SSO-driven tiering design), per-key is for a one-off override.
 
-### 4.1 Team-level budget (the primary mechanism — applies to everyone in that SSO group)
+### 4.1 Team-level budget (the primary mechanism — applies to everyone in that IdC group/permission set)
 
 This is what `economy-tiering.md` demonstrates: set `max_budget` when the team is created (§2.2), or update
 an existing team:
@@ -285,10 +279,13 @@ an official LiteLLM doc page. Use these when you just need the click-path, not t
 - Bedrock-specific parameters (model ID prefix e.g. `bedrock/`, AWS region, AWS credentials/role):
   <https://docs.litellm.ai/docs/providers/bedrock>
 
-> In this gateway, Bedrock auth is via the ECS **Task Role** (SigV4) — do not paste static AWS access
-> keys into `litellm_params` here; leave credential fields empty so LiteLLM falls back to the task's IAM
-> role, consistent with Hard Constraint #6 (tokenless model auth). Only `model_name`/`model`/`aws_region_name`
-> need to be set per the Bedrock docs above.
+> In this gateway, **Claude** (`bedrock/`) auth is via the ECS **Task Role** (SigV4, tokenless) — do not paste
+> static AWS access keys into `litellm_params`; leave credential fields empty so LiteLLM falls back to the
+> task's IAM role. **Mantle** (`bedrock_mantle/`, GPT-5.x) is the exception: its Responses route has no SigV4
+> path, so a short-term Bearer key is minted at runtime into `BEDROCK_MANTLE_API_KEY` by the
+> `mantle_token_refresh` callback (never `AWS_BEARER_TOKEN_BEDROCK` — that boto3-reserved name would break
+> Claude). This is Hard Constraint #6. Only `model_name`/`model`/`aws_region_name` need to be set per model per
+> the Bedrock docs above; do not add an `api_key` for Mantle in `litellm_params` (the callback supplies it via env).
 
 ### 5.2 Per-user budget
 

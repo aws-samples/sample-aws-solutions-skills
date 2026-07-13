@@ -14,13 +14,19 @@ This is two stacks (CfnRoute is regional, so each region's routes live in a same
 
 > The `com.amazonaws.us-east-1.bedrock-mantle` PrivateLink service exists (verify:
 > `aws ec2 describe-vpc-endpoint-services --region us-east-1 --filters Name=service-name,Values=com.amazonaws.us-east-1.bedrock-mantle`).
-> LiteLLM's `bedrock_mantle` provider (#29788 `_resolve_region`) reads the region from, in order:
+> LiteLLM's `bedrock_mantle` provider (`_resolve_region`) reads the region from, in order:
 > `aws_region_name` → `BEDROCK_MANTLE_API_BASE` host → `BEDROCK_MANTLE_REGION` → `AWS_REGION`.
 > So set the GPT models' `aws_region_name` to us-east-1 AND inject env
 > `BEDROCK_MANTLE_REGION=us-east-1` + `BEDROCK_MANTLE_API_BASE=https://bedrock-mantle.us-east-1.api.aws`.
 > ⚠️ `MANTLE_REGION` is a doc alias only — it is **NOT read** by the provider; relying on it leaves
 > the endpoint at `AWS_REGION` (the gateway region) and the call fails with
-> "Cannot connect to host bedrock-mantle.<gw-region>.api.aws". Auth is **SigV4 (Task Role)** — no bearer token.
+> "Cannot connect to host bedrock-mantle.<gw-region>.api.aws".
+> ⚠️ **Auth is a Bearer token, NOT SigV4.** The `bedrock_mantle` Responses route has no SigV4 path
+> (verified against the installed source). A short-term Bedrock API key is minted at runtime from the
+> Task Role into env `BEDROCK_MANTLE_API_KEY` (never `AWS_BEARER_TOKEN_BEDROCK` — boto3-reserved,
+> breaks Claude) by the `mantle_token_refresh` LiteLLM callback. The Task Role still needs the
+> `bedrock-mantle` actions on `project/*` (+`CallWithBearerToken` on `*`) and `aws-marketplace:Subscribe`.
+> See `shared/patterns/litellm-gateway.md` and `shared/reference/constraints.md`.
 
 ## Config (`config/dev.json`)
 

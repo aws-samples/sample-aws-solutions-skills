@@ -17,7 +17,7 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
 | Observability? | Regulated industry — prompt/trace auditing is mandatory → **Langfuse ON** |
 | Region/account? | Gateway `config.awsRegion = us-east-2`. AgentCore Web Search, CDN, and Mantle pinned to `us-east-1`. Bedrock access confirmed (Claude us-east-2 / GPT-5.x us-east-1) |
 | MCP tools? | Web search — **AgentCore Web Search Tool** (built-in connector, us-east-1 gateway). No separate deployment/API key needed |
-| SSO? | IAM Identity Center permission sets: standard `ClaudeCodeUser`, economy `ClaudeCodeEconomy` (reflected in `config.sso`) |
+| SSO? | Helios Bank has an IdC **organization** instance → `authMode="org-sso"`. Permission sets named exactly like LiteLLM teams: `LlmGatewayUser`, `LlmGatewayEconomy` (reflected in `config.sso`). *(If an org only had an IdC **account** instance or no usable org SSO, it would instead use `authMode="cognito-native"` — Cognito User Pool Groups as teams; see `account-instance-setup.md`.)* |
 
 ---
 
@@ -26,15 +26,17 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
 ```json
 {
   "awsRegion": "us-east-2",
+  "authMode": "org-sso",
   "enableLangfuse": true,
   "network": { "vpcCidr": "10.0.0.0/16", "maxAzs": 2, "natGateways": 2 },
   "data": { "minCapacityAcu": 1, "maxCapacityAcu": 8, "engineVersion": "15.15" },
   "litellm": {
-    "certMode": "acm-dns",
+    "certMode": "acm",
     "domainName": "llmlite.helios.example.com",
     "hostedZoneId": "Z0123456789ABCDEFGHIJ",
     "hostedZoneName": "helios.example.com",
     "certificateArn": "",
+    "albIngressCidrs": ["198.51.100.0/24", "203.0.113.0/24"],
     "masterKey": "<strong-random-secret-from-secrets-manager-or-CI>",
     "desiredCount": 2,
     "cpu": 2048,
@@ -45,7 +47,7 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
     "startUrl": "https://d-9067890abc.awsapps.com/start",
     "region": "us-east-1",
     "accountId": "111122223333",
-    "roleName": "ClaudeCodeUser"
+    "roleName": "LlmGatewayUser"
   },
   "agentcore": {
     "webSearchRegion": "us-east-1",
@@ -64,8 +66,8 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
 ```
 
 > **WHY these values**:
-> - `certMode: "acm-dns"` → `bin/app.ts` derives **true** from `useCustomDomain = (certMode === 'acm-dns')`.
->   CdnStack issues a DNS-validated ACM certificate + attaches `domainNames` + Route53 alias + the 3xx Location rewrite Function.
+> - `certMode: "acm"` → `LiteLLMStack` provisions an **internet-facing ALB** on HTTPS:443 with a **regional** public ACM cert issued in `config.awsRegion` from the 3 Route53 zone fields (DNS-validated) + a Route53 A-record alias + an HTTP→443 redirect. CloudFront is removed — the ALB is the edge.
+> - `albIngressCidrs` → the public ALB SG allows ingress only from the corporate NAT egress ranges (a required Discovery answer; the SG allowlist is the access control — there is no AWS WAF).
 > - `natGateways: 2` → enterprise uses NAT per AZ for HA (in contrast to the PoC's 1).
 > - `data.minCapacityAcu: 1` → with steady traffic, raise the floor instead of near-zero.
 > - `desiredCount: 2` → 2 LiteLLM Fargate tasks for availability.
@@ -73,39 +75,38 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
 > - `guardrail.enabled: true` → GuardrailStack creates the content/PII/denied-topics Guardrail, and LiteLLM references its ID/version.
 
 > **Pitfall**: never commit `masterKey` as plaintext. `config/dev.json` is gitignored and injected from CI/Secrets Manager.
-> When `certMode='acm-dns'`, `certificateArn` may be an empty string and still pass schema validation (the 3 domain fields are required).
+> When `certMode='acm'`, `certificateArn` may be an empty string and still pass schema validation as long as the 3 domain fields (`domainName`+`hostedZoneId`+`hostedZoneName`) are set (else synth fail-fast). Optionally set `litellm.albIdleTimeoutSeconds` (default 900s, max 4000s) to raise the long-completion ceiling.
 
 ---
 
-## 3. Org/team governance — SSO group/permission set → LiteLLM team
+## 3. Org/team governance — permission set name → same LiteLLM team
 
-Governance is implemented **not in infrastructure but in Token Lambda constants + LiteLLM teams** (`lambda/token-service/handler.py`). The general form is **SSO group (typically the org name) → team → per-team budget cap + model allowlist**, and you create as many teams as there are orgs. The below is just an **example** showing that pattern with 2 teams (standard/economy); "economy" is not a fixed classification.
+Governance is implemented by the Token Lambda's unbranched IdC mapping plus LiteLLM teams. In this `org-sso` example, the **permission-set name is the LiteLLM `team_alias`**; per-team budget caps and model allowlists are then managed in LiteLLM. The below is just an example with 2 teams (standard/economy); "economy" is not a fixed classification.
 
 ```python
-STANDARD_TEAM_ALIAS = "sso-users"
-ECONOMY_TEAM_ALIAS = "sso-economy"
-ECONOMY_PERMISSION_SETS = {"ClaudeCodeEconomy"}                       # ← Helios's economy permission set name
-ECONOMY_MODELS = ["gpt-5.4", "claude-sonnet-4-6", "claude-haiku-4-5"] # excludes Opus/5.5/Fable
-ECONOMY_MAX_BUDGET_USD = 50.0
+TIER_CONFIG = {
+    "LlmGatewayEconomy": {
+        "models": ["gpt-5.4", "claude-sonnet-5", "claude-haiku-4-5"],
+        "max_budget": 50.0,
+    }
+}  # Optional first-create seed. Permission set name == team_alias; no branching.
 ```
 
 Behavior:
-- A developer logging in with the `ClaudeCodeUser` permission set → Token Lambda, in `_resolve_team_id`, attributes the
-  virtual key to the **STANDARD** team (no model restriction, no budget cap).
-- The `ClaudeCodeEconomy` permission set → attributed to the **ECONOMY** team (model allowlist + $50 cap).
+- A developer logging in with the `LlmGatewayUser` permission set → Token Lambda resolves/creates the same-named `LlmGatewayUser` LiteLLM team.
+- A developer logging in with the `LlmGatewayEconomy` permission set → Token Lambda resolves/creates the same-named `LlmGatewayEconomy` LiteLLM team. The optional `TIER_CONFIG` seed applies only if that team does not already exist.
 - Both teams inherit `MCP_ACCESS_GROUPS = ["default_tools"]` → permission to use the AgentCore Web Search MCP.
 
-> **WHY permission-set-based?** IAM Identity Center is the single source of truth for identity. To move a developer to the
-> economy tier, an admin just changes the permission set in IdC — no need to manually edit keys in the LiteLLM UI.
+> **WHY permission-set-name mapping?** IAM Identity Center is the single source of truth for identity. To move a developer to a different tier, an admin changes the user's group/permission-set assignment in IdC; budgets/model allowlists stay in the same-named LiteLLM team.
 
 ---
 
-## 4. Resulting stack combination (all 11)
+## 4. Resulting stack combination (all 10 — CloudFront removed)
 
-Because `enableLangfuse: true` + `certMode: acm-dns`, **all stacks** are deployed:
+Because `enableLangfuse: true` + `certMode: acm`, **all stacks** are deployed:
 
 ```
-Network → Data → Guardrail → AgentCoreGateway(us-east-1) → LiteLLM → Langfuse(ON) → Auth → Observability → CDN(us-east-1, custom domain) → MantleNetwork(us-east-1) → MantlePeeringRoutes
+Network → Data → Guardrail → AgentCoreGateway(us-east-1) → LiteLLM(acm public ALB) → Langfuse(ON, acm public ALB) → Auth → Observability → MantleNetwork(us-east-1) → MantlePeeringRoutes
 ```
 
 | Stack | Concrete output in this scenario |
@@ -114,27 +115,26 @@ Network → Data → Guardrail → AgentCoreGateway(us-east-1) → LiteLLM → L
 | DataStack | Aurora Serverless v2 (1–8 ACU), LiteLLM & Langfuse DB secrets + db-init |
 | GuardrailStack | Bedrock Guardrail (HATE/INSULTS/SEXUAL/VIOLENCE/MISCONDUCT + denied topics + PII BLOCK) |
 | **AgentCoreGatewayStack** | us-east-1 AgentCore Gateway (MCP, AWS_IAM) + built-in Web Search Tool connector + service role |
-| LiteLLMStack | Fargate **2 tasks**, internal ALB(4000), Task Role SigV4 (+InvokeGateway+Marketplace), master-key secret, publishes the internal URL to SSM |
-| **LangfuseStack** | Fargate Langfuse, internal ALB(3000) — exists because `enableLangfuse: true` |
-| AuthStack | API GW(IAM) + Token Lambda (STANDARD/ECONOMY mapping) + DynamoDB key cache + `config.sso` outputs |
+| LiteLLMStack | Fargate **2 tasks**, **internet-facing ALB (HTTPS:443, regional ACM + Route53 alias, `idleTimeout=900s`)** for developer traffic + a separate **internal ALB (HTTP:4000)** for the Token Service, Task Role: Claude SigV4 + Mantle Bearer (runtime-minted `BEDROCK_MANTLE_API_KEY`) + InvokeGateway + Marketplace, master-key secret, publishes the internal URL to SSM |
+| **LangfuseStack** | Fargate Langfuse behind its **own internet-facing ALB + ACM cert** (Route53 alias) — exists because `enableLangfuse: true` **and** `certMode='acm'` |
+| AuthStack | API GW(IAM) + Token Lambda (permission set name → same `team_alias`) + DynamoDB key cache + `config.sso` outputs |
 | ObservabilityStack | CloudWatch dashboard (ALB requests/5xx, Token Service, Langfuse link) |
-| **CdnStack** | 2 CloudFront distributions (LiteLLM & Langfuse) **+ ACM(us-east-1) + Route53 alias + Location rewrite Function**, LiteLLM origin 60s timeout |
 | **MantleNetworkStack** | us-east-1 peer VPC + bedrock-mantle endpoint + cross-region peering + acceptance + PHZ |
 | **MantlePeeringRoutesStack** | primary-region (us-east-2) routes to the peer CIDR |
 
-> Because CdnStack has `useCustomDomain=true`, the cdk-nag **CFR4 suppression in `cdk.json` need not apply**
-> (the custom domain + ACM enforce TLSv1.2_2021, so CFR4 does not fire). A decisive difference from the domain-less PoC.
+> With `certMode='acm'` the public ALB uses a modern TLS policy (e.g. `TLS13_RES`) on a real regional ACM cert, so there is no default-cert TLS downgrade to justify — the old CloudFront `AwsSolutions-CFR4` finding does not exist (CloudFront is removed). A decisive difference from the plaintext `http` PoC path.
 
 ---
 
 ## 5. Onboarding output values
 
 ```bash
-ALB_DNS=llmlite.helios.example.com \
-TOKEN_SERVICE_URL=https://abc123.execute-api.us-east-2.amazonaws.com/v1/auth/token \
+# Zero-touch: setup-developer.sh reads outputs.json (GatewayUrl → https://llmlite.helios.example.com,
+# TokenServiceUrl, SSO outputs) — nothing to pass. Env vars remain as overrides only.
+cdk deploy --all --outputs-file outputs.json
 ./scripts/setup-developer.sh
 ```
 
-- Standard developer: `aws sso login --profile llm-gateway` (permission set `ClaudeCodeUser`) → all models.
-- Economy org: same flow but permission set `ClaudeCodeEconomy` → $50 cap + low-cost model allowlist.
+- Standard developer: `aws sso login --profile llm-gateway` (permission set `LlmGatewayUser`) → all models.
+- Economy org: same flow but permission set/team alias `LlmGatewayEconomy` → optional first-create $50 cap + low-cost model allowlist seed.
 - Auditing: per-prompt/trace tracking in the Langfuse UI (`https://langfuse.helios.example.com`).

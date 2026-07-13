@@ -1,17 +1,17 @@
-# IAM Identity Center (SSO) Setup — preparation the skill must drive
+# IAM Identity Center Organization Instance (`org-sso`) Setup — permission-set path
 
-The Token Service **only** accepts IAM Identity Center principals (`AWSReservedSSO_` ARN). So before anyone can use the gateway, the operator must provision IdC. The skill MUST ask the SSO Discovery questions and then drive (or hand off) this setup — it is not optional for the SSO path.
+This document applies only when `authMode="org-sso"` and the IAM Identity Center instance is an **organization instance** with permission sets. The Token Service accepts IAM Identity Center permission-set principals (`AWSReservedSSO_` ARN). If Discovery finds an **account instance**, do not use this procedure; use `account-instance-setup.md` instead.
 
-## Discovery questions (ask in Phase 1)
+## Discovery questions (ask in Phase 1 for `org-sso`)
 
 1. **Is IAM Identity Center already enabled** in the target account/org? If not, it must be enabled first (org management or delegated admin).
 2. **IdC instance region** — which region hosts the IdC instance? (SSO login uses this region; it may differ from the gateway region — that's fine.)
 3. **Identity source** — IdC built-in directory (default) or external IdP (Okta / Entra ID / Google)? Determines where users + passwords live.
-4. **Permission set — create new or reuse?** Ask explicitly: *should I create a NEW permission set for this gateway, or reuse an existing one? what name?* Default to **creating a new, uniquely-named** one (e.g. `LlmGatewaySeoul`). ⚠️ Do **not** silently reuse a permission set just because its name matches a default (`ClaudeCodeUser`) — a name match is **not** ownership; an existing one may belong to another gateway/groups and editing it changes their access. If the user chooses reuse, confirm the exact ARN and that its inline policy `Resource` targets **this** gateway's region + Token Service API id. Then map group(s)/permission-set name(s) → LiteLLM team (budget cap + model allowlist) as the user wants.
+4. **Permission set — create new or reuse?** Ask explicitly: *should I create a NEW permission set for this gateway, or reuse an existing one? what name?* Default to **creating a new, uniquely-named** one (e.g. `LlmGatewaySeoul`). ⚠️ Do **not** silently reuse a permission set just because its name matches a default (`LlmGatewayUser`) — a name match is **not** ownership; an existing one may belong to another gateway/groups and editing it changes their access. If the user chooses reuse, confirm the exact ARN and that its inline policy `Resource` targets **this** gateway's region + Token Service API id. Then map group(s)/permission-set name(s) → LiteLLM team (budget cap + model allowlist) as the user wants.
 5. **Assignment — which group or users?** Ask which IdC **group(s)** (preferred) or individual users to assign the permission set to, and create the assignment(s) accordingly. Never assume the assignment.
 6. **Session duration** — default PT1H.
 
-⛔ If the user wants the SSO path but IdC is not enabled / no users exist, surface this as a prerequisite at GATE 1.
+⛔ If the user wants `org-sso` but IdC is not enabled / no users exist / no permission sets are available, surface this as a prerequisite at GATE 1. If the instance is an **account instance** (or there is no usable organization IdC), switch to `authMode="cognito-native"` and follow `account-instance-setup.md` — do **not** attempt IdC federation, which an account instance cannot support.
 
 ## `config.sso` (generated) + AuthStack outputs
 
@@ -22,7 +22,7 @@ The SSO Discovery answers are written into a first-class **`config.sso`** block,
   "startUrl": "https://<IDC_ID>.awsapps.com/start",  // IdC access portal URL
   "region": "us-east-1",                              // IdC home region (may differ from awsRegion)
   "accountId": "123456789012",                        // 12-digit account devs assume into
-  "roleName": "ClaudeCodeUser"                         // permission set / role name (no underscore)
+  "roleName": "LlmGatewayUser"                         // permission set / role name (no underscore)
 }
 ```
 
@@ -48,7 +48,7 @@ INST=arn:aws:sso:::instance/ssoins-xxxx ; IDS=d-xxxx ; ACCT=<account-id>
 
 # 1) Permission set — NO UNDERSCORE in the name (see Gotchas), short session
 PS=$(aws sso-admin create-permission-set --instance-arn "$INST" \
-  --name ClaudeCodeUser --session-duration PT1H \
+  --name LlmGatewayUser --session-duration PT1H \
   --description "Invoke the LLM gateway SSO Token Service" \
   --query 'PermissionSet.PermissionSetArn' --output text)
 
@@ -90,7 +90,7 @@ IdC built-in directory has **no public API** to set/reset a user password. After
 # [profile llm-gateway]
 #   sso_session = llm-gateway
 #   sso_account_id = <account-id>
-#   sso_role_name  = ClaudeCodeUser
+#   sso_role_name  = LlmGatewayUser
 #   region = <gw-region>
 # NOTE: the profile is named after the gateway ("llm-gateway"), not a single
 # client — Claude Code AND Codex share this one profile via the key helper.
@@ -100,7 +100,7 @@ Then the key helper (`apiKeyHelper`/`auth.command`) fetches the virtual key auto
 
 ## Gotchas (must respect)
 
-- **Permission-set name MUST NOT contain `_`.** The Token Lambda parses `AWSReservedSSO_<PermissionSetName>_<id>` with `[^_/]+` for the name — an underscore truncates/breaks the tier match. Use `ClaudeCodeUser`, `ClaudeCodeEconomy` (camelCase, no underscore).
+- **Permission-set name MUST NOT contain `_`.** The Token Lambda parses `AWSReservedSSO_<PermissionSetName>_<id>` with `[^_/]+` for the name — an underscore truncates/breaks the tier match. Use `LlmGatewayUser`, `LlmGatewayEconomy` (camelCase, no underscore).
 - **Least privilege**: the permission set needs only `execute-api:Invoke` on the Token Service API ARN — nothing else to use the gateway.
 - **IdC region ≠ gateway region is OK.** SSO login uses the IdC region; the token helper derives the SigV4 region from the Token Service URL, so they're independent.
 - **Password activation is console-only** — plan a human handoff step; full automation isn't possible for the built-in directory.
@@ -138,25 +138,26 @@ None of that touches `handler.py` again. Raising a team's budget, changing its m
 another org later is **also** pure UI (`Teams` → edit) or IdC console work — an admin can do all of it
 without a developer.
 
-### If you don't make this change: what you're signing up for
+### Anti-pattern to avoid: hard-coded tier branches
 
-The as-shipped `economy-tiering.md` code branches on specific permission-set names
-(`ECONOMY_PERMISSION_SETS = {"ClaudeCodeEconomy"}`) with their `models`/`max_budget` written directly into
-`handler.py`. Every new org/tier means: edit the constant → `cdk deploy` (or redeploy the Lambda) → only
-then does the console-side provisioning above take effect. This requires someone with repo access and
-deploy permissions, not just IdC/LiteLLM admin access — plan for that dependency if you keep the sample
-code as-is.
+Do **not** generate Lambda code that branches on specific permission-set names (for example,
+`if permission_set in {...}: use economy_team else standard_team`). That design makes every new org/tier a
+code change and redeploy, which violates this skill's steady-state onboarding goal.
 
-(A third option — an external DynamoDB/SSM mapping table instead of in-code constants — also removes the
-per-onboarding redeploy, at the cost of extra infrastructure to build once. Only worth it over the
-recommended approach above if you need an audit trail of tier assignments outside of IdC/LiteLLM
-themselves.)
+The supported pattern is:
+
+- `team_alias = permission_set` in `org-sso`.
+- Optional `TIER_CONFIG[team_alias]` only seeds first-time team creation with starter `models`/`max_budget`.
+- Once the team exists, LiteLLM Admin UI is the source of truth for model allowlist and budgets.
+
+A third option — an external DynamoDB/SSM mapping table instead of in-code constants — can also remove
+per-onboarding redeploys, but only use it if the customer explicitly needs a separately auditable mapping
+outside IdC/LiteLLM. It is not required for the default skill output.
 
 The LiteLLM team itself can be pre-created via Admin UI (**Teams → + New Team**) or left to auto-create on
 the group's first login — see `shared/reference/litellm-admin-guide.md` §2.
 
-Whichever path you're on, the most common failure mode is the same: the IdC side looks fully provisioned
-(user, group, permission set, account assignment all correct), but calls silently land in the
-**default/standard team** with no budget cap or model restriction, because nothing told `_resolve_team_id`
-how to route that permission set. Verify with: `aws sso login` → first gateway call → Admin UI **Teams**
-shows the expected `team_id`/`max_budget` for that login.
+The most common failure mode is a name mismatch: IdC looks fully provisioned (user, group, permission set,
+account assignment all correct), but calls land in an unexpected team because the permission-set name and
+LiteLLM `team_alias` differ. Verify with: `aws sso login` → first gateway call → Admin UI **Teams** shows the
+expected `team_alias`/`team_id`/`max_budget` for that login.

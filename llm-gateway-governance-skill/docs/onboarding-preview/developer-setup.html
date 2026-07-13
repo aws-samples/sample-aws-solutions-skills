@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Gateway — 개발자 설정 가이드</title>
+<style>
+  :root{--gold:#F2C94C;--purple:#8B5CF6;--blue:#3B82F6;--teal:#2DD4BF;--ink:#eaf1fb;--mut:#9bb0cc;
+    --grad:linear-gradient(90deg,#fbd36b,#c08bff 45%,#5aa6ff 100%);--grad2:linear-gradient(135deg,#8B5CF6,#3B82F6 55%,#2DD4BF);}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Noto Sans KR","Apple SD Gothic Neo",sans-serif;color:var(--ink);line-height:1.6;
+    background:radial-gradient(900px 600px at 12% 4%,rgba(139,92,246,.22),transparent 60%),
+      radial-gradient(820px 560px at 90% 10%,rgba(59,130,246,.18),transparent 60%),
+      linear-gradient(160deg,#0a1020,#0e1830 60%,#0a1222);min-height:100vh}
+  .wrap{max-width:920px;margin:0 auto;padding:40px 26px 80px}
+  .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
+    padding:5px 13px;border-radius:30px;color:#0c1020;background:var(--grad)}
+  h1{font-size:36px;margin:14px 0 6px;font-weight:900;letter-spacing:-.5px}
+  h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{font-size:17px;color:#cbdaee;margin:0 0 8px}
+  h2{font-size:22px;margin:34px 0 12px;font-weight:800;color:#fff;display:flex;align-items:center;gap:10px}
+  h2 .n{flex-shrink:0;width:30px;height:30px;border-radius:9px;background:var(--grad);color:#0c1020;font-weight:900;
+    display:flex;align-items:center;justify-content:center;font-size:15px}
+  p{margin:8px 0;color:#cbdaee}
+  code{background:rgba(255,255,255,.08);color:#ffe08a;padding:1px 6px;border-radius:5px;font-size:.88em;font-family:Consolas,monospace}
+  pre{background:rgba(6,12,26,.85);border:1px solid rgba(255,255,255,.12);border-radius:12px;
+    padding:14px 16px;overflow:auto;font-size:13.5px;font-family:Consolas,monospace;color:#e7eefb;box-shadow:0 10px 26px rgba(0,0,0,.3)}
+  pre .c{color:#7fd1b9}
+  .card{border-radius:14px;padding:16px 18px;margin:12px 0;
+    background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12)}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14.5px;margin:8px 0}
+  th,td{border-bottom:1px solid rgba(255,255,255,.09);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:linear-gradient(180deg,rgba(139,92,246,.28),rgba(59,130,246,.16));color:#fff;font-weight:700}
+  td b{color:#ffe08a}
+  .note{border-left:4px solid var(--teal);background:rgba(45,212,191,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:12px 0;font-size:14.5px}
+  .variant{border-left:4px solid var(--purple);background:rgba(139,92,246,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:10px 0}
+  .variant .t{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#c4b5fd;font-weight:800;margin-bottom:4px}
+  .tag{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:20px;background:rgba(59,130,246,.18);
+    border:1px solid rgba(59,130,246,.4);color:#bcd7ff;margin-left:6px;vertical-align:middle}
+  .foot{margin-top:40px;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);color:#8299b5;font-size:13px}
+  a{color:#8bd0ff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="kicker">Developer Onboarding</span>
+  <h1>LLM Gateway — <span class="g">개발자 설정 가이드</span></h1>
+  <p class="lead">사내 LLM 게이트웨이를 통해 <b>Claude Code</b> 와 <b>Codex</b> 에서 승인된 모델을 사용하는 방법입니다. 관리자가 배포한 값으로 채워져 있습니다.</p>
+
+  <div class="card">
+    <table>
+      <tr><th>항목</th><th>값</th></tr>
+      <tr><td>게이트웨이 URL</td><td><b>https://llmgw.example.com</b></td></tr>
+      <tr><td>리전</td><td>us-east-1</td></tr>
+      <tr><td>사용 가능 모델</td><td><code>claude-opus</code> · <code>claude-sonnet</code> · <code>claude-haiku</code> · <code>claude-fable</code> · <code>gpt-5.5</code></td></tr>
+      <tr><td>로그인 방식</td><td>Cognito Hosted UI (<code>llmgw-login</code>) <span class="tag">authMode에 따라 상이</span></td></tr>
+    </table>
+    <div class="note">가상 키(virtual key)는 로그인 후 토큰 헬퍼가 자동 발급/회전합니다. <b>키를 직접 붙여넣지 마세요</b> — 아래 설정이 헬퍼를 통해 자동으로 주입합니다.</div>
+  </div>
+
+  <h2><span class="n">1</span> 로그인 (가상 키 발급 준비)</h2>
+  <div class="variant">
+    <div class="t">authMode: cognito-native (Org SSO 미사용 환경)</div>
+    <p><code>llmgw-login</code> 실행 → 브라우저에 <b>Cognito Hosted UI</b>(이메일/비밀번호)가 열립니다. 로그인하면 토큰이 로컬에 캐시됩니다. <b>AWS CLI·자격증명 불필요.</b></p>
+    <pre>llmgw-login          <span class="c"># Windows: llmgw-login.ps1</span></pre>
+  </div>
+  <div class="variant">
+    <div class="t">authMode: org-sso (IdC 조직 인스턴스)</div>
+    <p>SSO 프로필로 로그인합니다. 토큰 헬퍼가 SigV4로 서명합니다.</p>
+    <pre>aws sso login --profile llmgw</pre>
+  </div>
+
+  <h2><span class="n">2</span> 게이트웨이 접속 <span class="tag">certMode: http 일 때만</span></h2>
+  <p>도메인 없는 PoC 배포(<b>certMode: http</b>)는 게이트웨이가 <b>HTTP(평문)</b> 로 서비스됩니다 — 가상 키와 프롬프트가 암호화 없이 전송되므로 PoC 용도로만 사용하세요. 접근은 허용된 사내 IP 대역(Security Group allowlist)에서만 가능합니다. 별도의 인증서 신뢰나 터널 설정은 필요 없습니다.</p>
+  <div class="note"><b>certMode: acm</b>(공인 인증서) 환경이면 이 단계는 건너뜁니다 — 공인 신뢰라 아무 설정도 필요 없습니다. http 환경에서 접속이 안 되면 현재 네트워크의 공인 IP가 관리자에게 등록된 허용 CIDR에 포함되는지 확인하세요.</div>
+
+  <h2><span class="n">3</span> Claude Code 설정</h2>
+  <p><code>~/.claude/settings.json</code> 에 아래를 병합합니다. <b>4개 모델 별칭을 모두</b> 넣어야 <code>/model</code> 선택기에 Fable 티어까지 노출됩니다.</p>
+  <pre>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://llmgw.example.com",
+    "AWS_REGION": "us-east-1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL":   "claude-opus",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "claude-haiku",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL":  "claude-fable"
+  },
+  "apiKeyHelper": "~/.llmgw/gateway_auth.sh apiKey",
+  "permissions": { "deny": ["WebSearch"] }
+}</pre>
+  <div class="note"><code>permissions.deny: ["WebSearch"]</code> 로 Claude 내장 WebSearch를 끕니다 — 대신 아래 5단계의 관리형 웹 검색 MCP를 사용합니다.</div>
+
+  <h2><span class="n">4</span> Codex 설정</h2>
+  <p><code>~/.codex/config.toml</code> 에 아래를 추가합니다.</p>
+  <pre>model = "gpt-5.5"
+
+[model_providers.llmgw]
+name     = "llmgw"
+base_url = "https://llmgw.example.com/v1"
+wire_api = "responses"
+web_search = "disabled"
+
+[model_providers.llmgw.auth]
+command = "~/.llmgw/gateway_auth.sh token"</pre>
+
+  <h2><span class="n">5</span> 웹 검색 MCP 등록 (Claude Code)</h2>
+  <p>서버 측 등록만으로는 클라이언트에서 안 보입니다. <code>headersHelper</code> 로 회전 키를 동적 주입하며 등록하세요.</p>
+  <pre>claude mcp add-json websearch '{
+  "type": "http",
+  "url": "https://llmgw.example.com/mcp/",
+  "headersHelper": "~/.llmgw/gateway_auth.sh mcp-headers"
+}'</pre>
+  <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
+
+  <h2><span class="n">6</span> 동작 확인</h2>
+  <pre>curl -s https://llmgw.example.com/v1/models \
+  -H "Authorization: Bearer $(~/.llmgw/gateway_auth.sh token)"
+<span class="c"># 기대: claude-opus/sonnet/haiku/fable + gpt-5.5 목록</span></pre>
+  <p>이제 <code>claude</code> / <code>codex</code> 를 실행하면 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
+
+  <div class="foot">
+    문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 포함되지 않습니다 — 여러분의 가상 키는 로그인으로 자동 발급됩니다.<br>
+    <em>(예시 값으로 렌더링된 미리보기입니다. 실제 배포 시 관리자가 배포값으로 채운 문서를 받게 됩니다.)</em>
+  </div>
+</div>
+</body>
+</html>

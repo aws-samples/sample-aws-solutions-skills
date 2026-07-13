@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LLM Gateway 구축 — 사전 준비사항</title>
+<style>
+  :root{
+    --ink:#0f172a; --muted:#64748b; --soft:#94a3b8;
+    --line:#eceff5; --card:#ffffff; --bg:#f6f7fb;
+    --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 48%,#22d3ee 100%);
+    --grad-soft:linear-gradient(135deg,rgba(99,102,241,.12),rgba(34,211,238,.12));
+    --ok:#0ea371; --warn:#d08700; --bad:#e11d48;
+    --codebg:#0b1220; --codeink:#e6edf6;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;color:var(--ink);background:var(--bg);
+    font-family:"Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,-apple-system,sans-serif;
+    font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased;}
+  body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(40vw 40vw at 12% -6%, rgba(99,102,241,.16), transparent 60%),
+      radial-gradient(42vw 42vw at 100% 8%, rgba(34,211,238,.14), transparent 60%),
+      radial-gradient(50vw 50vw at 50% 110%, rgba(139,92,246,.12), transparent 60%);}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 22px 96px;}
+
+  .hero{position:relative;overflow:hidden;border-radius:24px;padding:42px 40px 38px;margin-bottom:26px;
+    color:#fff;background:linear-gradient(135deg,#11163a 0%,#3b2f8f 46%,#0e7490 100%);
+    box-shadow:0 24px 60px -18px rgba(49,46,129,.6);}
+  .hero::after{content:"";position:absolute;inset:0;
+    background:radial-gradient(60% 90% at 85% -10%, rgba(255,255,255,.18), transparent 60%);}
+  .hero .eyebrow{position:relative;font-size:13px;font-weight:700;letter-spacing:3px;
+    text-transform:uppercase;color:#a5b4fc;margin:0 0 10px;}
+  .hero h1{position:relative;margin:0 0 12px;font-size:34px;font-weight:800;letter-spacing:-.5px;line-height:1.2;}
+  .hero p{position:relative;margin:3px 0;font-size:15.5px;color:#dbe3f4;}
+  .hero .pill{position:relative;display:inline-flex;align-items:center;gap:8px;margin-top:16px;
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.28);backdrop-filter:blur(6px);
+    color:#eef2ff;padding:7px 15px;border-radius:999px;font-size:13.5px;font-weight:600;}
+  .hero .pill::before{content:"";width:8px;height:8px;border-radius:50%;
+    background:linear-gradient(135deg,#a5b4fc,#67e8f9);box-shadow:0 0 12px #67e8f9;}
+
+  /* Tabs */
+  .tabs{display:flex;gap:8px;margin:0 0 24px;flex-wrap:wrap;position:sticky;top:0;z-index:20;
+    padding:12px;background:rgba(246,247,251,.82);backdrop-filter:blur(10px);border-radius:18px;
+    border:1px solid var(--line);box-shadow:0 10px 30px -22px rgba(15,23,42,.5);}
+  .tab{flex:1 1 auto;min-width:180px;display:flex;align-items:center;gap:11px;cursor:pointer;
+    padding:13px 16px;border-radius:13px;border:1px solid transparent;background:transparent;
+    color:var(--muted);font-size:14.5px;font-weight:700;transition:all .18s ease;text-align:left;}
+  .tab:hover{background:var(--grad-soft);color:var(--ink);}
+  .tab .tnum{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;flex:0 0 auto;
+    border-radius:9px;background:#e7e9f4;color:var(--muted);font-size:15px;font-weight:800;transition:all .18s ease;}
+  .tab small{display:block;font-size:11.5px;font-weight:600;color:var(--soft);letter-spacing:.3px;}
+  .tab.active{background:#fff;color:var(--ink);border-color:var(--line);
+    box-shadow:0 12px 26px -16px rgba(99,102,241,.55);}
+  .tab.active .tnum{background:var(--grad);color:#fff;box-shadow:0 8px 16px -6px rgba(99,102,241,.7);}
+  .tab.active small{color:#6366f1;}
+
+  .panel{display:none;animation:fade .25s ease;}
+  .panel.active{display:block;}
+  @keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+
+  .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:20px;
+    padding:28px 30px;margin:20px 0;box-shadow:0 12px 34px -20px rgba(15,23,42,.25);}
+  h2{position:relative;font-size:21px;font-weight:800;letter-spacing:-.3px;margin:0 0 18px;
+    padding-bottom:14px;display:flex;align-items:center;gap:14px;}
+  h2::after{content:"";position:absolute;left:0;bottom:0;width:54px;height:3px;border-radius:3px;background:var(--grad);}
+  h2 .num{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;
+    border-radius:12px;background:var(--grad);color:#fff;font-size:18px;font-weight:800;flex:0 0 auto;
+    box-shadow:0 8px 18px -6px rgba(99,102,241,.7);}
+  h2 .tag{font-size:12px;font-weight:800;color:#fff;background:var(--grad);padding:5px 12px;border-radius:999px;
+    box-shadow:0 6px 14px -6px rgba(99,102,241,.7);}
+  .right{margin-left:auto;}
+  h3{font-size:16px;font-weight:800;margin:22px 0 10px;color:var(--ink);}
+  p,li{font-size:15.5px;}
+  .muted{color:var(--muted);font-size:14.5px;}
+  .badge{display:inline-flex;align-items:center;font-size:12.5px;font-weight:800;padding:4px 12px;border-radius:999px;}
+  .b-req{color:var(--bad);background:rgba(225,29,72,.10);}
+  .b-opt{color:#4f46e5;background:rgba(99,102,241,.12);}
+  .b-win{color:#0369a1;background:rgba(3,105,161,.12);}
+  .b-mac{color:#7c3aed;background:rgba(124,58,237,.12);}
+
+  table{width:100%;border-collapse:separate;border-spacing:0;margin:14px 0;font-size:14.5px;
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;}
+  thead th{background:linear-gradient(135deg,#1e293b,#334155);color:#fff;font-weight:700;
+    padding:12px 15px;text-align:left;}
+  td{padding:12px 15px;border-top:1px solid var(--line);vertical-align:middle;}
+  tbody tr:nth-child(even) td{background:#fafbfe;}
+  .first-strong td:first-child{font-weight:700;white-space:nowrap;}
+
+  code{background:rgba(99,102,241,.10);color:#4f46e5;padding:2px 7px;border-radius:7px;
+    font-size:13.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap;}
+  pre{position:relative;background:var(--codebg);color:var(--codeink);border-radius:14px;padding:18px;overflow:auto;
+    margin:12px 0;border:1px solid rgba(148,163,184,.18);font-size:13.5px;line-height:1.7;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;box-shadow:0 12px 30px -18px rgba(2,6,23,.8);}
+  pre::before{content:"";position:absolute;left:0;top:0;right:0;height:3px;background:var(--grad);border-radius:14px 14px 0 0;}
+  pre code{background:none;color:inherit;padding:0;white-space:pre;}
+  .os{display:inline-block;font-size:12px;font-weight:800;color:#4f46e5;background:var(--grad-soft);
+    padding:3px 10px;border-radius:8px;margin:14px 0 2px;}
+
+  .step{position:relative;padding:2px 0 2px 0;margin:18px 0;}
+  ol.steps{counter-reset:s;list-style:none;padding-left:0;margin:14px 0;}
+  ol.steps>li{position:relative;padding:2px 0 16px 46px;margin:0;}
+  ol.steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;
+    width:30px;height:30px;border-radius:9px;background:var(--grad);color:#fff;font-weight:800;font-size:14px;
+    display:flex;align-items:center;justify-content:center;box-shadow:0 8px 16px -7px rgba(99,102,241,.7);}
+  ol.steps>li:not(:last-child)::after{content:"";position:absolute;left:14px;top:34px;bottom:2px;width:2px;
+    background:linear-gradient(180deg,rgba(99,102,241,.5),rgba(34,211,238,.18));}
+  ol.steps>li b{color:var(--ink);}
+
+  .sources{margin:0 0 20px;padding:16px 20px;border-radius:16px;background:#fff;border:1px solid var(--line);
+    box-shadow:0 12px 30px -22px rgba(15,23,42,.4);}
+  .sources .slabel{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:800;letter-spacing:1.5px;
+    text-transform:uppercase;color:var(--soft);margin:0 0 10px;}
+  .sources .slabel::before{content:"";width:18px;height:2px;border-radius:2px;background:var(--grad);}
+  .sources ul{list-style:none;margin:0;padding:0;}
+  .sources li{margin:7px 0;padding-left:22px;position:relative;font-size:14px;}
+  .sources li::before{content:"↗";position:absolute;left:0;top:0;color:#6366f1;font-weight:800;}
+  .sources a{color:#4f46e5;text-decoration:none;font-weight:600;border-bottom:1px solid rgba(99,102,241,.3);
+    word-break:break-all;}
+  .sources a:hover{border-bottom-color:#4f46e5;}
+  .sources .stag{display:inline-block;font-size:11px;font-weight:800;color:#fff;background:var(--grad);
+    padding:1px 8px;border-radius:6px;margin-right:7px;vertical-align:middle;}
+
+  .callout{position:relative;padding:14px 16px 14px 18px;border-radius:12px;margin:14px 0;background:var(--grad-soft);overflow:hidden;}
+  .callout::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--grad);}
+  .callout.req{background:rgba(225,29,72,.08);}
+  .callout.req::before{background:linear-gradient(180deg,#fb7185,#e11d48);}
+
+  ul,ol{margin:10px 0;padding-left:22px;} li{margin:6px 0;}
+  ul.clean{list-style:none;padding-left:2px;}
+  ul.clean li{position:relative;padding:6px 0 6px 24px;}
+  ul.clean li::before{content:"";position:absolute;left:2px;top:13px;width:8px;height:8px;border-radius:50%;background:var(--grad);}
+
+  footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);color:var(--soft);font-size:13px;text-align:center;}
+  footer b{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800;}
+  @media print{body::before{display:none;}body{background:#fff;}.hero,.card{box-shadow:none;}.card{break-inside:avoid;}
+    .tabs{display:none;}.panel{display:block!important;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <p class="eyebrow">LLM Gateway Governance · 사전 준비</p>
+    <h1>이 Skill로 LLM Gateway를 구축하기 전에</h1>
+    <p>Kiro · Claude Code · Amazon Quick Desktop과 대화하며 사내 개발자용 <b>LLM 거버넌스 게이트웨이</b>를 AWS에 배포합니다.</p>
+    <p>아래 6가지를 <b>Phase 1 Discovery 시작 전에</b> 모두 확인하면, 배포 중간(<code>cdk deploy</code>)에서의 실패를 예방할 수 있습니다.</p>
+    <span class="pill">Phase 1 전에 모두 ✓ — 하나라도 빠지면 특정 단계에서 블로커</span>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="t1"><span class="tnum">1</span>AI 도구<small>Kiro · Claude Code · Quick</small></button>
+    <button class="tab" data-tab="t2"><span class="tnum">2</span>로컬 툴체인<small>Docker · Node · CDK · CLI</small></button>
+    <button class="tab" data-tab="t3"><span class="tnum">3</span>AWS 계정 · 권한<small>계정 · IAM · Bedrock</small></button>
+    <button class="tab" data-tab="t4"><span class="tnum">4</span>IAM Identity Center<small>조직? 계정(Linked)?</small></button>
+    <button class="tab" data-tab="t5"><span class="tnum">5</span>도메인 · TLS<small>사용 도메인 있나요?</small></button>
+    <button class="tab" data-tab="t6"><span class="tnum">✓</span>체크리스트<small>배포 전 최종 점검</small></button>
+  </div>
+
+  <!-- ===================== TAB 1: AI 도구 ===================== -->
+  <section class="panel active" id="t1">
+    <div class="callout">이건 <b>Agent Skill</b>이지 독립 실행 CLI가 아닙니다 — <code>SKILL.md</code>를 로드해 다단계 워크플로우를 구동하는 <b>AI 코딩 도구 안에서만</b> 동작합니다. 아래 3개 중 <b>하나</b>가 설치돼 있어야 합니다. (Docker/Node/CDK/AWS CLI 등 나머지 준비물은 모두 이 도구 <b>안에서</b> 검증됩니다.)</div>
+
+    <section class="card">
+      <h2><span class="num">1</span> Skill을 실행할 AI 도구 (하나 선택) <span class="badge b-req right">필수</span></h2>
+      <table class="first-strong">
+        <colgroup><col style="width:26%"><col style="width:40%"><col></colgroup>
+        <thead><tr><th>도구</th><th>설치</th><th>Skill 설치 경로</th></tr></thead>
+        <tbody>
+          <tr><td>Kiro</td><td><a href="https://kiro.dev" target="_blank" rel="noopener">https://kiro.dev</a></td><td><code>~/.kiro/skills/llm-gateway-governance/</code></td></tr>
+          <tr><td>Claude Code</td><td><code>npm install -g @anthropic-ai/claude-code</code> · <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener">docs</a></td><td><code>~/.claude/skills/llm-gateway-governance/</code></td></tr>
+          <tr><td>Amazon Quick Desktop</td><td><a href="https://aws.amazon.com/ko/quick/desktop/" target="_blank" rel="noopener">https://aws.amazon.com/ko/quick/desktop</a></td><td><code>~/.quickwork/skills/llm-gateway-governance/</code></td></tr>
+        </tbody>
+      </table>
+      <p class="muted">설치 명령(<code>ln -sf</code> / <code>cp -r</code>)은 스킬 <code>README.md</code> → Install 섹션 참고. 다운로드: <a href="/llm-gateway-governance-skill.zip">llm-gateway-governance-skill.zip</a></p>
+    </section>
+  </section>
+
+  <!-- ===================== TAB 2: 로컬 툴체인 ===================== -->
+  <section class="panel" id="t2">
+    <div class="callout"><b>Docker</b>가 첫 배포의 가장 흔한 걸림돌입니다 — <code>cdk deploy</code>(Phase 5)가 LiteLLM 프록시 이미지를 CDK <code>fromAsset</code>로 빌드하므로 <b>데몬이 반드시 실행 중</b>이어야 합니다. 실패는 synth 성공 <b>이후</b> 늦게 발생하니, 배포 전에 미리 켜 두세요.</div>
+
+    <section class="card">
+      <h2><span class="num">2</span> 필수 로컬 도구 <span class="badge b-req right">필수</span></h2>
+      <table class="first-strong">
+        <colgroup><col style="width:22%"><col style="width:20%"><col></colgroup>
+        <thead><tr><th>도구</th><th>최소 버전</th><th>왜 필요한가 · 확인</th></tr></thead>
+        <tbody>
+          <tr><td>Docker (데몬 실행)</td><td>최신</td><td>LiteLLM 이미지 <code>fromAsset</code> 빌드 · <code>docker info</code></td></tr>
+          <tr><td>Node.js</td><td>18.x / 20.x LTS</td><td>CDK 앱 + npm/npx · <code>node -v</code></td></tr>
+          <tr><td>AWS CDK CLI</td><td>v2</td><td><code>synth</code>/<code>deploy</code>/<code>bootstrap</code> · <code>cdk --version</code></td></tr>
+          <tr><td>AWS CLI</td><td>v2</td><td>SSO 로그인·CLI 검증 · <code>aws --version</code></td></tr>
+          <tr><td>jq <span class="badge b-opt">선택</span></td><td>any</td><td><code>outputs.json</code> 파싱 · <code>jq --version</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2><span class="num">M</span> macOS 설치 <span class="badge b-mac right">macOS</span></h2>
+      <pre><code>brew install --cask docker      # 설치 후 1회 실행해 데몬 기동
+brew install node@20            # 또는 nvm install 20 &amp;&amp; nvm use 20
+npm install -g aws-cdk
+brew install awscli jq</code></pre>
+      <p class="muted"><code>docker info</code> 가 "Cannot connect to the Docker daemon" 이면 Docker Desktop을 실행하고 재시도.</p>
+    </section>
+
+    <section class="card">
+      <h2><span class="num">L</span> Linux 설치 (Ubuntu/Debian) <span class="badge b-mac right">Linux</span></h2>
+      <pre><code># Docker Engine (배포판 docker.io는 구버전 → 공식 스크립트 권장)
+curl -fsSL https://get.docker.com -o get-docker.sh &amp;&amp; sudo sh get-docker.sh
+sudo usermod -aG docker $USER   # 재로그인 필요
+sudo systemctl enable --now docker
+# Node 20 (nvm 권장)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.bashrc &amp;&amp; nvm install 20
+npm install -g aws-cdk
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip &amp;&amp; sudo ./aws/install       # ARM: -linux-aarch64.zip
+sudo apt-get update &amp;&amp; sudo apt-get install -y jq</code></pre>
+    </section>
+
+    <section class="card">
+      <h2><span class="num">W</span> Windows 설치 (WSL2 권장) <span class="badge b-win right">Windows</span></h2>
+      <p>가장 매끄러운 경로는 <b>WSL2(Ubuntu)</b> 안에서 위 Linux 절차를 그대로 실행하는 것입니다. 네이티브 PowerShell도 가능합니다.</p>
+      <pre><code>wsl --install                   # 관리자 PowerShell, 재부팅 후 위 Linux 절차
+# Docker Desktop: Settings → "Use the WSL 2 based engine" + Resources → WSL Integration
+winget install OpenJS.NodeJS.LTS
+npm install -g aws-cdk           # cdk deploy를 실행할 셸(WSL 또는 PowerShell)에서
+winget install Amazon.AWSCLI
+winget install jqlang.jq</code></pre>
+      <div class="callout">⚠️ <b>WSL과 PowerShell을 섞지 마세요.</b> <code>npm install -g</code>는 실행한 셸에만 <code>cdk</code>를 노출합니다 — <code>cdk deploy</code>를 실행할 <b>한쪽 셸</b>에 설치. Docker Desktop만 WSL 통합으로 양쪽 공유됩니다.</div>
+    </section>
+
+    <section class="card">
+      <h2><span class="tag">검증</span> 한 번에 확인 (전 OS 공통)</h2>
+      <p>설치 후 실행 — 하나라도 실패하면 Phase 1 전에 해결해야 합니다.</p>
+      <pre><code>docker info    &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ Docker 데몬"   || echo "❌ Docker"
+node -v        &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ Node: $(node -v)" || echo "❌ Node.js"
+cdk --version  &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ CDK: $(cdk --version)" || echo "❌ CDK"
+aws --version  &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ AWS CLI" || echo "❌ AWS CLI"
+jq --version   &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ jq" || echo "⚠️  jq(선택)"</code></pre>
+    </section>
+  </section>
+
+  <!-- ===================== TAB 3: AWS 계정 · 권한 ===================== -->
+  <section class="panel" id="t3">
+    <div class="callout">게이트웨이 플랫폼 스택은 <b>한 계정</b>에 배포됩니다. <b>AgentCore Web Search</b>와 <b>Mantle(GPT-5.x)</b>은 게이트웨이 리전과 무관하게 <b>us-east-1 고정</b>이라, <b>게이트웨이 리전 + us-east-1</b> 두 곳 모두 <code>cdk bootstrap</code>이 가능해야 합니다. (CloudFront는 제거됨 — ALB가 엣지, ACM은 <b>리전</b> 인증서)</div>
+
+    <section class="card">
+      <h2><span class="num">3</span> AWS 계정 접근 <span class="badge b-req right">필수</span></h2>
+      <table class="first-strong">
+        <colgroup><col style="width:26%"><col></colgroup>
+        <thead><tr><th>요구사항</th><th>세부</th></tr></thead>
+        <tbody>
+          <tr><td>대상 계정</td><td>게이트웨이용 계정 1개. sandbox/dev 계정의 Administrator가 가장 간단(공유/prod면 배포 롤을 스코프)</td></tr>
+          <tr><td>배포 IAM 권한</td><td>VPC/네트워킹 · Aurora Serverless v2 · ECS Fargate + ALB · Secrets Manager · IAM 롤 · API Gateway · Lambda · <b>ACM(리전)</b> (+ 도메인 사용 시 Route53) · <code>BedrockAgentCore::Gateway</code> · EC2 VPC peering · Route53 PHZ · (SSO 프로비저닝 시 <code>sso-admin</code>/<code>identitystore</code>)</td></tr>
+          <tr><td>CDK bootstrap</td><td><b>게이트웨이 리전 + us-east-1</b> 양쪽. 다른 팀이 다른 qualifier로 bootstrap했다면 커스텀 <code>--qualifier</code> 준비</td></tr>
+          <tr><td>Bedrock 모델 액세스</td><td>Claude 모델 → <b>게이트웨이 리전</b>, GPT-5.x(Mantle) → <b>us-east-1</b> 에서 Model access 활성화</td></tr>
+          <tr><td>AWS Marketplace</td><td>Mantle은 Marketplace 오퍼링 — 계정이 <b>구독 가능</b>해야 함(첫 호출 자동 구독). 구매 제한 계정은 부적합</td></tr>
+          <tr><td>서비스 쿼터</td><td>첫 배포엔 기본 쿼터로 충분. 기존 워크로드가 많으면 VPC/EIP 쿼터 점검</td></tr>
+        </tbody>
+      </table>
+      <span class="os">계정 확인</span>
+      <pre><code>aws sts get-caller-identity     # 의도한 대상 계정으로 resolve 되는지 확인</code></pre>
+    </section>
+  </section>
+
+  <!-- ===================== TAB 4: IAM Identity Center ===================== -->
+  <section class="panel" id="t4">
+    <div class="callout"><b>AWS IAM Identity Center를 어떻게 쓸 수 있는지 "결과만" 확인해 오면 됩니다.</b> 권한셋·Cognito 등 상세 설정은 스킬이 배포 중에 알아서 처리·안내하므로, 여기서는 <b>어느 쪽인지</b>만 알면 충분합니다.</div>
+
+    <section class="card">
+      <h2><span class="num">4</span> IAM Identity Center 가능 여부 확인 <span class="badge b-req right">필수</span></h2>
+      <p>다음 둘 중 <b>어느 쪽인지만</b> 확인하세요 — 잘 모르면 조직/계정 관리자에게 물어봐도 됩니다.</p>
+      <table class="first-strong">
+        <colgroup><col style="width:46%"><col></colgroup>
+        <thead><tr><th>확인 결과</th><th>이 스킬이 자동으로 쓰는 방식</th></tr></thead>
+        <tbody>
+          <tr><td><b>Organization(조직) IAM Identity Center</b>를 쓸 수 있음</td><td>조직 SSO 로그인 경로로 배포</td></tr>
+          <tr><td><b>Linked(계정) 인스턴스</b>뿐 · 조직 IdC 못 씀 · IdC 없음</td><td>Cognito 로그인 경로로 배포</td></tr>
+        </tbody>
+      </table>
+      <div class="callout">둘 중 <b>어느 쪽인지</b>만 알고 오면 됩니다 — 나머지(권한셋 생성, Cognito User Pool 등)는 스킬이 배포 단계에서 처리·안내합니다.</div>
+    </section>
+  </section>
+
+  <!-- ===================== TAB 5: 도메인 · TLS ===================== -->
+  <section class="panel" id="t5">
+    <div class="callout">게이트웨이를 어떤 주소로 열지 정하는데, <b>사용할 수 있는 도메인이 있는지 없는지만</b> 확인해 오면 됩니다. 세부 방식(인증서 발급 · 내부 터널 등)은 스킬이 배포 중에 처리·안내합니다.</div>
+
+    <section class="card">
+      <h2><span class="num">5</span> 사용 가능한 도메인 유무 확인 <span class="badge b-req right">필수</span></h2>
+      <table class="first-strong">
+        <colgroup><col style="width:38%"><col></colgroup>
+        <thead><tr><th>확인 결과</th><th>이 스킬이 자동으로 쓰는 방식</th></tr></thead>
+        <tbody>
+          <tr><td><b>쓸 수 있는 도메인 있음</b> (Route53 호스티드존 또는 인증서)</td><td>그 도메인으로 <b>HTTPS</b> 공개 (권장)</td></tr>
+          <tr><td><b>도메인 없음</b></td><td>도메인 없이도 배포 — 자체 인증서 또는 내부 접속(터널)</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">쓸 수 있는 <b>도메인(또는 서브도메인)</b>이 있는지만 확인하면 됩니다. 없어도 배포는 가능합니다.</p>
+    </section>
+  </section>
+
+  <!-- ===================== TAB 6: 체크리스트 ===================== -->
+  <section class="panel" id="t6">
+    <div class="callout">본인 노트에 복사해 배포 직전 최종 점검하세요. 하나라도 ❌면 <b>Phase 1 Discovery 진행 금지</b>.</div>
+    <section class="card">
+      <h2><span class="tag">체크</span> 배포 전 사전요건</h2>
+      <ul class="clean">
+        <li>▢ <b>Kiro / Claude Code / Amazon Quick Desktop</b> 중 하나 설치 + 이 스킬 링크</li>
+        <li>▢ <code>docker info</code> 성공(데몬 실행)</li>
+        <li>▢ <code>node -v</code> → 18/20 · <code>cdk --version</code> → v2 · <code>aws --version</code> → v2</li>
+        <li>▢ <code>aws sts get-caller-identity</code> 가 의도한 대상 계정으로 resolve</li>
+        <li>▢ 배포 자격증명이 VPC/ECS/RDS/Lambda/APIGW/<b>ALB/ACM</b>/IAM 생성 가능</li>
+        <li>▢ Bedrock 모델 액세스: Claude(게이트웨이 리전) + GPT-5.x(us-east-1) 활성화</li>
+        <li>▢ 계정이 AWS Marketplace 구독 가능(Mantle 첫 호출 자동 구독)</li>
+        <li>▢ <b>IAM Identity Center</b>: 조직(Organization)을 쓸 수 있는지 / Linked(계정) 인스턴스인지 <b>결과만</b> 확인</li>
+        <li>▢ <b>사용 가능한 도메인 유무</b> 확인 (있으면 HTTPS 공개, 없으면 도메인 없이 배포)</li>
+        <li>▢ <code>cdk bootstrap</code> — <b>게이트웨이 리전 + us-east-1</b> 양쪽 가능</li>
+      </ul>
+      <p class="muted">근거: 스킬 <code>shared/reference/prerequisites.md</code> · <code>constraints.md</code> · <code>sso-setup.md</code> · <code>account-instance-setup.md</code></p>
+    </section>
+  </section>
+
+  <footer>powered by <b>LLM Gateway Governance</b> · AWS Solution Skill — 사전 준비 가이드 · <a href="/">전체 소개 슬라이드</a> · <a href="/llm-gateway-governance-skill.zip">스킬 다운로드(.zip)</a></footer>
+</div>
+<script>
+  (function(){
+    var tabs = document.querySelectorAll('.tab');
+    var panels = document.querySelectorAll('.panel');
+    function activate(id){
+      tabs.forEach(function(t){ t.classList.toggle('active', t.dataset.tab===id); });
+      panels.forEach(function(p){ p.classList.toggle('active', p.id===id); });
+      if(history.replaceState){ history.replaceState(null,'','#'+id); }
+    }
+    tabs.forEach(function(t){
+      t.addEventListener('click', function(){ activate(t.dataset.tab); window.scrollTo({top:0,behavior:'smooth'}); });
+    });
+    var h = (location.hash||'').replace('#','');
+    if(h && document.getElementById(h)){ activate(h); }
+  })();
+</script>
+</body>
+</html>

@@ -53,7 +53,7 @@ The same `SKILL.md` runs identically across three AI tools — the only differen
 | **[graph-personalization-skill](./graph-personalization-skill/)** | Customer similarity graph (Neptune) + Bedrock explainable recommendations + Kinesis real-time | *"Graph-based personalized recommendations"* | `shared/` + thin SKILL.md |
 | **[data-platform-pipeline-skill](./data-platform-pipeline-skill/)** | S3 (3-bucket) + Glue + Athena — *source → queryable data* | *"Build a data pipeline"* | Monolithic SKILL.md (~50 KB) |
 | **[data-platform-consumption-skill](./data-platform-consumption-skill/)** | QuickSight + Amazon Quick chat agents — *queryable data → BI* | *"Set up a QuickSight dashboard"* | Monolithic SKILL.md (~60 KB) |
-| **[llm-gateway-governance-skill](./llm-gateway-governance-skill/)** | LiteLLM gateway + Bedrock Guardrails + SSO virtual keys + ECS Fargate + CloudFront | *"Build an LLM gateway to govern Bedrock"* | `shared/` + thin SKILL.md |
+| **[llm-gateway-governance-skill](./llm-gateway-governance-skill/)** | LiteLLM gateway + Bedrock Guardrails + SSO/Cognito virtual keys + ECS Fargate + ALB edge (certMode: acm/http, SG CIDR-restricted) | *"Build an LLM gateway to govern Bedrock"* | `shared/` + thin SKILL.md |
 
 > **Two authoring styles coexist** (both produce md5-identical `SKILL.md` across all three tools):
 > - **`shared/` + thin `SKILL.md`** — deep knowledge lives in `shared/`; `SKILL.md` is a thin wrapper. *(unified-customer-profile, strands-agentcore, graph-personalization, llm-gateway-governance)*

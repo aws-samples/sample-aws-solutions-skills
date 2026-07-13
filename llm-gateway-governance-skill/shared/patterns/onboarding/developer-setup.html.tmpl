@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<!--
+  developer-setup.html.tmpl — token-ized template consumed by scripts/gen-onboarding.py.
+  Tokens: {{GATEWAY_URL}} {{REGION}} {{AUTH_MODE}} {{CERT_MODE}} {{OPUS}} {{SONNET}}
+          {{HAIKU}} {{FABLE}} {{GPT}} {{APIKEY_HELPER}} {{TOKEN_CMD}} {{MCP_HEADERS_CMD}} {{LOGIN_CMD}}
+  Conditional blocks (stripped by the generator when the condition does not match the deploy):
+          <!--IF authMode=cognito-native--> ... <!--ENDIF-->
+          <!--IF authMode=org-sso--> ... <!--ENDIF-->
+          <!--IF certMode=http--> ... <!--ENDIF-->
+  Contains NO admin secrets — safe to distribute to every developer.
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Gateway — 개발자 설정 가이드</title>
+<style>
+  :root{--gold:#F2C94C;--purple:#8B5CF6;--blue:#3B82F6;--teal:#2DD4BF;--ink:#eaf1fb;--mut:#9bb0cc;
+    --grad:linear-gradient(90deg,#fbd36b,#c08bff 45%,#5aa6ff 100%);--grad2:linear-gradient(135deg,#8B5CF6,#3B82F6 55%,#2DD4BF);}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Noto Sans KR","Apple SD Gothic Neo",sans-serif;color:var(--ink);line-height:1.6;
+    background:radial-gradient(900px 600px at 12% 4%,rgba(139,92,246,.22),transparent 60%),
+      radial-gradient(820px 560px at 90% 10%,rgba(59,130,246,.18),transparent 60%),
+      linear-gradient(160deg,#0a1020,#0e1830 60%,#0a1222);min-height:100vh}
+  .wrap{max-width:920px;margin:0 auto;padding:40px 26px 80px}
+  .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
+    padding:5px 13px;border-radius:30px;color:#0c1020;background:var(--grad)}
+  h1{font-size:36px;margin:14px 0 6px;font-weight:900;letter-spacing:-.5px}
+  h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{font-size:17px;color:#cbdaee;margin:0 0 8px}
+  h2{font-size:22px;margin:34px 0 12px;font-weight:800;color:#fff;display:flex;align-items:center;gap:10px}
+  h2 .n{flex-shrink:0;width:30px;height:30px;border-radius:9px;background:var(--grad);color:#0c1020;font-weight:900;
+    display:flex;align-items:center;justify-content:center;font-size:15px}
+  p{margin:8px 0;color:#cbdaee}
+  code{background:rgba(255,255,255,.08);color:#ffe08a;padding:1px 6px;border-radius:5px;font-size:.88em;font-family:Consolas,monospace}
+  pre{background:rgba(6,12,26,.85);border:1px solid rgba(255,255,255,.12);border-radius:12px;
+    padding:14px 16px;overflow:auto;font-size:13.5px;font-family:Consolas,monospace;color:#e7eefb;box-shadow:0 10px 26px rgba(0,0,0,.3)}
+  pre .c{color:#7fd1b9}
+  .card{border-radius:14px;padding:16px 18px;margin:12px 0;
+    background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12)}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14.5px;margin:8px 0}
+  th,td{border-bottom:1px solid rgba(255,255,255,.09);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:linear-gradient(180deg,rgba(139,92,246,.28),rgba(59,130,246,.16));color:#fff;font-weight:700}
+  td b{color:#ffe08a}
+  .note{border-left:4px solid var(--teal);background:rgba(45,212,191,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:12px 0;font-size:14.5px}
+  .variant{border-left:4px solid var(--purple);background:rgba(139,92,246,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:10px 0}
+  .variant .t{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#c4b5fd;font-weight:800;margin-bottom:4px}
+  .foot{margin-top:40px;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);color:#8299b5;font-size:13px}
+  a{color:#8bd0ff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="kicker">Developer Onboarding</span>
+  <h1>LLM Gateway — <span class="g">개발자 설정 가이드</span></h1>
+  <p class="lead">사내 LLM 게이트웨이를 통해 <b>Claude Code</b> 와 <b>Codex</b> 에서 승인된 모델을 사용하는 방법입니다.</p>
+
+  <div class="card">
+    <table>
+      <tr><th>항목</th><th>값</th></tr>
+      <tr><td>게이트웨이 URL</td><td><b>{{GATEWAY_URL}}</b></td></tr>
+      <tr><td>리전</td><td>{{REGION}}</td></tr>
+      <tr><td>사용 가능 모델</td><td><code>{{OPUS}}</code> · <code>{{SONNET}}</code> · <code>{{HAIKU}}</code> · <code>{{FABLE}}</code> · <code>{{GPT}}</code></td></tr>
+      <tr><td>인증 모드 / TLS</td><td>{{AUTH_MODE}} / {{CERT_MODE}}</td></tr>
+    </table>
+    <div class="note">가상 키(virtual key)는 로그인 후 토큰 헬퍼가 자동 발급/회전합니다. <b>키를 직접 붙여넣지 마세요</b> — 아래 설정이 헬퍼를 통해 자동 주입합니다.</div>
+  </div>
+
+  <h2><span class="n">1</span> 로그인 (가상 키 발급 준비)</h2>
+  <!--IF authMode=cognito-native-->
+  <div class="variant">
+    <div class="t">authMode: cognito-native</div>
+    <p><code>{{LOGIN_CMD}}</code> 실행 → 브라우저에 <b>Cognito Hosted UI</b>(이메일/비밀번호)가 열립니다. 토큰이 로컬 캐시됩니다. <b>AWS CLI·자격증명 불필요.</b></p>
+    <pre>{{LOGIN_CMD}}          <span class="c"># Windows: {{LOGIN_CMD}}.ps1</span></pre>
+  </div>
+  <!--ENDIF-->
+  <!--IF authMode=org-sso-->
+  <div class="variant">
+    <div class="t">authMode: org-sso</div>
+    <p>SSO 프로필로 로그인합니다. 토큰 헬퍼가 SigV4로 서명합니다.</p>
+    <pre>aws sso login --profile llm-gateway</pre>
+  </div>
+  <!--ENDIF-->
+
+  <!--IF certMode=http-->
+  <h2><span class="n">2</span> 게이트웨이 접속 (HTTP — PoC 전용)</h2>
+  <p>이 게이트웨이는 <b>HTTP(평문)</b> 로 서비스됩니다 — 가상 키와 프롬프트가 암호화 없이 전송되므로 PoC 용도로만 사용하세요. 접근은 허용된 사내 IP 대역(Security Group allowlist)에서만 가능합니다. 별도의 인증서 신뢰나 터널 설정은 필요 없습니다 — <code>{{GATEWAY_URL}}</code> 로 바로 접속합니다.</p>
+  <div class="note">접속이 안 되면 현재 네트워크의 공인 IP가 관리자에게 등록된 허용 CIDR에 포함되는지 확인하세요.</div>
+  <!--ENDIF-->
+
+  <h2><span class="n">3</span> Claude Code 설정</h2>
+  <p><code>~/.claude/settings.json</code> 에 아래를 병합합니다. <b>4개 모델 별칭을 모두</b> 넣어야 <code>/model</code> 선택기에 Fable 티어까지 노출됩니다.</p>
+  <pre>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "{{GATEWAY_URL}}",
+    "AWS_REGION": "{{REGION}}",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL":   "{{OPUS}}",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "{{SONNET}}",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "{{HAIKU}}",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL":  "{{FABLE}}"
+  },
+  "apiKeyHelper": "{{APIKEY_HELPER}}",
+  "permissions": { "deny": ["WebSearch"] }
+}</pre>
+  <div class="note"><code>permissions.deny: ["WebSearch"]</code> 로 Claude 내장 WebSearch를 끕니다 — 대신 5단계의 관리형 웹 검색 MCP를 사용합니다.</div>
+
+  <h2><span class="n">4</span> Codex 설정</h2>
+  <p><code>~/.codex/config.toml</code> 에 추가합니다.</p>
+  <pre>model = "{{GPT}}"
+model_provider = "llm-gateway"
+
+[model_providers.llm-gateway]
+name     = "Company LLM Gateway (LiteLLM)"
+base_url = "{{GATEWAY_URL}}/v1"
+wire_api = "responses"
+
+[model_providers.llm-gateway.auth]
+command = "{{TOKEN_CMD}}"
+refresh_interval_ms = 300000
+timeout_ms = 5000</pre>
+
+  <h2><span class="n">5</span> 웹 검색 MCP 등록 (Claude Code)</h2>
+  <p>서버 측 등록만으로는 클라이언트에서 안 보입니다. <code>headersHelper</code> 로 회전 키를 동적 주입하며 등록하세요.</p>
+  <pre>claude mcp add-json websearch '{
+  "type": "http",
+  "url": "{{GATEWAY_URL}}/mcp/",
+  "headersHelper": "{{MCP_HEADERS_CMD}}"
+}'</pre>
+  <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
+
+  <h2><span class="n">6</span> 동작 확인</h2>
+  <pre>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD}})"
+<span class="c"># 기대: {{OPUS}}/{{SONNET}}/{{HAIKU}}/{{FABLE}} + {{GPT}} 목록</span></pre>
+  <p>이제 <code>claude</code> / <code>codex</code> 실행 시 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
+
+  <div class="foot">
+    문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 없습니다 — 가상 키는 로그인으로 자동 발급됩니다.
+  </div>
+</div>
+</body>
+</html>

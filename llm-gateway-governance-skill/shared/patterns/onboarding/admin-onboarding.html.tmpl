@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<!--
+  admin-onboarding.html.tmpl — token-ized template consumed by scripts/gen-onboarding.py.
+  OPERATOR-ONLY. Contains real secret values once filled (LiteLLM master key, Langfuse admin
+  password). The generator writes the filled file with 0600 perms and prints a "do not share/commit"
+  warning; add the output path to .gitignore.
+  Tokens: {{GATEWAY_URL}} {{ADMIN_UI_URL}} {{TOKEN_SERVICE_URL}} {{LANGFUSE_URL}} {{REGION}}
+          {{AUTH_MODE}} {{CERT_MODE}} {{COGNITO_POOL_ID}} {{COGNITO_CLIENT_ID}} {{COGNITO_HOSTED_UI}}
+          {{COGNITO_ISSUER}} {{TEAM_GROUP_PREFIX}} {{SSO_START_URL}} {{SSO_ACCOUNT_ID}} {{SSO_ROLE_NAME}}
+          {{MASTER_KEY}} {{MASTER_KEY_SECRET}} {{LANGFUSE_ADMIN_EMAIL}} {{LANGFUSE_ADMIN_PW}}
+          {{LANGFUSE_SECRET}} {{ECS_CLUSTER}} {{ECS_SERVICE}} {{EXAMPLE_TEAM}}
+  Conditional blocks: <!--IF authMode=cognito-native-->..<!--ENDIF-->  <!--IF authMode=org-sso-->..<!--ENDIF-->
+                      <!--IF langfuse=on-->..<!--ENDIF-->
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Gateway — 관리자 온보딩 (CONFIDENTIAL)</title>
+<style>
+  :root{--gold:#F2C94C;--purple:#8B5CF6;--blue:#3B82F6;--teal:#2DD4BF;--red:#f87171;--ink:#eaf1fb;--mut:#9bb0cc;
+    --grad:linear-gradient(90deg,#fbd36b,#c08bff 45%,#5aa6ff 100%);--grad2:linear-gradient(135deg,#8B5CF6,#3B82F6 55%,#2DD4BF);}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Noto Sans KR","Apple SD Gothic Neo",sans-serif;color:var(--ink);line-height:1.6;
+    background:radial-gradient(900px 600px at 12% 4%,rgba(139,92,246,.22),transparent 60%),
+      radial-gradient(820px 560px at 90% 10%,rgba(59,130,246,.18),transparent 60%),
+      linear-gradient(160deg,#0a1020,#0e1830 60%,#0a1222);min-height:100vh}
+  .wrap{max-width:960px;margin:0 auto;padding:34px 26px 80px}
+  .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
+    padding:5px 13px;border-radius:30px;color:#0c1020;background:var(--grad)}
+  h1{font-size:34px;margin:14px 0 6px;font-weight:900;letter-spacing:-.5px}
+  h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  h2{font-size:21px;margin:32px 0 12px;font-weight:800;color:#fff;display:flex;align-items:center;gap:10px}
+  h2 .n{flex-shrink:0;width:30px;height:30px;border-radius:9px;background:var(--grad2);color:#fff;font-weight:900;
+    display:flex;align-items:center;justify-content:center;font-size:15px}
+  h3{font-size:16px;margin:16px 0 6px;color:#fff}
+  p{margin:8px 0;color:#cbdaee}
+  code{background:rgba(255,255,255,.08);color:#ffe08a;padding:1px 6px;border-radius:5px;font-size:.88em;font-family:Consolas,monospace}
+  pre{background:rgba(6,12,26,.85);border:1px solid rgba(255,255,255,.12);border-radius:12px;
+    padding:14px 16px;overflow:auto;font-size:13.5px;font-family:Consolas,monospace;color:#e7eefb;box-shadow:0 10px 26px rgba(0,0,0,.3)}
+  pre .c{color:#7fd1b9}
+  .card{border-radius:14px;padding:16px 18px;margin:12px 0;
+    background:linear-gradient(160deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.12)}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14.5px;margin:8px 0}
+  th,td{border-bottom:1px solid rgba(255,255,255,.09);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:linear-gradient(180deg,rgba(139,92,246,.28),rgba(59,130,246,.16));color:#fff;font-weight:700}
+  td b{color:#ffe08a}
+  .mono{font-family:Consolas,monospace;font-size:13px;color:#ffe08a;word-break:break-all}
+  .danger{border:1px solid rgba(248,113,113,.5);background:rgba(248,113,113,.1);border-radius:12px;padding:13px 16px;margin:14px 0}
+  .danger b{color:#fca5a5}
+  .secret{border:1px dashed rgba(248,113,113,.55);background:rgba(248,113,113,.06);border-radius:12px;padding:8px 14px}
+  .note{border-left:4px solid var(--teal);background:rgba(45,212,191,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:12px 0;font-size:14.5px}
+  .foot{margin-top:40px;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);color:#8299b5;font-size:13px}
+  a{color:#8bd0ff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="kicker">Operator / Admin — Confidential</span>
+  <h1>LLM Gateway — <span class="g">관리자 온보딩</span></h1>
+
+  <div class="danger">
+    🔒 <b>이 문서는 배포한 관리자 1명만 열람하세요.</b> LiteLLM 마스터 키·Langfuse 관리자 비밀번호 등 <b>전체 관리자 자격</b>이 평문으로 포함됩니다. 개발자에게 공유하거나 git에 커밋하지 마세요. 개발자에게는 <code>developer-setup.html</code>(시크릿 없음)을 배포하세요.
+  </div>
+
+  <h2><span class="n">1</span> 배포 요약 (엔드포인트 · 신원)</h2>
+  <div class="card">
+    <table>
+      <tr><th>항목</th><th>값</th></tr>
+      <tr><td>게이트웨이 URL (개발자 base URL)</td><td><b>{{GATEWAY_URL}}</b></td></tr>
+      <tr><td>LiteLLM Admin UI</td><td><b>{{ADMIN_UI_URL}}</b></td></tr>
+      <tr><td>Token Service</td><td class="mono">{{TOKEN_SERVICE_URL}}</td></tr>
+      <!--IF langfuse=on--><tr><td>Langfuse</td><td>{{LANGFUSE_URL}}</td></tr><!--ENDIF-->
+      <tr><td>리전 / authMode / certMode</td><td>{{REGION}} / <b>{{AUTH_MODE}}</b> / <b>{{CERT_MODE}}</b></td></tr>
+    </table>
+    <!--IF authMode=cognito-native-->
+    <h3>신원 (cognito-native)</h3>
+    <table>
+      <tr><td>Cognito User Pool ID</td><td class="mono">{{COGNITO_POOL_ID}}</td></tr>
+      <tr><td>App Client ID</td><td class="mono">{{COGNITO_CLIENT_ID}}</td></tr>
+      <tr><td>Hosted UI 도메인</td><td class="mono">{{COGNITO_HOSTED_UI}}</td></tr>
+      <tr><td>Issuer</td><td class="mono">{{COGNITO_ISSUER}}</td></tr>
+      <tr><td>Team Group Prefix</td><td><code>{{TEAM_GROUP_PREFIX}}</code> <span style="color:#8299b5">(이 접두어 그룹 = LiteLLM 팀)</span></td></tr>
+    </table>
+    <!--ENDIF-->
+    <!--IF authMode=org-sso-->
+    <h3>신원 (org-sso)</h3>
+    <table>
+      <tr><td>SSO Start URL</td><td class="mono">{{SSO_START_URL}}</td></tr>
+      <tr><td>Account ID</td><td class="mono">{{SSO_ACCOUNT_ID}}</td></tr>
+      <tr><td>Permission Set / Role</td><td class="mono">{{SSO_ROLE_NAME}}</td></tr>
+    </table>
+    <!--ENDIF-->
+  </div>
+
+  <h2><span class="n">2</span> 시크릿 (실제값 — 취급 주의)</h2>
+  <div class="secret">
+    <table>
+      <tr><th>시크릿</th><th>값</th><th>보관 위치 (Secrets Manager)</th></tr>
+      <tr><td>LiteLLM 마스터 키<br><span style="color:#8299b5">(Admin UI 로그인 = 전체 관리자)</span></td><td class="mono">{{MASTER_KEY}}</td><td class="mono">{{MASTER_KEY_SECRET}}</td></tr>
+      <!--IF langfuse=on--><tr><td>Langfuse 관리자</td><td class="mono">{{LANGFUSE_ADMIN_EMAIL}} / {{LANGFUSE_ADMIN_PW}}</td><td class="mono">{{LANGFUSE_SECRET}}</td></tr><!--ENDIF-->
+    </table>
+  </div>
+  <p><b>빠른 관리자 테스트</b>(로그인 생략): 마스터 키를 직접 Bearer로 사용해 게이트웨이를 확인할 수 있습니다.</p>
+  <pre>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer {{MASTER_KEY}}"</pre>
+
+  <h2><span class="n">3</span> 비밀번호 / 키 변경 방법</h2>
+  <h3>LiteLLM 마스터 키 회전</h3>
+  <p>마스터 키는 Secrets Manager에 있고 컨테이너 시작 시 로드됩니다. 값 갱신 후 <b>ECS 강제 재배포</b>로 반영합니다.</p>
+  <pre>aws secretsmanager put-secret-value \
+  --secret-id {{MASTER_KEY_SECRET}} --secret-string 'sk-새로운마스터키'
+aws ecs update-service --cluster {{ECS_CLUSTER}} --service {{ECS_SERVICE}} --force-new-deployment</pre>
+  <div class="note">개발자 가상 키는 별도 DB 레코드라 마스터 키 회전에 영향받지 않습니다. Admin UI 재로그인만 새 키로 하면 됩니다.</div>
+  <!--IF langfuse=on-->
+  <h3>Langfuse 관리자 비밀번호</h3>
+  <p>Langfuse UI 로그인 → <b>Settings → Account</b> 에서 변경이 가장 간단합니다. (초기값은 위 Secrets Manager 시드)</p>
+  <!--ENDIF-->
+  <!--IF authMode=cognito-native-->
+  <h3>Cognito 사용자 비밀번호</h3>
+  <pre><span class="c"># 관리자 강제 재설정</span>
+aws cognito-idp admin-set-user-password \
+  --user-pool-id {{COGNITO_POOL_ID}} --username dev@example.com --password '새비밀번호' --permanent
+<span class="c"># 사용자 셀프 재설정: Hosted UI의 "Forgot password"</span></pre>
+  <!--ENDIF-->
+
+  <h2><span class="n">4</span> 개발자 온보딩 (관리자 작업)</h2>
+  <!--IF authMode=cognito-native-->
+  <h3>cognito-native — 사용자 생성 + 팀 그룹 배정</h3>
+  <pre>aws cognito-idp admin-create-user --user-pool-id {{COGNITO_POOL_ID}} \
+  --username dev@example.com --user-attributes Name=email,Value=dev@example.com \
+  --desired-delivery-mediums EMAIL
+aws cognito-idp admin-add-user-to-group --user-pool-id {{COGNITO_POOL_ID}} \
+  --username dev@example.com --group-name {{EXAMPLE_TEAM}}   <span class="c"># 그룹명 = LiteLLM 팀</span></pre>
+  <!--ENDIF-->
+  <!--IF authMode=org-sso-->
+  <h3>org-sso — permission set 할당</h3>
+  <p>IdC에서 해당 permission set을 사용자/그룹에 할당합니다. 신규 팀 = 신규 permission set + LiteLLM Admin UI 팀 설정(코드 재배포 불필요).</p>
+  <!--ENDIF-->
+  <p>그다음 개발자에게 <code>developer-setup.html</code> 을 전달하면 끝입니다.</p>
+
+  <h2><span class="n">5</span> 오프보딩 (접근 회수)</h2>
+  <div class="card">
+    <!--IF authMode=cognito-native-->
+    <h3>cognito-native</h3>
+    <pre><span class="c"># 비활성(복구 가능) / 삭제 / 팀에서만 제거 중 택1</span>
+aws cognito-idp admin-disable-user --user-pool-id {{COGNITO_POOL_ID}} --username dev@example.com
+aws cognito-idp admin-delete-user  --user-pool-id {{COGNITO_POOL_ID}} --username dev@example.com
+aws cognito-idp admin-remove-user-from-group --user-pool-id {{COGNITO_POOL_ID}} --username dev@example.com --group-name {{EXAMPLE_TEAM}}</pre>
+    <!--ENDIF-->
+    <!--IF authMode=org-sso-->
+    <h3>org-sso</h3>
+    <p>IdC에서 permission set 할당을 해제합니다.</p>
+    <!--ENDIF-->
+    <div class="danger">⏱ <b>즉시 차단하려면 LiteLLM Admin UI에서 해당 가상 키를 revoke 하세요.</b> 키는 DynamoDB 캐시에 TTL 동안 남아, revoke 없이는 로그인 차단 후에도 기존 키가 TTL 만료까지 동작할 수 있습니다.</div>
+  </div>
+
+  <h2><span class="n">6</span> 운영 참고</h2>
+  <ul>
+    <li>팀/예산/모델 허용목록 조정 → LiteLLM Admin UI (<code>{{ADMIN_UI_URL}}</code>, 마스터 키 로그인)</li>
+    <li>요청 로그/트레이스 → LiteLLM UI · Langfuse(활성 시) · CloudWatch</li>
+    <li>상세 운영: <code>shared/reference/litellm-admin-guide.md</code></li>
+    <li>전체 teardown: <code>cdk destroy</code> (프로덕션은 RETAIN 정책 리소스 주의)</li>
+  </ul>
+
+  <div class="foot">gen-onboarding.py 가 outputs.json + 관리자 자격증명으로 채운 문서입니다. 취급 주의.</div>
+</div>
+</body>
+</html>

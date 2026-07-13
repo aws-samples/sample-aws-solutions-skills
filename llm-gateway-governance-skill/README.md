@@ -1,9 +1,9 @@
 # LLM Gateway Governance Skill
 
 > Build a **governed LLM gateway** so internal developers can use code agents (Claude Code, Codex)
-> against Amazon Bedrock through one control point — SSO identity, per-user virtual keys, model/cost
-> tiering, Bedrock Guardrails, network isolation, and tracing. Generates AWS CDK + Lambda + LiteLLM
-> config + onboarding scripts, customized to the user's requirements.
+> against Amazon Bedrock through one control point — identity (SSO **or** Cognito), per-user virtual
+> keys, model/cost tiering, Bedrock Guardrails, network isolation, and tracing. Generates AWS CDK +
+> Lambda + LiteLLM config + onboarding scripts, customized to the user's requirements.
 >
 > Reference implementation: `llm-gateway-multi-agent` (LiteLLM + Bedrock + AgentCore, CDK TypeScript).
 
@@ -14,22 +14,23 @@
 "Govern Bedrock access for developers / central proxy for Claude Code and Codex"
 "Deploy LiteLLM on AWS with SSO virtual keys"
 "Build a developer-facing Bedrock governance gateway"
-"Build an internal proxy for Claude Code"
-"Deploy LiteLLM and issue virtual keys via SSO"
+"Build an internal proxy for Claude Code and Codex"
+"Deploy LiteLLM and issue virtual keys via SSO or Cognito"
+"Govern Bedrock when we only have an IAM Identity Center account instance (no org SSO)"
 ```
 
 ## What it builds
 
-A LiteLLM proxy on ECS Fargate behind CloudFront → internal ALB, with:
-- **SSO Token Service** (API Gateway IAM auth + Lambda) issuing per-user LiteLLM virtual keys (`config.sso`)
+A LiteLLM proxy on ECS Fargate behind an ALB edge (TLS via `certMode`: `acm` / `http` — always internet-facing, SG CIDR-restricted), with:
+- **Token Service** issuing per-user LiteLLM virtual keys, in one of two auth modes: `org-sso` (API Gateway IAM auth, IdC **organization** instance, permission sets → `config.sso`) or **`cognito-native`** (API Gateway Cognito authorizer; an Amazon Cognito User Pool is the sole identity source — for IdC **account** instances or accounts with no usable org SSO → `config.cognitoNative`)
 - **Bedrock Guardrails** (content / PII / denied topics) for Claude routes
 - **Managed web search** — AgentCore **Web Search Tool** (built-in `web-search` connector on an AgentCore Gateway, us-east-1; AWS_IAM SigV4). No third-party API key. (Replaces Tavily MCP.)
-- **Model & cost tiering** (standard vs economy: model allowlist + budget cap, e.g. `gpt-5.4`) by SSO permission set
-- **Bedrock Mantle (GPT-5.x)** reached privately in **us-east-1** over cross-region **VPC peering**
+- **Model & cost tiering** (model allowlist + budget cap, e.g. `gpt-5.4`) by authorization unit — permission set in `org-sso`, Cognito User Pool Group in `cognito-native`
+- **Bedrock Mantle (GPT-5.x)** reached privately in **us-east-1** over cross-region **VPC peering** (Bearer-token auth minted at runtime from the Task Role — the Mantle Responses route has no SigV4 path)
 - **Aurora Serverless v2** for LiteLLM + (optional) Langfuse trace storage
-- **Network isolation** (internal ALBs, isolated DB, VPC endpoints; CloudFront VPC Origin only public surface)
-- **Tokenless model auth** (ECS Task Role SigV4 — nothing to rotate, no token-refresh scheduler)
-- **Selectable region** (`config.awsRegion`); optional **Langfuse** and optional **custom domain** (works domain-less too)
+- **Network isolation** (isolated DB, VPC endpoints; a public ALB edge in both modes with an `albIngressCidrs` SG allowlist — `acm` HTTPS:443, `http` HTTP:80 [plaintext, PoC-only]; a separate internal ALB for the Token Service)
+- **Claude tokenless auth** (ECS Task Role SigV4 — nothing to rotate); Mantle uses a short-term runtime-minted Bearer key (no long-term secret, no scheduler)
+- **Selectable region** (`config.awsRegion`); optional **Langfuse** and optional **custom domain** (works domain-less too). The 11 stacks include conditional ones — AgentCoreGateway, MantleNetwork/MantlePeeringRoutes (only with GPT/web search), and Langfuse (only if enabled) — so a minimal PoC deploys fewer.
 
 ## Install
 

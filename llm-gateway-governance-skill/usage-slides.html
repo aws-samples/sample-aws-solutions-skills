@@ -144,9 +144,9 @@
       <b style="color:#fff">LLM 거버넌스 게이트웨이</b>를 AWS에 구축하는 Skill</p>
     <div style="margin-top:16px">
       <span class="pill">LiteLLM</span><span class="pill">Amazon Bedrock</span><span class="pill">AgentCore</span>
-      <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO · Guardrails · Data Residency</span>
+      <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO/Cognito · Guardrails · Data Residency</span>
     </div>
-    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 19 슬라이드</p>
+    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 20 슬라이드</p>
   </div>
 </section>
 
@@ -157,7 +157,7 @@
   <p class="lead">코드 에이전트(Claude Code · Codex)를 개별로 Bedrock에 붙이지 않고,
     <span class="g-text" style="font-weight:800">단일 거버넌스 게이트웨이</span>를 강제 경유시켜 중앙 통제한다.</p>
   <div class="grid g4" style="margin-top:14px;flex:1">
-    <div class="card gold"><h3>① 신원 · Who</h3><p>SSO 신원 강제(<code>AWSReservedSSO_</code>)<br>사용자별 가상키 발급<br>Enterprise 라이선스 불필요</p></div>
+    <div class="card gold"><h3>① 신원 · Who</h3><p>신원 강제 — <b>org-sso</b>(<code>AWSReservedSSO_</code>) 또는 <b>cognito-native</b>(Cognito User Pool)<br>사용자별 가상키 발급<br>Enterprise 라이선스 불필요</p></div>
     <div class="card teal"><h3>② 모델·비용 · How much</h3><p>모델 라우팅(Claude/GPT)<br>티어별 allowlist<br>예산 캡(economy $50)</p></div>
     <div class="card pink"><h3>③ 콘텐츠 안전 · What</h3><p>Bedrock Guardrails<br>콘텐츠·PII·금지토픽<br>시크릿 탐지(pre-call)</p></div>
     <div class="card"><h3>④ 관측·감사 · Trace</h3><p>CloudWatch(인프라)<br>Langfuse(프롬프트/트레이스)<br>키별 사용량·예산</p></div>
@@ -168,22 +168,22 @@
 <!-- 3 ARCHITECTURE DIAGRAM -->
 <section class="slide">
   <div class="kicker">아키텍처 다이어그램</div>
-  <h2>VPC 격리 · CloudFront 단일 진입 · <span class="u">엔드포인트로 프라이빗</span> Bedrock</h2>
+  <h2>VPC 격리 · ALB 엣지(certMode) · <span class="u">엔드포인트로 프라이빗</span> Bedrock</h2>
   <div class="arch">
     <div class="extrow">
       <div class="node k">👤 개발자<small>Claude Code · Codex</small></div>
       <span class="arrow">→</span>
-      <div class="node">☁️ CloudFront<small>TLS 종단 · VPC Origin</small></div>
+      <div class="node">🌐 공개 ALB<small>acm=HTTPS / http=HTTP · SG 제한</small></div>
       <span class="arrow">→</span>
       <div class="node">🛡️ API Gateway<small>IAM · SigV4 인증</small></div>
       <span class="arrow">→</span>
-      <div class="node">λ Token Lambda<small>SSO 검증 · 가상키</small></div>
+      <div class="node">λ Token Lambda<small>신원 검증(SSO/Cognito) · 가상키</small></div>
     </div>
     <div class="vpc">
       <div class="vpc-label">VPC · 2 AZ · 단일 리전 (예: ap-northeast-2 / us-east-1)</div>
       <div class="lane pub"><span class="tag">Public Subnet</span>
         <div class="node">NAT Gateway<small>아웃바운드 egress</small></div>
-        <span class="arrow">·</span><div class="node">CloudFront VPC Origin 진입</div></div>
+        <span class="arrow">·</span><div class="node">공개 ALB (certMode)</div></div>
       <div class="lane priv"><span class="tag">Private (egress)</span>
         <div class="node">Internal ALB<small>인터넷 비노출</small></div><span class="arrow">→</span>
         <div class="node">LiteLLM<small>ECS Fargate · Graviton</small></div>
@@ -208,7 +208,7 @@
       </div>
     </div>
     <div class="legend"><span class="lg-pub">Public</span><span class="lg-priv">Private(egress)</span><span class="lg-iso">Isolated</span>
-      <span style="margin-left:auto">SigV4(Task Role) — Bedrock/Mantle/AgentCore 호출에 토큰 없음</span></div>
+      <span style="margin-left:auto">Claude/AgentCore = SigV4(Task Role, 토큰 없음) · Mantle = 런타임 발급 Bearer 키(BEDROCK_MANTLE_API_KEY)</span></div>
   </div>
 </section>
 
@@ -231,10 +231,10 @@
       <!-- Step 1 -->
       <rect x="20" y="30" width="250" height="108" rx="12" fill="url(#nodeGrad)" stroke="#8B5CF6" stroke-width="1.4"/>
       <circle cx="46" cy="56" r="14" fill="#8B5CF6"/><text x="46" y="61" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">1</text>
-      <text x="68" y="60" fill="#fff" font-size="15" font-weight="700">SSO 로그인 → 키 helper</text>
-      <text x="36" y="84" fill="#aebfd6" font-size="11.5">aws sso login 후 boto3</text>
-      <text x="36" y="100" fill="#aebfd6" font-size="11.5">SigV4 서명(리전은 Token</text>
-      <text x="36" y="116" fill="#aebfd6" font-size="11.5">URL에서 파싱)</text>
+      <text x="68" y="60" fill="#fff" font-size="15" font-weight="700">로그인 → 키 helper</text>
+      <text x="36" y="84" fill="#aebfd6" font-size="11.5">org-sso: aws sso login</text>
+      <text x="36" y="100" fill="#aebfd6" font-size="11.5">cognito: llmgw-login</text>
+      <text x="36" y="116" fill="#aebfd6" font-size="11.5">→ 키 helper 가상키 발급</text>
       <rect x="185" y="118" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="223" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">신원 확보</text>
 
@@ -255,10 +255,10 @@
       <!-- Step 3 -->
       <rect x="620" y="30" width="270" height="108" rx="12" fill="url(#nodeGrad)" stroke="#F2C94C" stroke-width="1.4"/>
       <circle cx="646" cy="56" r="14" fill="#F2C94C"/><text x="646" y="61" text-anchor="middle" fill="#0c1020" font-size="14" font-weight="800">3</text>
-      <text x="668" y="60" fill="#fff" font-size="15" font-weight="700">Token Lambda — SSO 검증</text>
-      <text x="636" y="84" fill="#aebfd6" font-size="11.5">AWSReservedSSO_ 접두사</text>
-      <text x="636" y="100" fill="#aebfd6" font-size="11.5">확인, 비-SSO는 403. 권한셋</text>
-      <text x="636" y="116" fill="#aebfd6" font-size="11.5">→팀(standard/economy) 매핑</text>
+      <text x="668" y="60" fill="#fff" font-size="15" font-weight="700">Token Lambda — 신원 검증</text>
+      <text x="636" y="84" fill="#aebfd6" font-size="11.5">org-sso: AWSReservedSSO_ /</text>
+      <text x="636" y="100" fill="#aebfd6" font-size="11.5">cognito: cognito:groups →</text>
+      <text x="636" y="116" fill="#aebfd6" font-size="11.5">팀(standard/economy) 매핑</text>
       <rect x="775" y="118" width="106" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="828" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">신원 강제·티어링</text>
 
@@ -282,10 +282,10 @@
       <!-- Step 5 -->
       <rect x="940" y="238" width="260" height="108" rx="12" fill="url(#nodeGrad)" stroke="#3B82F6" stroke-width="1.4"/>
       <circle cx="966" cy="264" r="14" fill="#3B82F6"/><text x="966" y="269" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">5</text>
-      <text x="988" y="268" fill="#fff" font-size="15" font-weight="700">CloudFront → ALB → LiteLLM</text>
-      <text x="956" y="292" fill="#aebfd6" font-size="11.5">ALB는 인터넷 비노출,</text>
-      <text x="956" y="308" fill="#aebfd6" font-size="11.5">CloudFront VPC Origin만</text>
-      <text x="956" y="324" fill="#aebfd6" font-size="11.5">접근 허용</text>
+      <text x="988" y="268" fill="#fff" font-size="15" font-weight="700">공개 ALB → LiteLLM</text>
+      <text x="956" y="292" fill="#aebfd6" font-size="11.5">공개 ALB가 TLS 종단,</text>
+      <text x="956" y="308" fill="#aebfd6" font-size="11.5">certMode로 TLS 결정 · SG 제한</text>
+      <text x="956" y="324" fill="#aebfd6" font-size="11.5">(내부 ALB=Token Svc)</text>
       <rect x="1105" y="326" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="1143" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">네트워크 격리</text>
 
@@ -297,7 +297,7 @@
       <text x="668" y="268" fill="#fff" font-size="15" font-weight="700">Guardrail 통과 → Bedrock</text>
       <text x="636" y="292" fill="#aebfd6" font-size="11.5">Claude는 시크릿탐지+</text>
       <text x="636" y="308" fill="#aebfd6" font-size="11.5">Bedrock Guardrail 적용.</text>
-      <text x="636" y="324" fill="#aebfd6" font-size="11.5">Task Role SigV4(토큰 없음)</text>
+      <text x="636" y="324" fill="#aebfd6" font-size="11.5">Claude SigV4 / Mantle Bearer</text>
       <rect x="775" y="326" width="106" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="828" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">콘텐츠 안전</text>
 
@@ -313,7 +313,7 @@
       <rect x="475" y="326" width="86" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="518" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">감사·관측</text>
     </g>
-    <text x="20" y="420" fill="#7e93ad" font-size="12">1→4: 신원 확보·인가·발급 (Auth 스택) · 5→6: 네트워크 경유·모델 호출 (CDN·LiteLLM 스택) · 7: 관측 (Observability·Langfuse)</text>
+    <text x="20" y="420" fill="#7e93ad" font-size="12">1→4: 신원 확보·인가·발급 (Auth 스택) · 5→6: 공개 ALB 경유·모델 호출 (LiteLLM 스택) · 7: 관측 (Observability·Langfuse)</text>
   </svg>
 </section>
 
@@ -322,8 +322,8 @@
   <div class="kicker">거버넌스 · Governance</div>
   <h2>누가 · 무엇을 · 얼마나 · 어떻게 <span class="u">통제</span>되는가</h2>
   <div class="grid g3" style="flex:1">
-    <div class="card gold"><h3>🪪 신원 (Identity)</h3><p>IAM Identity Center(SSO)가 신뢰 기준. <code>AWSReservedSSO_</code> ARN만 허용, 직접 IAM 롤 우회 차단(403)</p></div>
-    <div class="card teal"><h3>🔏 인가 (AuthZ)</h3><p>API Gateway AWS_IAM(SigV4). 권한셋에 <code>execute-api:Invoke</code>만 부여 — 최소 권한</p></div>
+    <div class="card gold"><h3>🪪 신원 (Identity)</h3><p>두 모드: <b>org-sso</b>(IdC 조직 인스턴스, <code>AWSReservedSSO_</code> ARN만 허용) 또는 <b>cognito-native</b>(계정 인스턴스/조직 SSO 불가 시 — Cognito User Pool이 유일 신원원, SAML/IdC 페더레이션 없음)</p></div>
+    <div class="card teal"><h3>🔏 인가 (AuthZ)</h3><p>org-sso: API GW <code>AWS_IAM</code>(SigV4), 권한셋 <code>execute-api:Invoke</code>만. cognito-native: API GW Cognito authorizer(access token만, id_token 401), <code>cognito:groups</code>→팀</p></div>
     <div class="card pink"><h3>🔑 키 라이프사이클</h3><p>사용자별 가상키 발급·DynamoDB 캐시(TTL). master key는 Secrets Manager grantRead. 장기 키 배포 없음</p></div>
     <div class="card teal"><h3>📊 티어링 · 예산</h3><p>권한셋→LiteLLM 팀. economy=모델 allowlist + 예산 캡($50). standard=전 모델</p></div>
     <div class="card gold"><h3>🛡️ 정책 (Policy)</h3><p>Bedrock Guardrail + 시크릿 탐지가 모든 Claude 요청에 default 적용. MCP는 키별 access group으로 스코프</p></div>
@@ -344,16 +344,16 @@
         <li><b>시크릿</b> → Secrets Manager (배포 리전)</li>
         <li><b>프롬프트/트레이스</b> → Langfuse → 동일 Aurora (리전 내)</li>
         <li><b>모델 추론</b> → Bedrock (선택 리전 inference profile)</li>
-        <li><b>CloudFront</b> → <code>CACHING_DISABLED</code> — 본문을 엣지에 캐시하지 않음</li>
+        <li><b>ALB idleTimeout</b> → 기본 900s(최대 4000s) — 장시간 완성 흡수(CloudFront 120s 상한 제거)</li>
       </ul>
     </div>
     <div>
       <h3 style="color:#9af5d8;font-size:16px;margin:0 0 8px">🔒 격리 보장</h3>
       <ul>
         <li><b>인터넷 미경유</b> — Bedrock·Secrets·SSM·ECR·Logs·AgentCore를 <b>VPC 인터페이스 엔드포인트</b>로 호출</li>
-        <li><b>ALB 비공개</b> — internal-only, CloudFront VPC Origin만 진입</li>
+        <li><b>공개 ALB 엣지</b> — 두 모드 모두 인터넷 페이싱(acm=HTTPS:443, http=HTTP:80) · SG CIDR allowlist 제한, 내부 ALB는 Token Service 전용</li>
         <li><b>DB 격리</b> — Aurora는 isolated 서브넷(egress 없음), SG로 LiteLLM/λ만 5432 허용</li>
-        <li><b>리전 고정</b> — 메인 스택 단일 리전(CDN만 us-east-1 · CloudFront 요구사항)</li>
+        <li><b>리전 고정</b> — 메인 스택 단일 리전(AgentCore/Mantle만 us-east-1)</li>
         <li><b>S3/DynamoDB</b> — Gateway 엔드포인트(무료, 리전 내)</li>
       </ul>
     </div>
@@ -392,11 +392,11 @@
   <table>
     <thead><tr><th style="width:34px">#</th><th>선택축</th><th>config 필드</th><th>옵션</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td><b>커스텀 도메인</b></td><td><code>litellm.certMode</code></td><td>acm-dns(도메인+ACM+Route53) / 도메인리스(기본 cloudfront.net)</td></tr>
+      <tr><td>1</td><td><b>엣지 TLS</b></td><td><code>litellm.certMode</code></td><td>acm(도메인+ACM · HTTPS) / http(도메인X · HTTP 평문 · PoC 전용) — 둘 다 SG CIDR allowlist(<code>albIngressCidrs</code>) 필수</td></tr>
       <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만</td></tr>
       <tr><td>3</td><td><b>모델·비용 티어</b></td><td>Token Lambda 팀 매핑</td><td>standard(전 모델) / economy(allowlist + 예산캡)</td></tr>
       <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT-5.x(bedrock_mantle) 조합</td></tr>
-      <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>CDK_DEFAULT_REGION</code></td><td>메인 리전 고정 · CDN은 us-east-1</td></tr>
+      <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>awsRegion</code></td><td>config가 authoritative(constants 수정 불필요) · AgentCore/Mantle은 us-east-1 고정</td></tr>
       <tr><td>6</td><td><b>용량·비용</b></td><td><code>data.* · litellm.* · natGateways</code></td><td>Aurora ACU · Fargate 크기 · NAT 수</td></tr>
       <tr><td>7</td><td><b>부트스트랩</b></td><td><code>bootstrapQualifier</code></td><td>기본 / 커스텀(충돌 회피)</td></tr>
     </tbody>
@@ -409,15 +409,15 @@
   <div class="kicker">어떻게 쓰는가 · 워크플로우</div>
   <h2>Discovery → Deploy, <span class="u">게이트(GATE)</span>로 확인하며 진행</h2>
   <div class="steps">
-    <div class="step"><span class="n">1</span><b>Discovery</b><span>도메인·모델·티어·관측성·리전·MCP·SSO 질의</span></div>
+    <div class="step"><span class="n">1</span><b>Discovery</b><span>도메인·allowlist CIDR·모델·티어·관측성·리전·MCP·신원(+초기 사용자) 질의</span></div>
     <div class="step"><span class="n">2</span><b>Design</b><span>decision-tree 적용 · MCP로 모델 ID/리전 검증</span></div>
     <div class="step"><span class="n">3</span><b>Generate</b><span>CDK·Lambda·LiteLLM·스크립트 생성</span></div>
-    <div class="step"><span class="n">4</span><b>Validate</b><span>typecheck · synth · cdk-nag 해소</span></div>
-    <div class="step"><span class="n">5</span><b>Deploy</b><span>bootstrap · cdk deploy</span></div>
-    <div class="step"><span class="n">6</span><b>Onboarding</b><span>Claude Code/Codex 세팅 안내(항상 출력)</span></div>
+    <div class="step"><span class="n">4</span><b>Validate</b><span>toolchain 정렬 · 이미지 CLI 사전검증 · typecheck · synth · cdk-nag</span></div>
+    <div class="step"><span class="n">5</span><b>Deploy</b><span>bootstrap(qualifier 확인) · cdk deploy · 온보딩 자동 실행</span></div>
+    <div class="step"><span class="n">6</span><b>Onboarding</b><span>HTML 가이드 2종 생성(developer/admin, 항상 출력)</span></div>
   </div>
   <div class="grid g2" style="margin-top:16px;flex:1">
-    <div class="card gold"><h3>⛔ GATE 1 — 요구사항 확인</h3><p>Discovery 답변과 그 결과 <code>config/dev.json</code>을 요약해 사용자 승인 후 진행</p></div>
+    <div class="card gold"><h3>⛔ GATE 1 — 요구사항 확인</h3><p>Discovery 답변 → <code>config/dev.json</code> 요약 승인. <b>http 모드는 평문 전송 명시 승인</b>(0.0.0.0/0이면 별도 승인) · cognito-native는 초기 사용자 · Fable/Mythos는 데이터 리텐션 opt-in 포함</p></div>
     <div class="card teal"><h3>⛔ GATE 2 — 아키텍처·비용 확인</h3><p>스택 구성·예상 비용 제시 후 승인. MCP-first: 모델 ID는 하드코딩 금지·런타임 검증</p></div>
   </div>
   <p class="src">근거: SKILL.md (Phase 1~6)</p>
@@ -429,10 +429,10 @@
   <h2>Skill이 <span class="u">생성</span>하는 완성형 CDK 앱</h2>
   <div class="two">
     <div class="flow">project/
-├─ bin/app.ts            <span class="p"># 11 스택 와이어링</span>
+├─ bin/app.ts            <span class="p"># 10 스택 와이어링</span>
 ├─ config/dev.json       <span class="p"># 선택값(런타임 검증)</span>
 ├─ lib/
-│  ├─ *-stack.ts         <span class="p"># Network ~ CDN</span>
+│  ├─ *-stack.ts         <span class="p"># Network ~ Mantle</span>
 │  ├─ interfaces.ts      <span class="p"># cross-stack 계약</span>
 │  ├─ config/{constants,schema}.ts
 │  └─ nag-suppressions.ts
@@ -444,9 +444,9 @@
     <div>
       <ul>
         <li><b>IaC 전부 CDK</b> — typecheck · synth · cdk-nag 게이트</li>
-        <li><b>SSO Token Service</b> — API GW(IAM)+Lambda+DynamoDB</li>
-        <li><b>LiteLLM 컨테이너</b> — config.yaml · Mantle SigV4 오버레이</li>
-        <li><b>개발자 온보딩</b> — 키 helper · Claude/Codex 설정 템플릿</li>
+        <li><b>Token Service</b> — org-sso: API GW(IAM) / cognito-native: API GW(Cognito)+Lambda+DynamoDB</li>
+        <li><b>LiteLLM 컨테이너</b> — config.yaml · Mantle Bearer 토큰 콜백(aws-bedrock-token-generator, uv 설치)</li>
+        <li><b>개발자 온보딩</b> — <code>setup-developer.sh</code>가 <b>outputs.json에서 전부 자동 유도</b>(zero-touch) · 기존 사용자 설정은 <b>병합·백업</b>(덮어쓰기 금지)</li>
         <li><b>테스트·억제</b> — synth 단언 · 정당화된 cdk-nag suppression</li>
       </ul>
       <p class="src">산업·티어·리전 입력에 맞춰 커스터마이즈되어 생성</p>
@@ -460,11 +460,14 @@
   <h2>실전에서 막히는 지점을 <span class="u">코드+문서</span>로 예방</h2>
   <div class="grid g3" style="flex:1">
     <div class="card teal"><h3>🌍 리전 하드코딩 금지</h3><p>키 helper가 Token URL에서 SigV4 리전 파싱 → 무수정 다리전</p></div>
-    <div class="card pink"><h3>🔁 UI 리다이렉트(도메인리스)</h3><p>CloudFront Function이 Host로 Location 재작성 + <code>PROXY_BASE_URL</code>/<code>NEXTAUTH_URL</code> 공개도메인(2단계)</p></div>
-    <div class="card gold"><h3>🧱 부트스트랩 충돌</h3><p>잔존 리소스 시 커스텀 <code>--qualifier</code>로 비파괴 부트스트랩</p></div>
+    <div class="card pink"><h3>🐳 pinned 이미지 사전검증</h3><p>문서의 CLI 플래그도 <code>docker run --entrypoint litellm &lt;image&gt; --help</code>로 확인 — 미존재 플래그는 부팅 즉사(exitCode 2)</p></div>
+    <div class="card gold"><h3>🧱 부트스트랩 충돌·qualifier</h3><p>"no changes" ≠ 정상 — <code>CDKToolkit</code>의 실제 Qualifier 확인 후 <code>cdk.json</code>에 명시</p></div>
+    <div class="card teal"><h3>🔗 SG 소유권 규칙</h3><p>Network는 공용 인프라 SG만(CIDR ingress) · 서비스/ALB SG는 앱 스택 소유 → 순환참조 원천 차단</p></div>
     <div class="card pink"><h3>⚖️ Mantle ↔ Guardrail</h3><p>Guardrail은 bedrock-runtime 전용 → GPT 경로 공백 명시</p></div>
     <div class="card gold"><h3>🔑 시크릿 외부화</h3><p>master key·DB·앱 시크릿은 Secrets Manager. 평문은 안티패턴</p></div>
-    <div class="card teal"><h3>🏗️ prod 전환 체크</h3><p>RETAIN·백업·per-AZ NAT·스코프 IAM·로그 — 각 항목 <code>PROD TODO</code></p></div>
+    <div class="card teal"><h3>🔀 사용자 설정 병합</h3><p><code>~/.claude</code>·<code>~/.codex</code>는 공유 파일 — 백업 후 우리 키만 갱신, 절대 덮어쓰지 않음</p></div>
+    <div class="card pink"><h3>🔁 UI 리다이렉트</h3><p><code>PROXY_BASE_URL</code>/<code>NEXTAUTH_URL</code>=공개 URL 단독 메커니즘 (<code>--forwarded-allow-ips</code>는 이미지에 없음 — 금지)</p></div>
+    <div class="card gold"><h3>🏗️ prod 전환 체크</h3><p>RETAIN·백업·per-AZ NAT·스코프 IAM·로그 — 각 항목 <code>PROD TODO</code></p></div>
   </div>
   <p class="src">근거: shared/reference/constraints.md (실 배포에서 발견·역반영된 항목)</p>
 </section>
@@ -472,21 +475,21 @@
 <!-- 12 PREREQUISITES -->
 <section class="slide">
   <div class="kicker">전제조건 · Discovery 전에 확인할 것들</div>
-  <h2>배포 시작 전 <span class="u">계정 · 권한 · SSO</span> 준비</h2>
+  <h2>배포 시작 전 <span class="u">계정 · 권한 · 신원(SSO/Cognito)</span> 준비</h2>
   <div class="grid g2" style="flex:1">
     <div class="card teal">
       <h3>☁️ AWS 계정 · 권한</h3>
       <ul style="margin-top:2px">
-        <li>대상 계정에 <b>VPC/ECS/RDS/Lambda/APIGW/CloudFront/IAM</b> 생성 권한</li>
+        <li>대상 계정에 <b>VPC/ECS/RDS/Lambda/APIGW/ALB/ACM/IAM</b> 생성 권한</li>
         <li><b>게이트웨이 리전 + us-east-1</b> 양쪽 모두 <code>cdk bootstrap</code> 가능</li>
         <li><b>Bedrock 모델 액세스</b> 활성화 — Claude(게이트웨이 리전), GPT-5.x/Mantle(us-east-1)</li>
         <li><b>AWS Marketplace</b> 구독 가능(Mantle 첫 호출 자동 구독)</li>
       </ul>
     </div>
     <div class="card gold">
-      <h3>🪪 IAM Identity Center (SSO) — SSO 경로 필수</h3>
+      <h3>🪪 org-sso 경로 — IAM Identity Center (이 경로를 쓸 때만)</h3>
       <ul style="margin-top:2px">
-        <li>Token Service는 <code>AWSReservedSSO_</code> 신원만 허용 — 비-SSO 우회 경로 없음(설계)</li>
+        <li>Token Service가 <code>AWSReservedSSO_</code> 신원만 허용(org-sso). <b>조직 SSO가 없으면 cognito-native</b>를 선택 — 아래 IdC 준비는 불필요</li>
         <li><b>IdC 활성화 여부 · 리전</b> 확인</li>
         <li><b>자격 소스</b>: 내장 디렉터리 / 외부 IdP(Okta·Entra)</li>
         <li>배정할 <b>그룹 또는 사용자</b> 존재 여부(팀 권장) — 미비 시 GATE 1에서 즉시 블로커로 표기</li>
@@ -494,13 +497,13 @@
     </div>
   </div>
   <div class="card pink" style="margin-top:12px">
-    <h3>🔎 SSO 1회 준비 절차 (게이트웨이 사용 전)</h3>
+    <h3>🔎 org-sso 1회 준비 절차 (cognito-native는 해당 없음)</h3>
     <div class="steps" style="margin-top:6px">
       <div class="step"><span class="n">1</span><b>권한세트 생성</b><span>이름에 밑줄 금지 · execute-api:Invoke only</span></div>
       <div class="step"><span class="n">2</span><b>계정 할당</b><span>사용자/그룹 → 계정</span></div>
       <div class="step"><span class="n">3</span><b>사용자 생성</b><span>identitystore (또는 기존 사용)</span></div>
       <div class="step"><span class="n">4</span><b>비밀번호 활성화</b><span>IdC 콘솔 전용 · 핸드오프</span></div>
-      <div class="step"><span class="n">5</span><b>SSO 프로필</b><span><code>aws sso login</code> → 키 helper</span></div>
+      <div class="step"><span class="n">5</span><b>로그인</b><span>org-sso <code>aws sso login</code> · cognito <code>llmgw-login</code></span></div>
     </div>
   </div>
   <p class="src">근거: shared/reference/prerequisites.md · shared/reference/sso-setup.md — 로컬 툴체인(Docker/Node/CDK/AWS CLI) 설치는 다음 슬라이드</p>
@@ -631,15 +634,15 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <div class="card gold">
       <h3>🔐 Admin UI 로그인</h3>
       <ul style="margin-top:2px">
-        <li><code>https://&lt;cloudfront-domain&gt;/ui/</code></li>
+        <li><code>&lt;gateway-url&gt;/ui/</code> (acm=<code>https://</code> · http=<code>http://</code>)</li>
         <li>자격증명은 <b>master key 단 하나</b> — Secrets Manager에서 조회(CDK 출력·로그에 절대 노출 안 함)</li>
-        <li>developer는 master key 불필요 — SSO 가상키만 사용</li>
+        <li>developer는 master key 불필요 — 로그인(SSO 또는 Cognito)으로 받은 가상키만 사용</li>
       </ul>
     </div>
     <div class="card teal">
-      <h3>👥 팀·사용자 생성 (SSO 매핑)</h3>
+      <h3>👥 팀·사용자 생성 (SSO/Cognito 매핑)</h3>
       <ul style="margin-top:2px">
-        <li><b>자동 경로(기본)</b>: SSO 권한세트 로그인 → Token Lambda가 권한세트명과 <b>동일한</b> <code>team_alias</code>로 lookup-or-create (1:1 무분기 매칭)</li>
+        <li><b>자동 경로(기본)</b>: org-sso 권한세트(또는 cognito-native Cognito 그룹) 로그인 → Token Lambda가 그 이름과 <b>동일한</b> <code>team_alias</code>로 lookup-or-create (1:1 무분기 매칭)</li>
         <li><b>수동 경로</b>: UI <b>Teams → + New Team</b> 또는 <code>POST /team/new</code>로 선점 생성 — <code>team_alias</code>를 권한세트명과 동일하게 입력</li>
         <li><code>team_alias</code>는 <b>권한세트명 자체</b>와 정확히 일치해야 함 — 오타 시 의도한 팀이 아닌 별도 팀으로 조용히 연결됨</li>
       </ul>
@@ -683,8 +686,8 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
 
 <!-- 17 SSO USER GROUP LITELLM MAPPING -->
 <section class="slide">
-  <div class="kicker">배포 후 운영 · SSO 사용자·그룹 → LiteLLM 권한/예산</div>
-  <h2>새 사용자·그룹 온보딩 — <span class="u">IdC + Admin UI만으로 반복 가능</span></h2>
+  <div class="kicker">배포 후 운영 · org-sso 사용자·그룹 → LiteLLM 권한/예산</div>
+  <h2>org-sso 온보딩 — <span class="u">IdC + Admin UI만으로 반복 가능</span></h2>
   <div class="card teal" style="margin-bottom:10px">
     <h3>✅ 관리자가 알아야 할 결론</h3>
     <p style="margin:2px 0">이 스킬로 생성된 게이트웨이는 <b>기본값부터</b> 권한세트명 = LiteLLM <code>team_alias</code>로 1:1 매칭되도록 코드가 생성됩니다. 그래서 새 조직·팀이 생겨도 <b>개발자 개입·코드 수정·재배포 없이, IdC 콘솔 + LiteLLM Admin UI 클릭만으로</b> 온보딩·예산변경·모델 제한이 끝납니다.</p>
@@ -703,27 +706,49 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   <p class="src">잊지 말 것: 4번을 건너뛰면 조용히 default team으로 빠져 예산·allowlist가 적용 안 됨 · 근거: shared/patterns/lambda-handlers.md · shared/reference/sso-setup.md · shared/reference/litellm-admin-guide.md §2</p>
 </section>
 
+<!-- 18b COGNITO-NATIVE ONBOARDING -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · cognito-native 사용자·그룹 → LiteLLM 권한/예산</div>
+  <h2>cognito-native 온보딩 — <span class="u">Cognito + Admin UI만으로 (조직 SSO 불필요)</span></h2>
+  <div class="card teal" style="margin-bottom:10px">
+    <h3>✅ 관리자가 알아야 할 결론</h3>
+    <p style="margin:2px 0">조직 SSO를 못 쓰는 환경(IdC 계정 인스턴스 등)에서도 <b>Cognito User Pool Group명 = LiteLLM <code>team_alias</code></b>로 1:1 매칭되도록 코드가 생성됩니다. <b>IdC·permission set 없이, Cognito 콘솔·CLI + LiteLLM Admin UI 클릭만으로</b> 온보딩·예산변경·모델 제한이 끝납니다.</p>
+  </div>
+  <div class="timeline" style="flex:none">
+    <div class="tl"><div class="n">1</div><div><div class="b">Cognito 사용자 생성</div><div class="d">Cognito가 유일 신원원(self-signup off) — <b>첫 사용자는 배포 시 에이전트가 자동 생성</b>(Discovery 답변 기반, 풀은 0명으로 배포됨). 추가는 <code>aws cognito-idp admin-create-user --user-pool-id &lt;pool&gt; --username dev@ex.com</code> (또는 콘솔)</div></div><div class="gv">사용자 생성</div></div>
+    <div class="tl"><div class="n">2</div><div><div class="b">User Pool Group 생성 + 사용자 추가</div><div class="d">Group명 = 팀(<code>teamGroupPrefix</code> 접두어, 예 <code>llmgw-team-research</code>) → <code>admin-add-user-to-group</code>. <b>IdC permission set 불필요</b></div></div><div class="gv">그룹 구성</div></div>
+    <div class="tl"><div class="n">3</div><div><div class="b">cognito:groups 자동 반영</div><div class="d">로그인 시 <b>access token</b>에 그룹이 실려 Token Lambda가 <code>teamGroupPrefix</code>로 필터해 팀 결정 — 별도 IAM·Identity Store 호출 없음</div></div><div class="gv">신원→팀</div></div>
+    <div class="tl"><div class="n">4</div><div><div class="b">LiteLLM Admin UI에서 팀 생성 + 예산·모델 설정</div><div class="d">Admin UI → <b>Teams → + New Team</b>, <code>team_alias</code> = 2번 Group명과 동일 → <code>Models</code>(allowlist)·<code>Max Budget</code>을 <b>화면에서 직접 입력</b> — 코드/배포 없음</div></div><div class="gv">권한·예산 확정</div></div>
+    <div class="tl"><div class="n">5</div><div><div class="b">비밀번호 설정 + 검증</div><div class="d"><code>admin-set-user-password --permanent</code>(또는 첫 로그인 강제변경) → 사용자가 <code>llmgw-login</code>(Cognito Hosted UI) 후 Admin UI <b>Teams</b>에서 반영 확인</div></div><div class="gv">활성화·확인</div></div>
+  </div>
+  <div class="card gold" style="margin-top:10px">
+    <h3>🔧 Group명 = team_alias가 같아야 하는 이유</h3>
+    <p style="margin:2px 0">Token Lambda(<code>_resolve_team_id</code>)는 검증된 <code>cognito:groups</code> 중 <code>teamGroupPrefix</code>에 맞는 <b>하나</b>를 그대로 <code>team_alias</code>로 씁니다(<code>require-single-team-group</code>: 0개·다중이면 거부). Identity Store 호출·매핑 테이블·if/else 분기 없음 — 2번 Group명과 4번 team_alias가 다르면 엉뚱한 팀으로 연결됩니다. ⚠️ 토큰은 <b>access token만</b> 허용(<code>id_token</code>은 401).</p>
+  </div>
+  <p class="src">org-sso 대비: permission set → Cognito User Pool Group · <code>aws sso login</code> → <code>llmgw-login</code> · 근거: shared/reference/account-instance-setup.md · shared/patterns/lambda-handlers.md · shared/reference/litellm-admin-guide.md</p>
+</section>
+
 <!-- 18 REAL PROOF -->
 <section class="slide">
   <div class="kicker">검증된 자산 · 실제 배포 결과</div>
   <h2>레퍼런스는 <span class="u">실제 배포·검증</span>됨</h2>
   <div class="two">
     <div><ul>
-      <li><b>11개 스택 전부 CREATE_COMPLETE</b></li>
+      <li><b>10개 스택 전부 CREATE_COMPLETE</b></li>
       <li><b>ECS</b> LiteLLM·Langfuse 1/1 running</li>
-      <li><b>CloudFront → 내부 ALB → LiteLLM</b> /health 200</li>
-      <li><b>SSO 강제</b> 비-SSO 호출 403 (설계대로)</li>
+      <li><b>공개 ALB → LiteLLM</b> /health 200</li>
+      <li><b>신원 강제</b> org-sso: 비-SSO 호출 403 / cognito: JWT 검증 (설계대로)</li>
       <li><b>SSO 사용자</b> 발급 → 가상키 → Claude 정상 응답</li>
       <li><b>UI</b> LiteLLM·Langfuse 로그인 동작(도메인리스)</li>
     </ul></div>
     <div class="grid g2" style="gap:12px">
-      <div class="card gold" style="text-align:center"><div class="big">11/11</div><p>스택 배포</p></div>
+      <div class="card gold" style="text-align:center"><div class="big">10/10</div><p>스택 배포</p></div>
       <div class="card pink" style="text-align:center"><div class="big">3계층</div><p>Guardrail</p></div>
-      <div class="card teal" style="text-align:center"><div class="big">100%</div><p>토큰리스 SigV4</p></div>
+      <div class="card teal" style="text-align:center"><div class="big">0</div><p>저장 시크릿(장기)</p></div>
       <div class="card" style="text-align:center"><div class="big">3툴</div><p>md5 동일 SKILL</p></div>
     </div>
   </div>
-  <p class="src">실 배포에서 발견한 이슈(리전·UI 리다이렉트·키 레이스)는 모두 Skill에 역반영</p>
+  <p class="src">실 배포에서 발견한 이슈(SG 순환참조·미존재 CLI 플래그·bootstrap qualifier·설정 덮어쓰기·stale config 등)는 모두 Skill에 역반영</p>
 </section>
 
 <!-- 19 CLOSING -->
@@ -733,7 +758,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <h1 style="font-size:42px">이렇게 말하면 됩니다</h1>
     <p class="lead" style="margin:12px auto 0;max-width:780px">
       <span class="g-text" style="font-weight:900;font-size:26px">"사내 개발자용 LLM 게이트웨이 만들어줘"</span></p>
-    <p style="color:#aebfd6;margin-top:6px">"Govern Bedrock access for developers" · "LiteLLM 배포하고 SSO 가상키 발급"</p>
+    <p style="color:#aebfd6;margin-top:6px">"Govern Bedrock access for developers" · "LiteLLM 배포하고 SSO/Cognito 가상키 발급"</p>
     <div style="margin-top:22px">
       <span class="pill on">Discovery</span><span class="pill">Design</span><span class="pill">Generate</span>
       <span class="pill">Validate</span><span class="pill">Deploy</span><span class="pill on">Onboarding</span>
@@ -757,7 +782,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   <div class="brand"><b>LLM Gateway Governance</b> · AWS Solution Skill</div>
   <div class="nav">
     <button onclick="go(cur-1)">← 이전</button>
-    <span class="count" id="count">1 / 19</span>
+    <span class="count" id="count">1 / 20</span>
     <button onclick="go(cur+1)">다음 →</button>
   </div>
 </footer>

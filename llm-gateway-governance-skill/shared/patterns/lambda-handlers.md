@@ -1,4 +1,4 @@
-# Lambda Handlers Pattern (SSO Token Service + DB Init Custom Resource)
+# Lambda Handlers Pattern (Auth-mode Token Service + DB Init Custom Resource)
 
 This pattern document transcribes the **two Lambda handlers** of the `llm-gateway-multi-agent` reference solution
 **nearly verbatim from the actual source code**, with English explanations + WHY comments +
@@ -51,23 +51,220 @@ Key environment variables (all injected by CDK):
 
 ---
 
-## Section 1: SSO Token Service (`lambda/token-service/handler.py`)
+## Section 1: Token Service (`lambda/token-service/handler.py`)
 
 ### Core idea (WHY)
 
 The **entire purpose** of this service is exactly one thing: hand out a LiteLLM virtual key
-**only to a principal verified by IAM Identity Center (SSO)**. A direct IAM role (e.g. an `assumed-role`
+**only to a principal verified through the configured auth mode**. In `org-sso`, that is an IAM Identity Center permission-set role ARN. In `cognito-native`, that is a Cognito access-token JWT validated by the API Gateway Cognito authorizer (Cognito is the sole identity source — no external IdP, no IdC federation, no Identity Store). A direct IAM role (e.g. an `assumed-role`
 without the `AWSReservedSSO_` prefix) is **rejected with 403**. Without this rejection,
 anyone with mere IAM permissions could bypass the gateway.
 
-Flow:
+Flow (`org-sso`):
 1. API Gateway (IAM Auth) → the caller ARN is carried in `requestContext.identity.userArn`
 2. Parse the SSO assumed-role ARN and enforce the `AWSReservedSSO_` prefix
 3. Look up the user's cached virtual key in DynamoDB
 4. Cache miss → call LiteLLM `/key/generate` (using the master key from Secrets Manager)
 5. Cache the key (best-effort) and return `{"api_key": "sk-..."}`
 
-### Full source + WHY comments
+### Recommended integrated source shape (auth-mode aware)
+
+Generate the Token Service as one auth-mode-aware handler. The org-sso branch preserves the existing ARN parser; the cognito-native branch consumes the `cognito:groups` claim validated by API Gateway's Cognito authorizer — **no Identity Store call**.
+
+```python
+"""Auth-mode Token Service Lambda.
+
+AUTH_MODE=org-sso:
+  API Gateway IAM auth validates SigV4 and provides requestContext.identity.userArn.
+  Lambda parses AWSReservedSSO_<PermissionSet> and maps PermissionSet == team_alias.
+
+AUTH_MODE=cognito-native:
+  API Gateway Cognito authorizer validates the Cognito ACCESS-token JWT and provides
+  requestContext.authorizer.claims (incl. cognito:groups). Lambda reads that claim
+  directly (no Identity Store round-trip), filters by COGNITO_TEAM_GROUP_PREFIX,
+  requires exactly one match, and maps that group name == team_alias.
+"""
+
+import json
+import logging
+import os
+import re
+import ssl
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import boto3
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+_dynamodb = boto3.resource("dynamodb")
+_secrets = boto3.client("secretsmanager")
+_ssm = boto3.client("ssm")
+# NOTE: no identitystore client — cognito-native reads team membership from the
+# JWT's cognito:groups claim, not from Identity Store.
+
+_master_key_cache: Optional[str] = None
+_endpoint_cache: Optional[str] = None
+_team_id_cache: dict[str, str] = {}
+
+AUTH_MODE = os.environ.get("AUTH_MODE", "org-sso")
+RESPONSE_KEY = os.environ.get("RESPONSE_KEY", "api_key")
+_SSO_ARN_RE = re.compile(r"^arn:aws:sts::(\d+):assumed-role/AWSReservedSSO_([^_/]+)_[^/]+/(.+)$")
+MCP_ACCESS_GROUPS = ["default_tools"]
+TIER_CONFIG: dict[str, dict[str, Any]] = {
+    # Optional one-time team creation seeds, keyed by team_alias.
+    # "llmgw-economy": {"models": ["gpt-5.4", "claude-haiku-4-5"], "max_budget": 50.0},
+}
+
+@dataclass(frozen=True)
+class Principal:
+    user_key: str
+    display_name: str
+    team_alias: str
+    source: str
+    metadata: dict[str, Any]
+
+
+def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    try:
+        principal = _resolve_principal(event)
+        if principal is None:
+            return _resp(403, {"error": "caller is not authorized for this gateway"})
+        logger.info("principal verified: source=%s user=%s team=%s", principal.source, principal.user_key, principal.team_alias)
+
+        cached = _get_cached_key(principal.user_key)
+        if cached:
+            return _resp(200, {RESPONSE_KEY: cached})
+
+        endpoint = _get_endpoint()
+        master_key = _get_master_key()
+        try:
+            virtual_key = _create_virtual_key(endpoint, master_key, principal)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                virtual_key = _recover_existing_key(endpoint, master_key, principal.user_key)
+            else:
+                raise
+        _cache_key(principal.user_key, virtual_key, principal.source)
+        return _resp(200, {RESPONSE_KEY: virtual_key})
+    except Exception:
+        logger.exception("token issuance failed")
+        return _resp(500, {"error": "internal server error"})
+
+
+def _resolve_principal(event: dict[str, Any]) -> Optional[Principal]:
+    if AUTH_MODE == "org-sso":
+        return _resolve_org_sso_principal(event)
+    if AUTH_MODE == "cognito-native":
+        return _resolve_cognito_native_principal(event)
+    raise ValueError(f"unsupported AUTH_MODE={AUTH_MODE}")
+
+
+def _resolve_org_sso_principal(event: dict[str, Any]) -> Optional[Principal]:
+    arn = event.get("requestContext", {}).get("identity", {}).get("userArn")
+    if not isinstance(arn, str):
+        return None
+    match = _SSO_ARN_RE.match(arn)
+    if not match:
+        logger.warning("rejected non-SSO principal: %s", arn)
+        return None
+    account, permission_set, username = match.group(1), match.group(2), match.group(3)
+    return Principal(
+        user_key=f"org-sso:{account}:{username}",
+        display_name=username,
+        team_alias=permission_set,
+        source="org-sso",
+        metadata={"sso_arn": arn, "account": account, "permission_set": permission_set},
+    )
+
+
+def _extract_groups(raw: Any) -> list[str]:
+    """`cognito:groups` in API Gateway's authorizer.claims can arrive as a
+    JSON-encoded string ('["llmgw-dev1"]'), a native list, or a comma-separated
+    string depending on the integration. Handle all three defensively.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(g) for g in raw]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(g) for g in parsed]
+        except json.JSONDecodeError:
+            pass
+        return [g.strip() for g in s.strip("[]").replace('"', "").split(",") if g.strip()]
+    return []
+
+
+def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Principal]:
+    # The API Gateway CognitoUserPoolsAuthorizer has already validated the access
+    # token (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
+    # requestContext.authorizer.claims — not arbitrary body/header claims.
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims") or {}
+    if not isinstance(claims, dict) or not claims:
+        logger.warning("cognito-native rejected: missing Cognito authorizer claims")
+        return None
+
+    user_key = claims.get("sub") or claims.get("cognito:username") or claims.get("email")
+    if not user_key:
+        logger.warning("cognito-native rejected: missing sub/username claim")
+        return None
+    display_name = str(claims.get("email") or claims.get("cognito:username") or user_key)
+
+    groups = _extract_groups(claims.get("cognito:groups"))
+    prefix = os.environ.get("COGNITO_TEAM_GROUP_PREFIX", "")
+    candidates = [g for g in groups if not prefix or g.startswith(prefix)]
+
+    strategy = os.environ.get("COGNITO_MULTI_GROUP_STRATEGY", "require-single-team-group")
+    if strategy == "require-single-team-group" and len(candidates) != 1:
+        logger.warning("cognito-native rejected: expected exactly one matching team group, got %s", candidates)
+        return None
+
+    team_alias = candidates[0]
+    return Principal(
+        user_key=f"cognito-native:{user_key}",
+        display_name=display_name,
+        team_alias=team_alias,
+        source="cognito-native",
+        metadata={"cognito_sub": str(user_key), "team_group": team_alias},
+    )
+```
+
+Continue the source with the same cache, Secrets Manager, SSM, LiteLLM, `_ensure_team`, `_recover_existing_key`, and `_resp` helpers shown below. The key change is that `_create_virtual_key` accepts `Principal` and uses `principal.team_alias` for unbranched team lookup:
+
+```python
+def _create_virtual_key(endpoint: str, master_key: str, principal: Principal) -> str:
+    body = {
+        "key_alias": f"{principal.source}-{principal.user_key}",
+        "user_id": principal.user_key,
+        "end_user_id": principal.display_name,
+        "metadata": principal.metadata | {"auth_mode": principal.source},
+    }
+    team_id = _resolve_team_id(endpoint, master_key, principal.team_alias)
+    if team_id:
+        body["team_id"] = team_id
+    return _litellm("POST", f"{endpoint}/key/generate", master_key, body)["key"]
+
+
+def _resolve_team_id(endpoint: str, master_key: str, team_alias: str) -> Optional[str]:
+    seed = TIER_CONFIG.get(team_alias, {})
+    return _ensure_team(endpoint, master_key, team_alias, models=seed.get("models"), max_budget=seed.get("max_budget"))
+```
+
+If you use a Lambda authorizer instead of `CognitoUserPoolsAuthorizer`, put the JWT signature/issuer/audience/JWKS validation in that authorizer and pass only validated claims to the Token Lambda. Do not parse unvalidated JWT payloads in the Token Lambda.
+
+### Legacy org-sso helper source excerpt
+
+The following excerpt is the original org-sso implementation. Keep it for the `org-sso` branch and helper functions, but do not emit it as the whole handler when `authMode='cognito-native'`.
 
 ```python
 """
@@ -128,24 +325,27 @@ RESPONSE_KEY = os.environ.get("RESPONSE_KEY", "api_key")
 #      A teamless key can only use allow_all_keys servers, so MCP scope control does not work.
 MCP_ACCESS_GROUPS = ["default_tools"]
 
-# Tier routing: the SSO permission set name *is* the LiteLLM team_alias, 1:1, no
-# code-side branching. Onboarding a new org/team is therefore pure console work:
-#   1) IdC: create a group + a permission set named identically to the team you want
-#      (e.g. permission set "team-research" -> LiteLLM team "team-research")
-#   2) LiteLLM Admin UI: Teams -> + New Team, team_alias = the same name, set Models
-#      (allowlist) + Max Budget/Budget Duration right there in the UI
-#   3) assign the group to the account with that permission set
-# No Lambda edit, no redeploy, for step 1-3 above -- ever. `_resolve_team_id` below
-# never branches on a specific permission-set name; it always resolves 1:1.
+# Tier routing: the authorization unit *is* the LiteLLM team_alias, 1:1, no
+# code-side branching. In org-sso this is the permission set name; in cognito-native
+# this is the Cognito User Pool Group name (from the cognito:groups claim).
+# Onboarding a new team is therefore pure console work:
+#   org-sso:        1) IdC: create a group + a permission set named identically to
+#                      the team; 2) assign it to the account.
+#   cognito-native: 1) Cognito: create a User Pool Group named identically to the
+#                      team; 2) add users to it.
+#   both:           3) LiteLLM Admin UI: Teams -> + New Team, team_alias = the same
+#                      name, set Models (allowlist) + Max Budget right there.
+# No Lambda edit, no redeploy, for the steps above -- ever. `_resolve_team_id` below
+# never branches on a specific group/permission-set name; it always resolves 1:1.
 #
 # WHY (identity-bound governance, zero-touch onboarding): tier assignment is owned
-#      entirely by IAM Identity Center (who's in which group) + the LiteLLM Admin UI
+#      entirely by the identity source (who's in which group) + the LiteLLM Admin UI
 #      (what that team's models/budget are). The Lambda is just plumbing between them
 #      and never needs to know org/tier names in advance.
 #
 # TIER_CONFIG is OPTIONAL and only matters for the very first time a given team is
 # auto-created (i.e. before anyone has set it up via the Admin UI yet): if a
-# permission_set has an entry here, the team is created with that initial
+# team_alias has an entry here, the team is created with that initial
 # models/max_budget instead of "no restriction". This exists purely to let this
 # skill's Discovery phase seed a couple of starter tiers (e.g. "economy" for interns)
 # without requiring the operator to click through the UI before the first login.
@@ -153,7 +353,7 @@ MCP_ACCESS_GROUPS = ["default_tools"]
 # Admin UI (Teams -> edit) -- this dict is never read again for that team_alias.
 TIER_CONFIG: dict[str, dict[str, Any]] = {
     # Example seeded by Discovery answers -- delete or add entries as needed.
-    # "team-economy": {"models": ["gpt-5.4", "claude-sonnet-4-6", "claude-haiku-4-5"], "max_budget": 50.0},
+    # "team-economy": {"models": ["gpt-5.4", "claude-sonnet-5", "claude-haiku-4-5"], "max_budget": 50.0},
 }
 
 
@@ -318,7 +518,7 @@ def _create_virtual_key(
 
 
 def _resolve_team_id(endpoint: str, master_key: str, permission_set: str) -> Optional[str]:
-    """Map the caller's SSO permission set directly to a same-named LiteLLM team (lookup-or-create).
+    """Map the caller's IdC authorization unit directly to a same-named LiteLLM team (lookup-or-create).
 
     No branching on specific permission-set names: the permission set IS the team_alias.
     This is what makes future onboarding console-only (IdC group/permission-set + LiteLLM
@@ -408,12 +608,13 @@ def _resp(status: int, body: dict[str, Any]) -> dict[str, Any]:
 
 ### Behavior checklist (regeneration checklist)
 
-- [ ] The caller ARN is read **not from client input** but from `requestContext.identity.userArn` (filled in by API GW IAM Auth).
-- [ ] The `_SSO_ARN_RE` regex enforces `AWSReservedSSO_` → non-SSO gets **403**.
-- [ ] DynamoDB single-item cache: `pk=USER#<username>`, `sk=VIRTUAL_KEY`, `ttl`.
+- [ ] `org-sso`: the caller ARN is read **not from client input** but from `requestContext.identity.userArn` (filled in by API GW IAM Auth).
+- [ ] `cognito-native`: the API Gateway Cognito authorizer verifies the **access token** (id_token → 401) before the Lambda runs; the Lambda reads `cognito:groups` from `requestContext.authorizer.claims` and makes **no Identity Store / `identitystore:*` call**.
+- [ ] The `_SSO_ARN_RE` regex enforces `AWSReservedSSO_` → non-SSO gets **403** (org-sso).
+- [ ] DynamoDB single-item cache: `pk=USER#<user_key>`, `sk=VIRTUAL_KEY`, `ttl`.
 - [ ] The master key is from Secrets Manager (`LITELLM_MASTER_KEY_ARN`), the endpoint from SSM (`LITELLM_ENDPOINT_SSM`).
-- [ ] `permission_set` maps **1:1, unbranched** to a same-named LiteLLM team — no `if permission_set in {...}` tier logic in code. `TIER_CONFIG` only seeds a first-time team's initial `models`/`max_budget`; it is not consulted again once the team exists.
-- [ ] Onboarding a new org/tier is IdC (group + permission set) + LiteLLM Admin UI (Teams → edit) only — regenerating/redeploying this Lambda is never part of the steady-state onboarding flow.
+- [ ] The authorization unit maps **1:1, unbranched** to a same-named LiteLLM team — permission set for `org-sso`, Cognito User Pool Group name for `cognito-native`; no `if team in {...}` tier logic in code. `TIER_CONFIG` only seeds a first-time team's initial `models`/`max_budget`; it is not consulted again once the team exists.
+- [ ] Onboarding a new team is console + LiteLLM Admin UI (Teams → edit) only: group + permission set for `org-sso`, Cognito group + membership for `cognito-native`; regenerating/redeploying this Lambda is never part of the steady-state onboarding flow.
 - [ ] Even if team resolution fails, the key is still issued (**graceful degradation**).
 - [ ] A `key_alias` collision (400) is handled idempotently by recovering the existing key.
 
@@ -430,6 +631,42 @@ def _resp(status: int, body: dict[str, Any]) -> dict[str, Any]:
 
 ---
 
+
+## Section 1A: `cognito-native` auth adapter (Cognito `cognito:groups` claim → team)
+
+When `config.authMode = "cognito-native"`, generate an adapter beside the existing org-sso ARN parser instead of replacing it (the full resolver is shown in Section 1 above). The handler selects the parser from `AUTH_MODE`:
+
+```python
+AUTH_MODE = os.environ.get("AUTH_MODE", "org-sso")
+
+def _resolve_principal(event: dict[str, Any]) -> Principal | None:
+    if AUTH_MODE == "org-sso":
+        return _resolve_org_sso_principal(event)          # existing AWSReservedSSO_ ARN path
+    if AUTH_MODE == "cognito-native":
+        return _resolve_cognito_native_principal(event)   # cognito:groups claim path
+    raise ValueError(f"unsupported AUTH_MODE={AUTH_MODE}")
+```
+
+`cognito-native` requirements:
+
+1. **Do not verify the JWT in the Lambda.** The API Gateway `CognitoUserPoolsAuthorizer` already validates the **access token** (signature/issuer/audience/expiry) before the Lambda runs and exposes the verified claims at `requestContext.authorizer.claims`. (An id_token is rejected with 401 at the authorizer.)
+2. Read `cognito:groups` from those verified claims — **no Identity Store round-trip, no `identitystore:*` IAM**. Parse defensively (JSON string / native list / comma-separated) — see `_extract_groups` in Section 1.
+3. Filter group names by `COGNITO_TEAM_GROUP_PREFIX` when configured.
+4. Apply `COGNITO_MULTI_GROUP_STRATEGY=require-single-team-group`: exactly one matching group is required; zero or multiple → 403 with a clear log message.
+5. Set `team_alias` to that single group name and call the same `_ensure_team(endpoint, master_key, team_alias, ...)` used by org-sso.
+
+Do **not** add an in-code `if group in {...}` mapping. The Cognito group name is the LiteLLM `team_alias`. `TIER_CONFIG` may seed first creation only, exactly as in org-sso.
+
+Required environment variables in `cognito-native` mode (set by AuthStack):
+
+```text
+AUTH_MODE=cognito-native
+COGNITO_TEAM_GROUP_PREFIX=llmgw-
+COGNITO_MULTI_GROUP_STRATEGY=require-single-team-group
+```
+
+**Required IAM permissions for the Token Lambda in `cognito-native` mode: none beyond the shared plane** (DynamoDB key cache read/write, Secrets Manager `grantRead` on the master key, SSM read for the LiteLLM URL). There is **no `identitystore:*` grant** — team membership comes from the JWT claim, verified by the API Gateway authorizer, not from Identity Store.
+
 ## Section 2: db-init Custom Resource (`lambda/db-init/handler.py`)
 
 ### Core idea (WHY)
@@ -441,7 +678,204 @@ SQL like **`CREATE USER` / `CREATE DATABASE` / `GRANT`** inside the DB. So this 
 
 This way the service attaches to the DB only with its **own dedicated account**, not master credentials (separation of privilege).
 
-### Full source + WHY comments
+### Recommended integrated source shape (auth-mode aware)
+
+Generate the Token Service as one auth-mode-aware handler. The org-sso branch preserves the existing ARN parser; the cognito-native branch consumes the `cognito:groups` claim validated by API Gateway's Cognito authorizer — **no Identity Store call**.
+
+```python
+"""Auth-mode Token Service Lambda.
+
+AUTH_MODE=org-sso:
+  API Gateway IAM auth validates SigV4 and provides requestContext.identity.userArn.
+  Lambda parses AWSReservedSSO_<PermissionSet> and maps PermissionSet == team_alias.
+
+AUTH_MODE=cognito-native:
+  API Gateway Cognito authorizer validates the Cognito ACCESS-token JWT and provides
+  requestContext.authorizer.claims (incl. cognito:groups). Lambda reads that claim
+  directly (no Identity Store round-trip), filters by COGNITO_TEAM_GROUP_PREFIX,
+  requires exactly one match, and maps that group name == team_alias.
+"""
+
+import json
+import logging
+import os
+import re
+import ssl
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import boto3
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+_dynamodb = boto3.resource("dynamodb")
+_secrets = boto3.client("secretsmanager")
+_ssm = boto3.client("ssm")
+# NOTE: no identitystore client — cognito-native reads team membership from the
+# JWT's cognito:groups claim, not from Identity Store.
+
+_master_key_cache: Optional[str] = None
+_endpoint_cache: Optional[str] = None
+_team_id_cache: dict[str, str] = {}
+
+AUTH_MODE = os.environ.get("AUTH_MODE", "org-sso")
+RESPONSE_KEY = os.environ.get("RESPONSE_KEY", "api_key")
+_SSO_ARN_RE = re.compile(r"^arn:aws:sts::(\d+):assumed-role/AWSReservedSSO_([^_/]+)_[^/]+/(.+)$")
+MCP_ACCESS_GROUPS = ["default_tools"]
+TIER_CONFIG: dict[str, dict[str, Any]] = {
+    # Optional one-time team creation seeds, keyed by team_alias.
+    # "llmgw-economy": {"models": ["gpt-5.4", "claude-haiku-4-5"], "max_budget": 50.0},
+}
+
+@dataclass(frozen=True)
+class Principal:
+    user_key: str
+    display_name: str
+    team_alias: str
+    source: str
+    metadata: dict[str, Any]
+
+
+def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    try:
+        principal = _resolve_principal(event)
+        if principal is None:
+            return _resp(403, {"error": "caller is not authorized for this gateway"})
+        logger.info("principal verified: source=%s user=%s team=%s", principal.source, principal.user_key, principal.team_alias)
+
+        cached = _get_cached_key(principal.user_key)
+        if cached:
+            return _resp(200, {RESPONSE_KEY: cached})
+
+        endpoint = _get_endpoint()
+        master_key = _get_master_key()
+        try:
+            virtual_key = _create_virtual_key(endpoint, master_key, principal)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                virtual_key = _recover_existing_key(endpoint, master_key, principal.user_key)
+            else:
+                raise
+        _cache_key(principal.user_key, virtual_key, principal.source)
+        return _resp(200, {RESPONSE_KEY: virtual_key})
+    except Exception:
+        logger.exception("token issuance failed")
+        return _resp(500, {"error": "internal server error"})
+
+
+def _resolve_principal(event: dict[str, Any]) -> Optional[Principal]:
+    if AUTH_MODE == "org-sso":
+        return _resolve_org_sso_principal(event)
+    if AUTH_MODE == "cognito-native":
+        return _resolve_cognito_native_principal(event)
+    raise ValueError(f"unsupported AUTH_MODE={AUTH_MODE}")
+
+
+def _resolve_org_sso_principal(event: dict[str, Any]) -> Optional[Principal]:
+    arn = event.get("requestContext", {}).get("identity", {}).get("userArn")
+    if not isinstance(arn, str):
+        return None
+    match = _SSO_ARN_RE.match(arn)
+    if not match:
+        logger.warning("rejected non-SSO principal: %s", arn)
+        return None
+    account, permission_set, username = match.group(1), match.group(2), match.group(3)
+    return Principal(
+        user_key=f"org-sso:{account}:{username}",
+        display_name=username,
+        team_alias=permission_set,
+        source="org-sso",
+        metadata={"sso_arn": arn, "account": account, "permission_set": permission_set},
+    )
+
+
+def _extract_groups(raw: Any) -> list[str]:
+    """`cognito:groups` in API Gateway's authorizer.claims can arrive as a
+    JSON-encoded string ('["llmgw-dev1"]'), a native list, or a comma-separated
+    string depending on the integration. Handle all three defensively.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(g) for g in raw]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(g) for g in parsed]
+        except json.JSONDecodeError:
+            pass
+        return [g.strip() for g in s.strip("[]").replace('"', "").split(",") if g.strip()]
+    return []
+
+
+def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Principal]:
+    # The API Gateway CognitoUserPoolsAuthorizer has already validated the access
+    # token (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
+    # requestContext.authorizer.claims — not arbitrary body/header claims.
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims") or {}
+    if not isinstance(claims, dict) or not claims:
+        logger.warning("cognito-native rejected: missing Cognito authorizer claims")
+        return None
+
+    user_key = claims.get("sub") or claims.get("cognito:username") or claims.get("email")
+    if not user_key:
+        logger.warning("cognito-native rejected: missing sub/username claim")
+        return None
+    display_name = str(claims.get("email") or claims.get("cognito:username") or user_key)
+
+    groups = _extract_groups(claims.get("cognito:groups"))
+    prefix = os.environ.get("COGNITO_TEAM_GROUP_PREFIX", "")
+    candidates = [g for g in groups if not prefix or g.startswith(prefix)]
+
+    strategy = os.environ.get("COGNITO_MULTI_GROUP_STRATEGY", "require-single-team-group")
+    if strategy == "require-single-team-group" and len(candidates) != 1:
+        logger.warning("cognito-native rejected: expected exactly one matching team group, got %s", candidates)
+        return None
+
+    team_alias = candidates[0]
+    return Principal(
+        user_key=f"cognito-native:{user_key}",
+        display_name=display_name,
+        team_alias=team_alias,
+        source="cognito-native",
+        metadata={"cognito_sub": str(user_key), "team_group": team_alias},
+    )
+```
+
+Continue the source with the same cache, Secrets Manager, SSM, LiteLLM, `_ensure_team`, `_recover_existing_key`, and `_resp` helpers shown below. The key change is that `_create_virtual_key` accepts `Principal` and uses `principal.team_alias` for unbranched team lookup:
+
+```python
+def _create_virtual_key(endpoint: str, master_key: str, principal: Principal) -> str:
+    body = {
+        "key_alias": f"{principal.source}-{principal.user_key}",
+        "user_id": principal.user_key,
+        "end_user_id": principal.display_name,
+        "metadata": principal.metadata | {"auth_mode": principal.source},
+    }
+    team_id = _resolve_team_id(endpoint, master_key, principal.team_alias)
+    if team_id:
+        body["team_id"] = team_id
+    return _litellm("POST", f"{endpoint}/key/generate", master_key, body)["key"]
+
+
+def _resolve_team_id(endpoint: str, master_key: str, team_alias: str) -> Optional[str]:
+    seed = TIER_CONFIG.get(team_alias, {})
+    return _ensure_team(endpoint, master_key, team_alias, models=seed.get("models"), max_budget=seed.get("max_budget"))
+```
+
+If you use a Lambda authorizer instead of `CognitoUserPoolsAuthorizer`, put the JWT signature/issuer/audience/JWKS validation in that authorizer and pass only validated claims to the Token Lambda. Do not parse unvalidated JWT payloads in the Token Lambda.
+
+### Legacy org-sso helper source excerpt
+
+The following excerpt is the original org-sso implementation. Keep it for the `org-sso` branch and helper functions, but do not emit it as the whole handler when `authMode='cognito-native'`.
 
 ```python
 """
