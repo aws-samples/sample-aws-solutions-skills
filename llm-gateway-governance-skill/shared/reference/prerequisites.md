@@ -1,14 +1,11 @@
 # Prerequisites — before running this skill
 
-> ⚠️ **AI tool requirement (read first)**: this is an **Agent Skill**, not a standalone CLI — it only runs
-> inside a supported AI coding tool that can load `SKILL.md` and drive the multi-phase workflow. You need
-> **one of the following installed**: **Kiro**, **Claude Code**, or **Amazon Quick Desktop**. Everything
-> else in this document (Docker/Node/CDK/AWS CLI/IdC) is verified *from inside* one of these tools, not
-> standalone. This "which tool loads the skill" restriction is separate from **which developer client the
-> generated gateway serves** — the gateway itself is generated for **both Claude Code and Codex** developer
-> traffic (see `shared/patterns/developer-onboarding.md`). **Codex is not yet supported as a skill-hosting
-> tool** (i.e., you cannot run this skill's multi-phase workflow *inside* Codex today), but Codex *is* a
-> fully supported client of the deployed gateway.
+> ⚠️ **AI tool requirement (read first)**: this is an **Agent Skill**, not a standalone CLI — it runs
+> inside a supported AI coding tool that can load `SKILL.md` and drive the multi-phase workflow. Install
+> **one of the following**: **Kiro**, **Claude Code**, or **Codex**. Everything else in this document
+> (Docker/Node/CDK/AWS CLI/IdC) is verified *from inside* one of these tools. Codex is supported both as
+> a skill host and as a developer client of the deployed gateway (see
+> `shared/patterns/developer-onboarding.md`).
 
 Verify all of these **before** Phase 1 Discovery. Missing any of them blocks a specific
 phase later (noted below) — catching them up front avoids a failed `cdk deploy` mid-way.
@@ -19,10 +16,9 @@ phase later (noted below) — catching them up front avoids a failed `cdk deploy
 |---|---|---|
 | **Kiro** | [kiro.dev](https://kiro.dev/) | `~/.kiro/skills/llm-gateway-governance/` |
 | **Claude Code** | `npm install -g @anthropic-ai/claude-code` — [docs](https://docs.anthropic.com/en/docs/claude-code) | `~/.claude/skills/llm-gateway-governance/` |
-| **Amazon Quick Desktop** | [aws.amazon.com/ko/quick/desktop](https://aws.amazon.com/ko/quick/desktop/) | `~/.quickwork/skills/llm-gateway-governance/` |
-| Codex | — | **Not supported yet** — planned for a future update |
+| **Codex** | `npm install -g @openai/codex` — [docs](https://developers.openai.com/codex/) | `~/.agents/skills/llm-gateway-governance/` |
 
-See the repo `README.md` → **Install** section for the exact `ln -sf`/`cp -r` commands per tool.
+See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -r` commands per tool. Codex may request approval for networked package installation and AWS deployment commands under its sandbox policy.
 
 ## 1. Local tooling
 
@@ -155,7 +151,7 @@ Only relevant if you plan to answer "yes" to the Phase 1 Observability question.
 
 ## Quick checklist (copy into your own notes)
 
-- [ ] One of **Kiro / Claude Code / Amazon Quick Desktop** is installed and this skill is linked into it (Codex: not yet supported as a skill-hosting tool, but fully supported as a generated gateway client)
+- [ ] One of **Kiro / Claude Code / Codex** is installed and this skill is linked into its documented skills directory
 - [ ] `docker info` succeeds (daemon running)
 - [ ] `node -v` → 18.x/20.x, `cdk --version` → v2, `aws --version` → v2
 - [ ] `aws sts get-caller-identity` resolves to the intended target account

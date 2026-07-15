@@ -1,6 +1,6 @@
 # Skill Directory Structure Spec
 
-This is the standard layout every skill in `aws-solution-skills/` MUST follow. The repo adopts the **Anthropic Agent Skills standard** ([agentskills.io/specification](https://agentskills.io/specification)) and applies it consistently to all three target tools (Claude Code, Kiro, Amazon Quick).
+This is the standard layout every skill in `aws-solution-skills/` MUST follow. The repo adopts the **Anthropic Agent Skills standard** ([agentskills.io/specification](https://agentskills.io/specification)) and applies it consistently to all three target tools (Claude Code, Kiro, Codex).
 
 > **Core principle — "Write once, install three places"**: a single `SKILL.md` is placed verbatim into each tool's `skills/` directory. Tools differ only in install location; content is identical (md5 hash check enforced).
 
@@ -20,7 +20,7 @@ This is the standard layout every skill in `aws-solution-skills/` MUST follow. T
 │       └── <skill-name>/
 │           └── SKILL.md               ★ same SKILL.md (md5-identical to claude-code/)
 │
-├── quick/
+├── codex/
 │   └── skills/
 │       └── <skill-name>/
 │           └── SKILL.md               ★ same SKILL.md (md5-identical to claude-code/)
@@ -50,11 +50,11 @@ This is the standard layout every skill in `aws-solution-skills/` MUST follow. T
 ### `<skill>/README.md`
 Skill-level overview. Linked from the root `README.md`. Contains:
 - Trigger phrases (English + Korean if applicable)
-- Three install commands (Claude Code / Kiro / Amazon Quick)
+- Three install commands (Claude Code / Kiro / Codex)
 - Output summary
 - MCP requirements
 
-### `<skill>/{claude-code,kiro,quick}/skills/<skill-name>/SKILL.md`
+### `<skill>/{claude-code,kiro,codex}/skills/<skill-name>/SKILL.md`
 
 **Three identical copies of the same file**. Content MUST be md5-identical.
 
@@ -65,7 +65,7 @@ Frontmatter follows [agentskills.io spec](https://agentskills.io/specification):
 name: <skill-name>            # Lowercase, hyphens only, max 64 chars, must match parent dir name
 description: |
   What the skill does + when to use it. Include trigger keywords (English and Korean).
-  Max 1024 chars. Claude/Kiro/Quick all use this for skill activation matching.
+  Max 1024 chars. Claude/Kiro/Codex all use this for skill activation matching.
 license: MIT                  # Optional but recommended
 metadata:                     # Optional, free-form key-value
   version: "1.0"
@@ -124,9 +124,9 @@ After running install commands, files end up in:
 |---|---|
 | Claude Code | `~/.claude/skills/<skill-name>/SKILL.md` (+ `shared/`, `evals/`) |
 | Kiro | `~/.kiro/skills/<skill-name>/SKILL.md` (+ `shared/`, `evals/`) |
-| Amazon Quick | `~/.quickwork/skills/<skill-name>/SKILL.md` (+ `shared/`, `evals/`) |
+| Codex | `~/.agents/skills/<skill-name>/SKILL.md` (+ `shared/`, `evals/`) |
 
-The repo's per-tool layout (`{claude-code,kiro,quick}/skills/<name>/`) mirrors the install location, so symlinking the repo path into the install path works directly.
+The repo keeps explicit per-tool source directories (`{claude-code,kiro,codex}/skills/<name>/`). Codex uses the official user-scope discovery path `~/.agents/skills/<name>/`; symlink the repo's `codex/skills/<name>/` directory there.
 
 ## Cross-skill shared assets (root level)
 
@@ -149,8 +149,8 @@ Three SKILL.md files per skill MUST be md5-identical:
 for skill in <root>/*-skill; do
   md5_a=$(md5sum "$skill/claude-code/skills/"*/SKILL.md | awk '{print $1}')
   md5_k=$(md5sum "$skill/kiro/skills/"*/SKILL.md | awk '{print $1}')
-  md5_q=$(md5sum "$skill/quick/skills/"*/SKILL.md | awk '{print $1}')
-  [ "$md5_a" = "$md5_k" ] && [ "$md5_k" = "$md5_q" ] || echo "DRIFT in $skill"
+  md5_x=$(md5sum "$skill/codex/skills/"*/SKILL.md | awk '{print $1}')
+  [ "$md5_a" = "$md5_k" ] && [ "$md5_k" = "$md5_x" ] || echo "DRIFT in $skill"
 done
 ```
 
@@ -160,7 +160,7 @@ Drift between the three copies is the #1 bug to catch in CI.
 
 | Missing | Tool-specific impact |
 |---|---|
-| Any of the three SKILL.md files | Tool will not pick up the skill on `~/.<tool>/skills/` |
+| Any of the three SKILL.md files | Tool will not discover the skill in its documented install path |
 | md5 mismatch between three files | Tools see different behaviors — drift bug |
 | `shared/` | SKILL.md references break — skill hallucinates code |
 | `evals/` | No regression check on changes |
@@ -178,10 +178,10 @@ The `template/` is empty placeholders following this exact structure.
 
 ## Why this layout
 
-The repo originally had one entry format per tool (`claude-code/CLAUDE.md` + `commands/`, `kiro/steering.md` + `specs/`, `quick/SKILL.md`). That layout was discarded because:
+The third skill host must expose the shell/terminal capabilities required by these skills' build, validation, and AWS deployment phases. Codex supports the open Agent Skills format and can execute the required project commands under its sandbox and approval controls.
 
-1. **All three tools natively accept the Anthropic Agent Skills SKILL.md format** — there is no semantic gain from per-tool entry formats.
-2. **Tool-specific entry formats (`CLAUDE.md`, Kiro Steering, Quick custom frontmatter) require per-tool authoring effort** that drifts over time.
-3. **The Anthropic Skills standard is the actual lowest common denominator** — it covers trigger description, progressive disclosure, supporting files, and is recognized by all three tools.
+1. **All three target tools accept the Agent Skills `SKILL.md` format** — there is no semantic gain from maintaining different entry formats.
+2. **Tool-specific entry formats require duplicate authoring effort** and create drift over time.
+3. **The open Agent Skills standard is the lowest common denominator** — it covers trigger descriptions, progressive disclosure, and supporting files across Claude Code, Kiro, and Codex.
 
-The "per-tool variation" was, in retrospect, a self-imposed cost without corresponding benefit. The current layout — one SKILL.md, three install paths — is what datalab-skills demonstrated and what this repo now adopts.
+The current layout keeps one byte-identical `SKILL.md` in three explicit source directories and uses each host's documented installation path.

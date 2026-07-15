@@ -2,7 +2,7 @@
 
 A production-grade Agent Skill that builds the **ingestion → storage → catalog → query** layers of a serverless data lake on AWS. Stops once data is queryable in Athena. Output is a working CDK TypeScript project plus Glue scripts and Athena DDL.
 
-**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
+**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Codex).
 
 ## What it produces
 
@@ -35,7 +35,7 @@ data-platform-pipeline-skill/
 │                                            └── reference/*.md         ★
 ├── kiro/skills/data-platform-pipeline/SKILL.md                         ★
 │                                      └── reference/*.md               ★
-└── quick/skills/data-platform-pipeline/SKILL.md                        ★
+└── codex/skills/data-platform-pipeline/SKILL.md                        ★
                                         └── reference/*.md              ★
 ```
 
@@ -61,11 +61,11 @@ ln -s "$(pwd)/kiro/skills/data-platform-pipeline" ~/.kiro/skills/data-platform-p
 
 Auto-triggers on the same phrases as the Claude Code skill (e.g. "build a data pipeline", "data lake setup", "Glue job", "ETL pipeline").
 
-### Amazon Quick
+### Codex
 
 ```bash
-mkdir -p ~/.quickwork/skills
-ln -s "$(pwd)/quick/skills/data-platform-pipeline" ~/.quickwork/skills/data-platform-pipeline
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/codex/skills/data-platform-pipeline" ~/.agents/skills/data-platform-pipeline
 ```
 
 ## Usage

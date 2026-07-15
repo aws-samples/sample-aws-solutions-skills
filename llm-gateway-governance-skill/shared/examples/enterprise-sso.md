@@ -118,7 +118,7 @@ Network → Data → Guardrail → AgentCoreGateway(us-east-1) → LiteLLM(acm p
 | LiteLLMStack | Fargate **2 tasks**, **internet-facing ALB (HTTPS:443, regional ACM + Route53 alias, `idleTimeout=900s`)** for developer traffic + a separate **internal ALB (HTTP:4000)** for the Token Service, Task Role: Claude SigV4 + Mantle Bearer (runtime-minted `BEDROCK_MANTLE_API_KEY`) + InvokeGateway + Marketplace, master-key secret, publishes the internal URL to SSM |
 | **LangfuseStack** | Fargate Langfuse behind its **own internet-facing ALB + ACM cert** (Route53 alias) — exists because `enableLangfuse: true` **and** `certMode='acm'` |
 | AuthStack | API GW(IAM) + Token Lambda (permission set name → same `team_alias`) + DynamoDB key cache + `config.sso` outputs |
-| ObservabilityStack | CloudWatch dashboard (ALB requests/5xx, Token Service, Langfuse link) |
+| ObservabilityStack | CloudWatch usage dashboard (tokens by model/team, spend, latency, per-user + hourly Logs Insights, ALB requests/5xx, Langfuse link) |
 | **MantleNetworkStack** | us-east-1 peer VPC + bedrock-mantle endpoint + cross-region peering + acceptance + PHZ |
 | **MantlePeeringRoutesStack** | primary-region (us-east-2) routes to the peer CIDR |
 

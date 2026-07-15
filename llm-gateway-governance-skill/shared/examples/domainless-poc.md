@@ -120,7 +120,7 @@ Network → Data → Guardrail → LiteLLM(public HTTP ALB, SG-restricted) → (
 | LiteLLMStack | Fargate 1 task, internet-facing ALB(HTTP:80, SG = `albIngressCidrs`, `idleTimeout=900s`) + internal ALB(4000). Task Role: Claude SigV4 + Mantle Bearer (runtime-minted `BEDROCK_MANTLE_API_KEY`) |
 | ~~LangfuseStack~~ | **None** (`enableLangfuse: false`; would require `certMode='acm'`) |
 | AuthStack | API GW(IAM) + Token Lambda (STANDARD single tier) + DynamoDB |
-| ObservabilityStack | CloudWatch dashboard (Langfuse link widget disabled) |
+| ObservabilityStack | CloudWatch usage dashboard (tokens by model/team, spend, latency, per-user + hourly Logs Insights, ALB requests/5xx; Langfuse link disabled) |
 | ~~CdnStack~~ | **None** — CloudFront removed; the ALB is the edge |
 
 ---

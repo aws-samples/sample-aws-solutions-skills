@@ -48,11 +48,11 @@ ln -sf "$(pwd)/kiro/skills/llm-gateway-governance" ~/.kiro/skills/llm-gateway-go
 ln -sf "$(pwd)/shared" ~/.kiro/skills/llm-gateway-governance/shared
 ```
 
-### Amazon Quick
+### Codex
 ```bash
-mkdir -p ~/.quickwork/skills
-ln -sf "$(pwd)/quick/skills/llm-gateway-governance" ~/.quickwork/skills/llm-gateway-governance
-ln -sf "$(pwd)/shared" ~/.quickwork/skills/llm-gateway-governance/shared
+mkdir -p ~/.agents/skills
+ln -sf "$(pwd)/codex/skills/llm-gateway-governance" ~/.agents/skills/llm-gateway-governance
+ln -sf "$(pwd)/shared" ~/.agents/skills/llm-gateway-governance/shared
 ```
 
 (Use `cp -r` instead of `ln -sf` on Windows or where symlinks are unavailable.)
@@ -88,7 +88,7 @@ llm-gateway-governance-skill/
 ├── README.md                                              (this file)
 ├── claude-code/skills/llm-gateway-governance/SKILL.md     (md5-identical to the other two)
 ├── kiro/skills/llm-gateway-governance/SKILL.md            (md5-identical)
-├── quick/skills/llm-gateway-governance/SKILL.md           (md5-identical)
+├── codex/skills/llm-gateway-governance/SKILL.md           (md5-identical)
 ├── shared/{reference,patterns,examples}/
 └── evals/<scenario>.md
 ```

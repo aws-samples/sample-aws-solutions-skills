@@ -23,7 +23,7 @@
 | **AWS Systems Manager Parameter Store** | Runtime cross-stack wiring (LiteLLM internal URL) | Read by the Token Lambda by name. |
 | **Amazon Route 53 (private hosted zone)** | Cross-region DNS for `bedrock-mantle.us-east-1.api.aws` | PHZ associated with both the peer VPC and the gateway VPC; aliased to the bedrock-mantle endpoint. |
 | **VPC Peering (cross-region)** | Gateway VPC ↔ us-east-1 Mantle peer VPC | Not auto-accepted cross-region → acceptance custom resource. See `shared/patterns/mantle-peering.md`. |
-| **Amazon CloudWatch** | Dashboard (ALB requests/5xx, token service) | Infra/cost observability. |
+| **Amazon CloudWatch** | Usage dashboard: token usage by model/team, spend, latency, failures (EMF from the `cloudwatch_usage` callback), per-user + hourly Logs Insights, ALB requests/5xx | Usage + infra/cost observability. |
 | **VPC Endpoints** | Gateway (S3, DynamoDB) + Interface (bedrock-runtime, secrets, ssm, ecr, ecr-docker, logs, bedrock-agentcore) in the gateway VPC; `bedrock-mantle` interface endpoint in the us-east-1 peer VPC | Keep traffic off the public internet. |
 | **IAM Identity Center (SSO)** | Identity source (`org-sso` only) | Organization-instance only: the `AWSReservedSSO_` ARN prefix is the trust anchor; settings come from `config.sso`. Account instances cannot host the required SAML app — use `cognito-native` (Cognito row above) instead. |
 

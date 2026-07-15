@@ -35,7 +35,7 @@ Layout:
 ├── README.md
 ├── claude-code/skills/<name>/SKILL.md     ★ thin wrapper (~200-400 lines)
 ├── kiro/skills/<name>/SKILL.md            ★ md5-identical
-├── quick/skills/<name>/SKILL.md           ★ md5-identical
+├── codex/skills/<name>/SKILL.md           ★ md5-identical
 ├── shared/
 │   ├── reference/{architecture, decision-tree, aws-services, constraints, ...}.md
 │   ├── patterns/{cdk-stacks, lambda-handlers, frontend-pages, ...}.md
@@ -60,7 +60,7 @@ Layout:
 ├── LICENSE
 ├── claude-code/skills/<name>/SKILL.md     ★ self-contained (~50-60 KB)
 ├── kiro/skills/<name>/SKILL.md            ★ md5-identical
-└── quick/skills/<name>/SKILL.md           ★ md5-identical
+└── codex/skills/<name>/SKILL.md           ★ md5-identical
 ```
 
 No `shared/` directory — knowledge is inline.
@@ -97,7 +97,7 @@ The skill `name` (the directory under `<tool>/skills/`) is the same kebab-case *
 Must match [`shared-spec/skill-structure.md`](./shared-spec/skill-structure.md). Three SKILL.md files at:
 - `claude-code/skills/<name>/SKILL.md`
 - `kiro/skills/<name>/SKILL.md`
-- `quick/skills/<name>/SKILL.md`
+- `codex/skills/<name>/SKILL.md`
 
 ### 3. Write the SKILL.md (and shared/ if Style 1)
 
@@ -188,7 +188,7 @@ Format: simulated user input + expected outputs (checklist).
 scripts/sync-skills.sh verify
 
 # Manually install + test in each tool
-# (Claude Code, Kiro, Amazon Quick)
+# (Claude Code, Kiro, Codex)
 ```
 
 Run the eval scenario in each tool to confirm the workflow proceeds correctly.

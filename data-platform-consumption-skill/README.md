@@ -4,7 +4,7 @@ A production-grade Agent Skill that connects existing queryable data to **Amazon
 
 Works with any queryable source: Athena over a Glue Catalog (most common), Redshift, S3 manifest, or RDS via federated query. Self-contained; doesn't depend on any other skill having run.
 
-**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Amazon Quick).
+**Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Codex).
 
 ## What it produces
 
@@ -26,7 +26,7 @@ data-platform-consumption-skill/
 │                                               └── reference/*.md          ★
 ├── kiro/skills/data-platform-consumption/SKILL.md                          ★
 │                                         └── reference/*.md                ★
-└── quick/skills/data-platform-consumption/SKILL.md                         ★
+└── codex/skills/data-platform-consumption/SKILL.md                         ★
                                            └── reference/*.md               ★
 ```
 
@@ -50,11 +50,11 @@ ln -s "$(pwd)/kiro/skills/data-platform-consumption" ~/.kiro/skills/data-platfor
 
 Auto-triggers on the same phrases (e.g. "Quick Sight setup", "build a dashboard", "BI setup", "chat agent").
 
-### Amazon Quick
+### Codex
 
 ```bash
-mkdir -p ~/.quickwork/skills
-ln -s "$(pwd)/quick/skills/data-platform-consumption" ~/.quickwork/skills/data-platform-consumption
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/codex/skills/data-platform-consumption" ~/.agents/skills/data-platform-consumption
 ```
 
 ## Usage

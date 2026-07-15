@@ -25,11 +25,11 @@ ln -sf "$(pwd)/kiro/skills/<skill-name>" ~/.kiro/skills/<skill-name>
 ln -sf "$(pwd)/shared" ~/.kiro/skills/<skill-name>/shared
 ```
 
-### Amazon Quick
+### Codex
 ```bash
-mkdir -p ~/.quickwork/skills
-ln -sf "$(pwd)/quick/skills/<skill-name>" ~/.quickwork/skills/<skill-name>
-ln -sf "$(pwd)/shared" ~/.quickwork/skills/<skill-name>/shared
+mkdir -p ~/.agents/skills
+ln -sf "$(pwd)/codex/skills/<skill-name>" ~/.agents/skills/<skill-name>
+ln -sf "$(pwd)/shared" ~/.agents/skills/<skill-name>/shared
 ```
 
 (For Windows or if symlinks unavailable, use the `cp -r` form documented in CONTRIBUTING.md.)
@@ -65,7 +65,7 @@ All real knowledge lives in [`shared/`](./shared/):
 ├── README.md                                       (this file)
 ├── claude-code/skills/<skill-name>/SKILL.md        (md5-identical to the other two)
 ├── kiro/skills/<skill-name>/SKILL.md               (md5-identical)
-├── quick/skills/<skill-name>/SKILL.md              (md5-identical)
+├── codex/skills/<skill-name>/SKILL.md              (md5-identical)
 ├── shared/{reference,patterns,examples}/
 └── evals/<scenario>.md
 ```

@@ -3,7 +3,7 @@
 # sync-skills.sh — Keep three SKILL.md copies in sync per skill.
 #
 # Workflow: edit `claude-code/skills/<name>/SKILL.md`, then run this script
-# to copy the canonical version to kiro/ and quick/. CI then verifies md5.
+# to copy the canonical version to kiro/ and codex/. CI then verifies md5.
 #
 # Usage:
 #   scripts/sync-skills.sh                # sync all skills in repo
@@ -23,11 +23,11 @@ sync_skill() {
     name="$(basename "$(dirname "$src")")"
 
     local kiro_dst="$skill_dir/kiro/skills/$name/SKILL.md"
-    local quick_dst="$skill_dir/quick/skills/$name/SKILL.md"
+    local codex_dst="$skill_dir/codex/skills/$name/SKILL.md"
 
-    mkdir -p "$(dirname "$kiro_dst")" "$(dirname "$quick_dst")"
+    mkdir -p "$(dirname "$kiro_dst")" "$(dirname "$codex_dst")"
     cp "$src" "$kiro_dst"
-    cp "$src" "$quick_dst"
+    cp "$src" "$codex_dst"
 
     local md5
     md5="$(md5sum "$src" | awk '{print $1}')"
@@ -46,15 +46,15 @@ verify_skill() {
     name="$(basename "$(dirname "$src")")"
 
     local kiro="$skill_dir/kiro/skills/$name/SKILL.md"
-    local quick="$skill_dir/quick/skills/$name/SKILL.md"
+    local codex="$skill_dir/codex/skills/$name/SKILL.md"
 
     [ -f "$kiro" ] || { echo "✗ $skill_dir: missing $kiro"; fail=1; continue; }
-    [ -f "$quick" ] || { echo "✗ $skill_dir: missing $quick"; fail=1; continue; }
+    [ -f "$codex" ] || { echo "✗ $skill_dir: missing $codex"; fail=1; continue; }
 
     local h1 h2 h3
     h1="$(md5sum "$src" | awk '{print $1}')"
     h2="$(md5sum "$kiro" | awk '{print $1}')"
-    h3="$(md5sum "$quick" | awk '{print $1}')"
+    h3="$(md5sum "$codex" | awk '{print $1}')"
 
     if [ "$h1" = "$h2" ] && [ "$h2" = "$h3" ]; then
       echo "✓ $skill_dir/$name: md5 $h1"

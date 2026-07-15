@@ -11,6 +11,7 @@ It reproduces `services/litellm/` of the reference solution verbatim. The gatewa
 - **Authentication** — Claude: SigV4 (Task Role, tokenless). Mantle: runtime-minted short-term Bearer key (Task Role → `aws-bedrock-token-generator` → `BEDROCK_MANTLE_API_KEY`, refreshed by a callback)
 - **Guardrails** — layered defense per request (Bedrock content filter is Claude-only)
 - **MCP (WebSearch)** — calls the AgentCore Gateway's built-in Web Search Tool via cross-region SigV4 (`bedrock-agentcore`, `InvokeGateway`)
+- **Usage metrics** — one CloudWatch EMF record per request (Section 4) → tokens/spend/latency by model & team + per-user Logs Insights, rendered by the ObservabilityStack dashboard
 
 Core design principle: **inject all dynamic values via environment variables** so the same image works
 across all environments (dev/prod); config.yaml never hardcodes secrets or environment-specific values. The values
@@ -123,13 +124,18 @@ litellm_settings:
   drop_params_if_unset: true
   modify_params: true
   # ⚠️ each callback value MUST be a litellm CustomLogger SUBCLASS INSTANCE, not a
-  #    bare function. Both callbacks below are instances (see callbacks/*.py).
+  #    bare function. All callbacks below are instances (see callbacks/*.py).
   #    - user_trace: injects the SSO/Cognito user identity into traces.
   #    - mantle_token_refresh: mints/refreshes BEDROCK_MANTLE_API_KEY in-process.
+  #    - cloudwatch_usage: emits one CloudWatch EMF record per request (tokens/
+  #      spend/latency by Model+Team; caller identity as a log property) — feeds
+  #      the ObservabilityStack dashboard. ALWAYS keep it (works with or without
+  #      Langfuse; no IAM, no network — just a stdout line).
   #    When enableLangfuse=false, OMIT success_callback/failure_callback/
   #    langfuse_default_tags (and user_trace if desired) — but KEEP
-  #    mantle_token_refresh whenever any GPT/Mantle model is offered.
-  callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback"]
+  #    mantle_token_refresh whenever any GPT/Mantle model is offered, and KEEP
+  #    cloudwatch_usage always.
+  callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback", "cloudwatch_usage.cloudwatch_usage_callback"]
   success_callback: ["langfuse"]
   failure_callback: ["langfuse"]
   langfuse_default_tags: ["user_api_key_user_id", "user_api_key_alias"]
@@ -209,9 +215,10 @@ before adding, don't assume GPT-5.x behavior generalizes.
   assembled by the entrypoint (Section 2); **`proxy_base_url` = the gateway URL (the `GatewayUrl` output = the ALB domain)** so the Admin UI SPA builds correct absolute redirects (this is the ONLY redirect mechanism — `--forwarded-allow-ips` does not exist in the pinned image's CLI; see Section 2).
 - `drop_params` / `drop_params_if_unset` / `modify_params: true` — **WHY**: Claude and GPT accept different parameter
   specs; dropping incompatible params lets one client call target either model.
-- `callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback"]` — two custom
+- `callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback", "cloudwatch_usage.cloudwatch_usage_callback"]` — three custom
   `CustomLogger` instances bundled in the image: `user_trace` injects the caller identity into traces;
-  `mantle_token_refresh` mints/refreshes `BEDROCK_MANTLE_API_KEY` (Section 3). Both must be **instances**, not bare functions.
+  `mantle_token_refresh` mints/refreshes `BEDROCK_MANTLE_API_KEY` (Section 3); `cloudwatch_usage` emits per-request
+  EMF usage records for the CloudWatch dashboard (Section 4). All must be **instances**, not bare functions.
 - `success_callback` / `failure_callback: ["langfuse"]` + `langfuse_default_tags` — observe every request via Langfuse;
   the `user_api_key_user_id`/`user_api_key_alias` tags trace each call back to the virtual key → the user (governance/audit).
 
@@ -282,6 +289,7 @@ RUN /usr/local/bin/uv pip install --python /app/.venv/bin/python3 \
 # Bundle config, callbacks, and entrypoint.
 COPY callbacks/user_trace.py /app/user_trace.py
 COPY callbacks/mantle_token_refresh.py /app/mantle_token_refresh.py
+COPY callbacks/cloudwatch_usage.py /app/cloudwatch_usage.py
 COPY config.yaml /app/config.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 
@@ -297,7 +305,7 @@ ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
   the real `transformation.py` from the new tag, not from release notes.
 - **`COPY --from=ghcr.io/astral-sh/uv` + `uv pip install`** — the base image has no `pip` (`No module named pip`), so
   packages are added with `uv` into `/app/.venv`. This is the only supported way to add `aws-bedrock-token-generator`.
-- **Bundled files** — `user_trace.py`, `mantle_token_refresh.py` (Section 3), `config.yaml` (Section 1), `entrypoint.sh`.
+- **Bundled files** — `user_trace.py`, `mantle_token_refresh.py` (Section 3), `cloudwatch_usage.py` (Section 4), `config.yaml` (Section 1), `entrypoint.sh`.
 - **`EXPOSE 4000`** — the LiteLLM Proxy port; must match the ALB target port.
 
 ### 2.2 entrypoint.sh
@@ -496,11 +504,168 @@ mantle_token_refresh_callback = MantleTokenRefresh()
 
 ---
 
+## Section 4: callbacks/cloudwatch_usage.py — per-request usage metrics via CloudWatch EMF
+
+Feeds the ObservabilityStack dashboard (cdk-stacks.md §7): token usage, per-user usage,
+usage-by-hour, latency, spend, failures. The mechanism is **CloudWatch Embedded Metric
+Format** — the callback prints **one single-line JSON record per request to stdout**; the
+container's existing awslogs driver ships it to the LiteLLM log group and CloudWatch
+extracts the metrics automatically. **No boto3 client, no `cloudwatch:PutMetricData` IAM,
+no network call in the hot path, nothing extra to deploy.**
+
+Metric design (keep in sync with `METRICS.NAMESPACE` in `lib/config/constants.ts`):
+
+| Aspect | Value | Why |
+|---|---|---|
+| Namespace | env `LLMGW_METRICS_NAMESPACE` (= `METRICS.NAMESPACE`, injected by the task definition) | env-scoped; dashboard reads the same constant |
+| Dimensions | `[Model]`, `[Team]`, `[Model, Team]` — **bounded sets only** | every distinct dimension combination is a billable custom metric |
+| Properties | `User` / `EndUser` / `Status` / `ErrorClass` | **the caller identity is unbounded — NEVER a dimension.** Properties cost nothing and stay queryable via Logs Insights (`filter llmgw = "usage"`), which is how the dashboard renders per-user tables |
+| Metrics (success) | `Requests`, `PromptTokens`, `CompletionTokens`, `TotalTokens`, `SpendUSD`, `LatencyMs` | tokens/spend come from LiteLLM's `standard_logging_object` (its own cost calc); latency is request wall time |
+| Metrics (failure) | `Failures` | separate name so success graphs never mix in errors |
+
+The full `services/litellm/callbacks/cloudwatch_usage.py`:
+
+```python
+"""cloudwatch_usage.py — per-request usage metrics via CloudWatch EMF.
+
+Emits ONE single-line JSON record (CloudWatch Embedded Metric Format) per
+completed request to stdout. The container already ships stdout to CloudWatch
+Logs (awslogs driver), and CloudWatch extracts EMF metrics automatically:
+no boto3 client, no PutMetricData IAM, no network call, no buffering.
+
+Dimension-cardinality rule: Model and Team are small, bounded sets -> EMF
+dimensions (real metrics, graphable). The caller identity is UNBOUNDED ->
+property only (free, queryable in Logs Insights: `filter llmgw = "usage"`).
+Making the user a dimension would mint one billable custom metric per
+user x model x team combination.
+
+Registered in config.yaml litellm_settings.callbacks as
+`cloudwatch_usage.cloudwatch_usage_callback` (a CustomLogger INSTANCE).
+"""
+import json
+import logging
+import os
+import sys
+import time
+
+from litellm.integrations.custom_logger import CustomLogger
+
+logger = logging.getLogger("cloudwatch_usage")
+logger.setLevel(logging.INFO)
+if not logger.handlers:  # same explicit-stdout discipline as mantle_token_refresh
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(asctime)s cloudwatch_usage %(levelname)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.propagate = False
+
+# Injected by the ECS task definition; MUST equal METRICS.NAMESPACE in constants.ts
+# (the ObservabilityStack dashboard reads the same namespace).
+_NAMESPACE = os.getenv("LLMGW_METRICS_NAMESPACE", "llm-gateway/usage")
+_MARKER_KEY = "llmgw"      # Logs Insights filter key
+_MARKER_VALUE = "usage"    # ... filter llmgw = "usage"
+
+
+def _identity(metadata: dict) -> str:
+    """Caller identity for per-user reporting: the virtual-key alias is stable and
+    human-readable (`sso-<user>` from the Token Service); fall back to the user id."""
+    return metadata.get("user_api_key_alias") or metadata.get("user_api_key_user_id") or "unknown"
+
+
+def _emit(model: str, team: str, metrics: list, props: dict) -> None:
+    """metrics: [(name, value, unit)]. Emits one EMF record on ONE stdout line —
+    EMF extraction requires the whole record in a single log event."""
+    record = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": _NAMESPACE,
+                "Dimensions": [["Model"], ["Team"], ["Model", "Team"]],
+                "Metrics": [{"Name": name, "Unit": unit} for name, _value, unit in metrics],
+            }],
+        },
+        _MARKER_KEY: _MARKER_VALUE,
+        "Model": model,
+        "Team": team,
+    }
+    for name, value, _unit in metrics:
+        record[name] = value
+    for key, value in props.items():
+        if value:
+            record[key] = value
+    print(json.dumps(record, default=str), flush=True)
+
+
+class CloudWatchUsage(CustomLogger):
+    """Post-request logger. Observability must NEVER fail a request: every
+    handler catches everything and logs a diagnostic instead of raising."""
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        try:
+            slo = kwargs.get("standard_logging_object") or {}
+            metadata = slo.get("metadata") or {}
+            latency_ms = 0.0
+            if start_time and end_time:
+                latency_ms = max((end_time - start_time).total_seconds() * 1000.0, 0.0)
+            _emit(
+                model=slo.get("model_group") or slo.get("model") or "unknown",
+                team=metadata.get("user_api_key_team_alias") or "no-team",
+                metrics=[
+                    ("Requests", 1, "Count"),
+                    ("PromptTokens", int(slo.get("prompt_tokens") or 0), "Count"),
+                    ("CompletionTokens", int(slo.get("completion_tokens") or 0), "Count"),
+                    ("TotalTokens", int(slo.get("total_tokens") or 0), "Count"),
+                    ("SpendUSD", float(slo.get("response_cost") or 0.0), "None"),
+                    ("LatencyMs", latency_ms, "Milliseconds"),
+                ],
+                props={
+                    "User": _identity(metadata),
+                    "EndUser": metadata.get("user_api_key_end_user_id"),
+                    "Status": "success",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — metrics must not break the request path
+            logger.warning("skipped success metric: %s", exc)
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        try:
+            slo = kwargs.get("standard_logging_object") or {}
+            metadata = slo.get("metadata") or {}
+            error_info = slo.get("error_information") or {}
+            _emit(
+                model=slo.get("model_group") or slo.get("model") or "unknown",
+                team=metadata.get("user_api_key_team_alias") or "no-team",
+                metrics=[("Failures", 1, "Count")],
+                props={
+                    "User": _identity(metadata),
+                    "Status": "failure",
+                    "ErrorClass": error_info.get("error_class"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skipped failure metric: %s", exc)
+
+
+# config.yaml requires an INSTANCE (module.attribute), not the class.
+cloudwatch_usage_callback = CloudWatchUsage()
+```
+
+**WHY, line by line:**
+
+- **EMF over `PutMetricData`** — the request path makes zero AWS API calls for metrics; a print + the existing awslogs pipeline is the whole delivery mechanism. It also degrades gracefully: if EMF extraction ever hiccups, the raw records are still in the log group and every dashboard Logs Insights widget keeps working.
+- **`standard_logging_object`** — LiteLLM's normalized per-request payload: `prompt_tokens`/`completion_tokens`/`total_tokens`, `response_cost` (LiteLLM's own cost calculation — the same number the Admin UI shows), `model_group` (the client-facing alias, e.g. `claude-sonnet-5`, preferred over the backend `model`), and `metadata.user_api_key_*` (the virtual-key identity chain injected by the auth layer).
+- **`Team` falls back to `"no-team"`, never empty** — an empty dimension value is dropped by EMF extraction, silently losing the record from the by-team graphs (master-key/admin test calls have no team).
+- **Single line, `flush=True`** — EMF requires the full JSON in one log event; a pretty-printed record is split across events and extracts nothing. Flush because uvicorn workers buffer stdout.
+- **Never raises** — a metrics bug must not turn into a 500 on the inference path; failures degrade to a warning line.
+- **Verify after deploy** (same discipline as the other callbacks): make one test call, then check (1) the log group for a `"llmgw": "usage"` line, (2) `aws cloudwatch list-metrics --namespace <METRICS.NAMESPACE>` shows `TotalTokens` etc. within ~2 minutes. If the metric list stays empty but the log line exists, the record is malformed EMF (multi-line, or an empty dimension value).
+
+---
+
 ## Summary — what this pattern guarantees
 
 - **Single entry point**: clients call Claude/GPT at the same LiteLLM endpoint.
 - **Claude is tokenless SigV4; Mantle is a runtime-minted short-term Bearer key** (`BEDROCK_MANTLE_API_KEY`, refreshed by a callback) — no long-term secret for either, but the two auth models are different and must not be conflated.
 - **Governance per request**: hide-secrets (global, incl. Mantle) + Bedrock content filter (Claude only) + Langfuse tracing.
+- **Usage observability per request**: the `cloudwatch_usage` EMF callback (Section 4) feeds the CloudWatch dashboard — token/spend/latency by model & team, per-user via Logs Insights — with zero extra IAM or API calls.
 - **Environment-agnostic image**: all dynamic values are env; a model upgrade is just a Task Definition env change.
 - **Web search is AWS-managed**: the AgentCore Gateway Web Search Tool via SigV4 — no third-party key, no self-hosted MCP.
 - **Explicit boundary**: that GPT (Mantle) cannot receive a Bedrock Guardrail is nailed down consistently by the config, the code, and this document.

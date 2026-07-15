@@ -4,7 +4,7 @@
 
 This directory is an AI Skill that **conversationally generates** a Unified Customer Profile (AWS Connect CP + Entity Resolution + Bedrock AI) system.
 
-It is written in the **Anthropic Agent Skills standard (`SKILL.md`) format**, so Claude Code, Kiro, and Amazon Quick all receive the same SKILL.md (md5-identical).
+It is written in the **Anthropic Agent Skills standard (`SKILL.md`) format**, so Claude Code, Kiro, and Codex all receive the same SKILL.md (md5-identical).
 
 ## Triggers (invoke in natural language)
 
@@ -23,7 +23,7 @@ unified-customer-profile-skill/
 ├── README.md                                                       (this file)
 ├── claude-code/skills/unified-customer-profile/SKILL.md            ★ identical in 3 places (md5-identical)
 ├── kiro/skills/unified-customer-profile/SKILL.md                   ★
-├── quick/skills/unified-customer-profile/SKILL.md                  ★
+├── codex/skills/unified-customer-profile/SKILL.md                  ★
 ├── shared/                                                          ⭐ the actual knowledge
 │   ├── reference/
 │   │   ├── architecture.md
@@ -70,11 +70,11 @@ cp -r kiro/skills/unified-customer-profile ~/.kiro/skills/
 cp -r shared ~/.kiro/skills/unified-customer-profile/shared
 ```
 
-### Amazon Quick
+### Codex
 ```bash
-mkdir -p ~/.quickwork/skills
-cp -r quick/skills/unified-customer-profile ~/.quickwork/skills/
-cp -r shared ~/.quickwork/skills/unified-customer-profile/shared
+mkdir -p ~/.agents/skills
+cp -r codex/skills/unified-customer-profile ~/.agents/skills/
+cp -r shared ~/.agents/skills/unified-customer-profile/shared
 ```
 
 ## Core design principles

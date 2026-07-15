@@ -16,7 +16,7 @@ This document specifies how each skill MUST organize its knowledge so that the S
                 └──────────────────────────────────┘
 ```
 
-The same `shared/` directory is referenced by all three SKILL.md copies (Claude Code / Kiro / Quick). Since the three SKILL.md files are byte-identical, the references resolve identically in all three install locations as long as `shared/` is bundled alongside them.
+The same `shared/` directory is referenced by all three SKILL.md copies (Claude Code / Kiro / Codex). Since the three SKILL.md files are byte-identical, the references resolve identically in all three install locations as long as `shared/` is bundled alongside them.
 
 ## What goes in `shared/`
 
@@ -109,9 +109,9 @@ cp <skill>/claude-code/skills/<name>/SKILL.md "$HOME/.claude/skills/<name>/SKILL
 cp -r <skill>/shared "$HOME/.kiro/skills/<name>/shared"
 cp <skill>/kiro/skills/<name>/SKILL.md "$HOME/.kiro/skills/<name>/SKILL.md"
 
-# Amazon Quick
-cp -r <skill>/shared "$HOME/.quickwork/skills/<name>/shared"
-cp <skill>/quick/skills/<name>/SKILL.md "$HOME/.quickwork/skills/<name>/SKILL.md"
+# Codex
+cp -r <skill>/shared "$HOME/.agents/skills/<name>/shared"
+cp <skill>/codex/skills/<name>/SKILL.md "$HOME/.agents/skills/<name>/SKILL.md"
 ```
 
 Result on disk:
@@ -125,7 +125,7 @@ Result on disk:
     └── examples/
 ```
 
-The relative path `shared/reference/architecture.md` from SKILL.md resolves correctly. Same on Kiro and Quick.
+The relative path `shared/reference/architecture.md` from SKILL.md resolves correctly. Same on Kiro and Codex.
 
 For convenience, every skill's README provides ready-to-run install commands.
 
@@ -163,7 +163,7 @@ wc -l $SKILL/claude-code/skills/*/SKILL.md
 # Should be 200-400 lines, < 500
 
 # 3. Three SKILL.md files are md5-identical?
-md5sum $SKILL/{claude-code,kiro,quick}/skills/*/SKILL.md
+md5sum $SKILL/{claude-code,kiro,codex}/skills/*/SKILL.md
 
 # 4. SKILL.md references valid shared/* paths?
 grep -oE "shared/[^ \`]+\.md" $SKILL/claude-code/skills/*/SKILL.md | sort -u | while read f; do
@@ -175,22 +175,22 @@ awk '/^```/{c=!c; if(c==0 && lines>10) print "Long block at line " NR-lines ": "
   $SKILL/claude-code/skills/*/SKILL.md
 ```
 
-## Migration: from old per-tool entry-format
+## Migration: from legacy per-tool entry formats
 
-If you encounter a skill still using the old `claude-code/CLAUDE.md` + `commands/`, `kiro/steering.md` + `specs/`, `quick/SKILL.md` (with custom frontmatter) layout:
+If a legacy skill still uses tool-specific commands, steering files, or custom frontmatter:
 
-1. **Extract** workflow phases, Hard Constraints, Discovery questions, generation rules from the four old entry files into a single new SKILL.md.
-2. **Frontmatter** uses Anthropic Agent Skills format (`name`, `description`, `license`, `metadata`).
-3. **`description`** should encode trigger keywords (English + Korean) since description matching drives activation.
-4. **Place** the new SKILL.md at all three of:
+1. **Extract** workflow phases, Hard Constraints, Discovery questions, and generation rules into one canonical SKILL.md.
+2. **Use** Agent Skills frontmatter (`name`, `description`, `license`, `metadata`).
+3. **Encode** trigger keywords in `description` because description matching drives activation.
+4. **Place** the new SKILL.md at all three locations:
    - `claude-code/skills/<name>/SKILL.md`
    - `kiro/skills/<name>/SKILL.md`
-   - `quick/skills/<name>/SKILL.md`
-5. **Verify** md5-identical.
-6. **Delete** old entry files (`claude-code/CLAUDE.md`, `claude-code/commands/`, `kiro/steering.md`, `kiro/specs/`, `quick/SKILL.md` at the old location).
-7. **Update** the skill's README install commands.
+   - `codex/skills/<name>/SKILL.md`
+5. **Verify** byte identity with `scripts/sync-skills.sh verify`.
+6. **Delete** obsolete tool-specific entry files after preserving any unique guidance.
+7. **Update** the skill README installation commands, using `~/.agents/skills/<name>/` for Codex.
 
-The `template/` directory shows the new layout from scratch.
+The `template/` directory shows the current layout from scratch.
 
 ## When to bend the rule
 

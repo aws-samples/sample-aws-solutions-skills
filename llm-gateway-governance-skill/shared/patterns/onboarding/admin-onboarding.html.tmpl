@@ -4,7 +4,7 @@
   OPERATOR-ONLY. Contains real secret values once filled (LiteLLM master key, Langfuse admin
   password). The generator writes the filled file with 0600 perms and prints a "do not share/commit"
   warning; add the output path to .gitignore.
-  Tokens: {{GATEWAY_URL}} {{ADMIN_UI_URL}} {{TOKEN_SERVICE_URL}} {{LANGFUSE_URL}} {{REGION}}
+  Tokens: {{GATEWAY_URL}} {{ADMIN_UI_URL}} {{TOKEN_SERVICE_URL}} {{DASHBOARD_URL}} {{LANGFUSE_URL}} {{REGION}}
           {{AUTH_MODE}} {{CERT_MODE}} {{COGNITO_POOL_ID}} {{COGNITO_CLIENT_ID}} {{COGNITO_HOSTED_UI}}
           {{COGNITO_ISSUER}} {{TEAM_GROUP_PREFIX}} {{SSO_START_URL}} {{SSO_ACCOUNT_ID}} {{SSO_ROLE_NAME}}
           {{MASTER_KEY}} {{MASTER_KEY_SECRET}} {{LANGFUSE_ADMIN_EMAIL}} {{LANGFUSE_ADMIN_PW}}
@@ -70,6 +70,7 @@
       <tr><td>게이트웨이 URL (개발자 base URL)</td><td><b>{{GATEWAY_URL}}</b></td></tr>
       <tr><td>LiteLLM Admin UI</td><td><b>{{ADMIN_UI_URL}}</b></td></tr>
       <tr><td>Token Service</td><td class="mono">{{TOKEN_SERVICE_URL}}</td></tr>
+      <tr><td>CloudWatch 사용량 대시보드</td><td class="mono">{{DASHBOARD_URL}}</td></tr>
       <!--IF langfuse=on--><tr><td>Langfuse</td><td>{{LANGFUSE_URL}}</td></tr><!--ENDIF-->
       <tr><td>리전 / authMode / certMode</td><td>{{REGION}} / <b>{{AUTH_MODE}}</b> / <b>{{CERT_MODE}}</b></td></tr>
     </table>
@@ -157,6 +158,7 @@ aws cognito-idp admin-remove-user-from-group --user-pool-id {{COGNITO_POOL_ID}} 
   <h2><span class="n">6</span> 운영 참고</h2>
   <ul>
     <li>팀/예산/모델 허용목록 조정 → LiteLLM Admin UI (<code>{{ADMIN_UI_URL}}</code>, 마스터 키 로그인)</li>
+    <li>토큰 사용량·사용자별·시간대별 현황 → CloudWatch 사용량 대시보드 (<code>{{DASHBOARD_URL}}</code>: 모델/팀별 토큰·비용·지연, 사용자 Top-N, 시간대별 활동)</li>
     <li>요청 로그/트레이스 → LiteLLM UI · Langfuse(활성 시) · CloudWatch</li>
     <li>상세 운영: <code>shared/reference/litellm-admin-guide.md</code></li>
     <li>전체 teardown: <code>cdk destroy</code> (프로덕션은 RETAIN 정책 리소스 주의)</li>

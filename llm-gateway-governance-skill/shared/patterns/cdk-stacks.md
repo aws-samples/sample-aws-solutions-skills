@@ -243,6 +243,11 @@ export interface LiteLLMExports {
   readonly masterKeySecret: secretsmanager.ISecret;
   /** SSM param NAME (not value) carrying the internal service URL. */
   readonly internalUrlSsmParameterName: string;
+  /**
+   * LiteLLM container log group. Carries the cloudwatch_usage EMF records —
+   * ObservabilityStack points its per-user Logs Insights widgets here.
+   */
+  readonly logGroup: logs.ILogGroup;
 }
 
 
@@ -496,6 +501,17 @@ export const PORTS = {
   MCP: 8000,
   AURORA: 5432,
   HTTPS: 443,
+} as const;
+
+/**
+ * CloudWatch usage metrics (EMF). The LiteLLM container's cloudwatch_usage
+ * callback (litellm-gateway.md §4) emits EMF records into this namespace —
+ * injected as env LLMGW_METRICS_NAMESPACE — and the ObservabilityStack
+ * dashboard reads the same namespace. Env-scoped via ns() so two deployments
+ * in one account never mix metrics.
+ */
+export const METRICS = {
+  NAMESPACE: ns('usage'),
 } as const;
 
 /** DynamoDB key-cache table conventions (Auth plane). */
@@ -853,6 +869,7 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
   public readonly taskRole: iam.IRole;
   public readonly masterKeySecret: secretsmanager.ISecret;
   public readonly internalUrlSsmParameterName: string;
+  public readonly logGroup: logs.ILogGroup;
 
   constructor(scope: Construct, id: string, props: LiteLLMStackProps) {
     super(scope, id, props);
@@ -927,6 +944,9 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
       retention: logs.RetentionDays.TWO_WEEKS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    // Exported: ObservabilityStack queries the cloudwatch_usage EMF records in
+    // this group for its per-user / hourly Logs Insights widgets.
+    this.logGroup = logGroup;
 
     taskDef.addContainer('litellm', {
       image: ecs.ContainerImage.fromAsset(path.join(__dirname, '..', 'services', 'litellm')),
@@ -942,6 +962,9 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
         PROXY_BASE_URL: config.domainName ? `https://${config.domainName}` : '',
         AWS_REGION: this.region,
         STORE_MODEL_IN_DB: 'True',
+        // EMF namespace for the cloudwatch_usage callback — MUST match what the
+        // ObservabilityStack dashboard reads (constants METRICS.NAMESPACE).
+        LLMGW_METRICS_NAMESPACE: METRICS.NAMESPACE,
         CLAUDE_OPUS_MODEL: MODELS.CLAUDE_OPUS.litellmName,
         CLAUDE_OPUS_BACKEND: MODELS.CLAUDE_OPUS.backend,
         CLAUDE_SONNET_MODEL: MODELS.CLAUDE_SONNET.litellmName,
@@ -1058,8 +1081,11 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       idleTimeout,
     });
+    // ⚠️ open:false on EVERY addListener() — CDK defaults open:true, which silently appends
+    // a 0.0.0.0/0 ingress rule for the listener port to the ALB SG, defeating albIngressCidrs
+    // (real-deploy incident; see constraints.md). Verify the deployed SG after any listener change.
     internalAlb
-      .addListener('Http', { port: PORTS.LITELLM, protocol: elbv2.ApplicationProtocol.HTTP })
+      .addListener('Http', { port: PORTS.LITELLM, protocol: elbv2.ApplicationProtocol.HTTP, open: false })
       .addTargets('LiteLlmInternal', targetProps);
 
     // Public ALB — the developer edge in BOTH modes. Its SG allows ingress ONLY from the
@@ -1113,12 +1139,14 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
           protocol: elbv2.ApplicationProtocol.HTTPS,
           sslPolicy: elbv2.SslPolicy.TLS13_RES,
           certificates: [certificate],
+          open: false,
         })
         .addTargets('LiteLlmEdge', targetProps);
       // HTTP:80 → HTTPS:443 (virtual keys always over TLS in acm mode).
       publicAlb.addListener('HttpRedirect', {
         port: 80, protocol: elbv2.ApplicationProtocol.HTTP,
         defaultAction: elbv2.ListenerAction.redirect({ protocol: 'HTTPS', port: '443', permanent: true }),
+        open: false,
       });
       gatewayUrl = config.domainName.length > 0
         ? `https://${config.domainName}`
@@ -1128,7 +1156,7 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
       // are plaintext on the wire — PoC only; the SG allowlist above is the only access
       // control (GATE-1 acknowledgement, incl. an explicit one for 0.0.0.0/0).
       publicAlb
-        .addListener('Http80', { port: 80, protocol: elbv2.ApplicationProtocol.HTTP })
+        .addListener('Http80', { port: 80, protocol: elbv2.ApplicationProtocol.HTTP, open: false })
         .addTargets('LiteLlmEdge', targetProps);
       gatewayUrl = `http://${publicAlb.loadBalancerDnsName}`;
     }
@@ -1289,6 +1317,7 @@ export class LangfuseStack extends cdk.Stack implements LangfuseExports {
         protocol: elbv2.ApplicationProtocol.HTTPS,
         sslPolicy: elbv2.SslPolicy.TLS13_RES,
         certificates: [certificate],
+        open: false, // CDK default open:true silently adds 0.0.0.0/0 — see constraints.md
       })
       .addTargets('LangfuseTarget', {
         port: PORTS.LANGFUSE,
@@ -1303,6 +1332,7 @@ export class LangfuseStack extends cdk.Stack implements LangfuseExports {
     alb.addListener('HttpRedirect', {
       port: 80, protocol: elbv2.ApplicationProtocol.HTTP,
       defaultAction: elbv2.ListenerAction.redirect({ protocol: 'HTTPS', port: '443', permanent: true }),
+      open: false,
     });
     new route53.ARecord(this, 'Alias', {
       zone, recordName: config.domainName,
@@ -1585,9 +1615,15 @@ export interface CognitoNativeConfig {
 
 ---
 
-## 7. ObservabilityStack — CloudWatch dashboard
+## 7. ObservabilityStack — CloudWatch usage dashboard (tokens · users · time · health)
 
-A minimal dashboard bundling the LiteLLM ALB, the Token Service API, and (optionally) Langfuse. CloudWatch covers infra/cost; Langfuse covers the prompt/trace level.
+The post-deploy dashboard. Data source is the **`cloudwatch_usage` EMF callback**
+(litellm-gateway.md §4): every completed request emits one EMF record into the
+`METRICS.NAMESPACE` namespace (dimensions `Model` / `Team`, caller identity as a
+log **property**). The dashboard shows token usage by model & team, per-user
+top-N and hourly activity (Logs Insights over the same records), latency, spend,
+failures, and ALB health. CloudWatch covers usage/infra/cost; Langfuse (optional)
+covers the prompt/trace level.
 
 ```typescript
 export class ObservabilityStack extends cdk.Stack implements ObservabilityExports {
@@ -1606,7 +1642,24 @@ export class ObservabilityStack extends cdk.Stack implements ObservabilityExport
 
     const dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {
       dashboardName: this.dashboardName,
+      defaultInterval: cdk.Duration.hours(24),
     });
+
+    // Usage metrics: models/teams are created at RUNTIME (Token Service creates
+    // teams on first login), so their dimension values are unknowable at synth.
+    // SEARCH expressions discover every {Model} / {Team} series dynamically.
+    // ⚠️ SEARCH is dashboard-only — it is NOT valid in CloudWatch alarms; alarm
+    // on explicit per-model metrics if alarms are added later.
+    // `label` uses CloudWatch DYNAMIC LABELS (${PROP('Dim.<name>')}) so each series
+    // in the legend shows just its dimension value (e.g. "claude-fable-5") instead
+    // of the raw SEARCH expression string (the ugly default for SEARCH results).
+    const usage = (metricName: string, dim: 'Model' | 'Team', stat: string, label?: string) =>
+      new cloudwatch.MathExpression({
+        expression: `SEARCH('{${METRICS.NAMESPACE},${dim}} MetricName="${metricName}"', '${stat}')`,
+        usingMetrics: {},
+        label: label ?? `\${PROP('Dim.${dim}')}`,
+        period: cdk.Duration.minutes(5),
+      });
 
     dashboard.addWidgets(
       new cloudwatch.TextWidget({
@@ -1616,38 +1669,135 @@ export class ObservabilityStack extends cdk.Stack implements ObservabilityExport
           `**LiteLLM**: ${litellm.publicHttpsUrl}`,
           `**Token Service**: ${auth.tokenServiceInvokeUrl}`,
           langfuse ? `**Langfuse**: ${langfuse.langfuseUrl}` : '**Langfuse**: disabled',
+          '',
+          `Usage metrics: EMF namespace \`${METRICS.NAMESPACE}\` (cloudwatch_usage callback). Per-user tables query the LiteLLM log group.`,
         ].join('\n'),
         width: 24,
         height: 4,
       }),
     );
 
-    // LiteLLM ALB request + 5xx (use the ALB's own metric helpers).
-    const alb = litellm.loadBalancer;
+    // ---- Row 1: token usage --------------------------------------------------
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
-        title: 'LiteLLM ALB — Requests',
-        left: [alb.metrics.requestCount({ statistic: 'Sum' })],
-        width: 12,
+        title: 'Total tokens by model',
+        left: [usage('TotalTokens', 'Model', 'Sum')],
+        width: 12, height: 6,
       }),
       new cloudwatch.GraphWidget({
-        title: 'LiteLLM ALB — 5xx',
+        title: 'Total tokens by team',
+        left: [usage('TotalTokens', 'Team', 'Sum')],
+        width: 12, height: 6,
+      }),
+    );
+
+    // ---- Row 2: token split + spend -------------------------------------------
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Prompt vs completion tokens (by model)',
+        left: [usage('PromptTokens', 'Model', 'Sum', "prompt ${PROP('Dim.Model')}")],
+        right: [usage('CompletionTokens', 'Model', 'Sum', "completion ${PROP('Dim.Model')}")],
+        width: 12, height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Spend USD by team (LiteLLM cost calc)',
+        left: [usage('SpendUSD', 'Team', 'Sum')],
+        width: 12, height: 6,
+      }),
+    );
+
+    // ---- Row 3: request health + latency ---------------------------------------
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Requests / failures by model',
+        left: [usage('Requests', 'Model', 'Sum', "requests ${PROP('Dim.Model')}")],
+        right: [usage('Failures', 'Model', 'Sum', "failures ${PROP('Dim.Model')}")],
+        width: 12, height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Latency by model (avg / p99, ms)',
+        left: [usage('LatencyMs', 'Model', 'Average', "avg ${PROP('Dim.Model')}")],
+        right: [usage('LatencyMs', 'Model', 'p99', "p99 ${PROP('Dim.Model')}")],
+        width: 12, height: 6,
+      }),
+    );
+
+    // ---- Row 4: per-user + time-of-use (Logs Insights over the EMF records) ----
+    // The caller identity is an EMF PROPERTY (unbounded cardinality — never a
+    // dimension), so per-user views are Logs Insights queries, not metrics.
+    // History is bounded by the log group retention (TWO_WEEKS in LiteLLMStack);
+    // long-range per-user reporting lives in the LiteLLM Admin UI / DB.
+    const usageLogs = [litellm.logGroup.logGroupName];
+    dashboard.addWidgets(
+      new cloudwatch.LogQueryWidget({
+        title: 'Top users by token usage (dashboard time range)',
+        logGroupNames: usageLogs,
+        view: cloudwatch.LogQueryVisualizationType.TABLE,
+        queryLines: [
+          'filter llmgw = "usage"',
+          'stats sum(TotalTokens) as total_tokens, sum(PromptTokens) as prompt,'
+            + ' sum(CompletionTokens) as completion, sum(Requests) as requests,'
+            + ' sum(SpendUSD) as spend_usd by User, Team',
+          'sort total_tokens desc',
+          'limit 20',
+        ],
+        width: 12, height: 8,
+      }),
+      new cloudwatch.LogQueryWidget({
+        title: 'Usage by hour (tokens · requests · active users)',
+        logGroupNames: usageLogs,
+        view: cloudwatch.LogQueryVisualizationType.LINE,
+        queryLines: [
+          'filter llmgw = "usage"',
+          'stats sum(TotalTokens) as tokens, sum(Requests) as requests,'
+            + ' count_distinct(User) as active_users by bin(1h)',
+        ],
+        width: 12, height: 8,
+      }),
+    );
+
+    // ---- Row 5: per-user drill-down + edge health -------------------------------
+    const alb = litellm.loadBalancer;
+    dashboard.addWidgets(
+      new cloudwatch.LogQueryWidget({
+        title: 'Per-user tokens by model (drill-down)',
+        logGroupNames: usageLogs,
+        view: cloudwatch.LogQueryVisualizationType.TABLE,
+        queryLines: [
+          'filter llmgw = "usage"',
+          'stats sum(TotalTokens) as total_tokens, sum(Requests) as requests by User, Model',
+          'sort total_tokens desc',
+          'limit 50',
+        ],
+        width: 12, height: 8,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'LiteLLM ALB — requests / 5xx / target latency',
         left: [
+          alb.metrics.requestCount({ statistic: 'Sum' }),
           alb.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, { statistic: 'Sum' }),
         ],
-        width: 12,
+        right: [alb.metrics.targetResponseTime({ statistic: 'p95' })],
+        width: 12, height: 8,
       }),
     );
 
     new cdk.CfnOutput(this, 'DashboardName', { value: this.dashboardName });
+    new cdk.CfnOutput(this, 'DashboardUrl', {
+      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home?region=${this.region}#dashboards:name=${this.dashboardName}`,
+    });
   }
 }
 ```
 
 **WHY:**
 - **Toggleable** — if `dashboardEnabled=false`, there is no dashboard, only a `(disabled)` output. Cost control.
-- **Uses the `alb.metrics.*` helpers** — pulls metrics directly from the ALB object (LiteLLMExports) rather than specifying dimensions by hand. `langfuse` is optional, so it branches with a ternary.
-- **Cross-layer mapping**: receives the exports of all three planes (LiteLLM/Auth/Langfuse) as props and gathers them onto one screen. The division of roles between CloudWatch (infra/cost) + Langfuse (prompt/trace).
+- **Usage data comes from EMF, not PutMetricData** — the LiteLLM container just prints one JSON line per request to stdout (litellm-gateway.md §4); the existing awslogs pipeline delivers it and CloudWatch extracts the metrics. No extra IAM, no API calls from the hot path, nothing new to deploy at runtime.
+- **`Model`/`Team` are dimensions, the user is a property.** Every distinct dimension combination is a billable custom metric; models and teams are small bounded sets, but users are unbounded. Per-user and per-hour views therefore run as **Logs Insights query widgets** over the same EMF records (`filter llmgw = "usage"`) — zero metric cost, still on the one dashboard. Their history equals the log retention (2 weeks); longer-range per-user reporting is the LiteLLM Admin UI / DB.
+- **SEARCH expressions, not synth-time dimension lists** — teams (and future models) are created at runtime, so widgets discover series dynamically. SEARCH is not valid in alarms; if alarms are added later, define explicit per-model `cloudwatch.Metric` objects.
+- **Always set a dynamic `label` on SEARCH expressions** — without one, every legend entry renders the raw expression string (`SEARCH('{...,Model} MetricName="TotalTokens"', 'Sum') claude-fable-5`). `label: "${PROP('Dim.Model')}"` (CloudWatch dynamic labels) shows just the dimension value; prefix a literal (`"p99 ${PROP('Dim.Model')}"`) when one widget graphs two stats of the same metric.
+- **Uses the `alb.metrics.*` helpers** — pulls edge metrics directly from the ALB object (LiteLLMExports). `langfuse` is optional, so it branches with a ternary.
+- **Cross-layer mapping**: receives the exports of all three planes (LiteLLM/Auth/Langfuse) as props — including `litellm.logGroup` for the Logs Insights widgets — and gathers usage + infra onto one screen. CloudWatch (usage/infra/cost) + Langfuse (prompt/trace) split roles.
 
 ---
 
@@ -1798,6 +1948,7 @@ export function applyResourceSuppressions(
 | LiteLLM | `masterKeySecret` | Auth | `grantRead` (read only) → `/key/generate` |
 | LiteLLM | `internalUrlSsmParameterName` | Auth | runtime lookup **by SSM name** (avoids deploy cross-ref) |
 | LiteLLM | `loadBalancer` | Observability | ALB metrics (public ALB = edge; internal ALB = Token Service path) |
+| LiteLLM | `logGroup` | Observability | Logs Insights widgets over the cloudwatch_usage EMF records (per-user / hourly usage) |
 | Langfuse | `loadBalancer` (acm only) | Observability | ALB metrics |
 | LiteLLM/Auth/Langfuse | URLs·surfaces | Observability | dashboard widgets |
 | (config) `litellm.certMode` | acm/http | LiteLLMStack | selects the public ALB listener (HTTPS:443 vs HTTP:80; no CloudFront/CDN, no WAF) |

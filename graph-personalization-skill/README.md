@@ -2,7 +2,7 @@
 
 > **Customer Similarity Graph + Bedrock Explainable Recommendation.** An AI Skill that stores a user/item/relationship graph in Amazon Neptune, traverses similar users with Cypher, and automatically generates natural-language explanations with Bedrock Claude — delivered as a production-ready CDK system.
 
-**Anthropic Agent Skills standard** (`SKILL.md`) format — Claude Code · Kiro · Amazon Quick all share an identical SKILL.md (md5-identical).
+**Anthropic Agent Skills standard** (`SKILL.md`) format — Claude Code · Kiro · Codex all share an identical SKILL.md (md5-identical).
 
 ## Triggers (invoke in natural language)
 
@@ -33,7 +33,7 @@ graph-personalization-skill/
 ├── README.md                                                       (this file)
 ├── claude-code/skills/graph-personalization/SKILL.md               ★ identical in 3 places (md5-identical)
 ├── kiro/skills/graph-personalization/SKILL.md                      ★
-├── quick/skills/graph-personalization/SKILL.md                     ★
+├── codex/skills/graph-personalization/SKILL.md                     ★
 ├── shared/                                                          ⭐ actual knowledge (~5,400 lines)
 │   ├── reference/
 │   │   ├── architecture.md                  (260L) Neptune+Bedrock+Kinesis+(ML)+Frontend
@@ -158,11 +158,11 @@ cp -r kiro/skills/graph-personalization ~/.kiro/skills/
 cp -r shared ~/.kiro/skills/graph-personalization/shared
 ```
 
-### Amazon Quick
+### Codex
 ```bash
-mkdir -p ~/.quickwork/skills
-cp -r quick/skills/graph-personalization ~/.quickwork/skills/
-cp -r shared ~/.quickwork/skills/graph-personalization/shared
+mkdir -p ~/.agents/skills
+cp -r codex/skills/graph-personalization ~/.agents/skills/
+cp -r shared ~/.agents/skills/graph-personalization/shared
 ```
 
 ## MCP requirements

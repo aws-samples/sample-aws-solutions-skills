@@ -63,10 +63,22 @@
       <tr><td>사용 가능 모델</td><td><code>{{OPUS}}</code> · <code>{{SONNET}}</code> · <code>{{HAIKU}}</code> · <code>{{FABLE}}</code> · <code>{{GPT}}</code></td></tr>
       <tr><td>인증 모드 / TLS</td><td>{{AUTH_MODE}} / {{CERT_MODE}}</td></tr>
     </table>
-    <div class="note">가상 키(virtual key)는 로그인 후 토큰 헬퍼가 자동 발급/회전합니다. <b>키를 직접 붙여넣지 마세요</b> — 아래 설정이 헬퍼를 통해 자동 주입합니다.</div>
+    <div class="note">가상 키(virtual key)는 로그인 후 토큰 헬퍼가 자동 발급/회전합니다. <b>키를 직접 붙여넣지 마세요.</b> 설정 파일을 손으로 편집할 필요도 없습니다 — 아래 <b>생성된 스크립트를 실행</b>하면 모두 자동으로 구성됩니다.</div>
   </div>
 
-  <h2><span class="n">1</span> 로그인 (가상 키 발급 준비)</h2>
+  <h2><span class="n">1</span> 원클릭 설정 — <code>setup-developer</code> 실행</h2>
+  <p>관리자에게 받은 온보딩 번들(게이트웨이 리포의 <code>scripts/</code> + <code>outputs.json</code>)에서 아래 한 줄을 실행합니다. <b>편집할 파일은 없습니다.</b></p>
+  <pre>./scripts/setup-developer.sh          <span class="c"># Windows: .\scripts\setup-developer.ps1</span></pre>
+  <p>스크립트가 자동으로 수행하는 일:</p>
+  <table>
+    <tr><th>대상</th><th>수행 내용</th></tr>
+    <tr><td><code>~/.claude/settings.json</code></td><td>게이트웨이 URL·리전·<b>4개 모델 별칭</b>(Fable 포함 — 빠지면 <code>/model</code> 선택기에서 해당 티어가 숨겨짐)·<code>apiKeyHelper</code>·<code>permissions.deny: ["WebSearch"]</code> 를 <b>병합</b></td></tr>
+    <tr><td><code>~/.codex/config.toml</code></td><td><code>[model_providers.llm-gateway]</code> 블록(+<code>.auth</code> 토큰 헬퍼)만 교체·병합, 기본 모델 <code>{{GPT}}</code></td></tr>
+    <tr><td><code>~/.llm-gateway/env</code></td><td>게이트웨이·토큰 서비스 URL 저장 (비밀 없음 — 헬퍼가 참조)</td></tr>
+  </table>
+  <div class="note">기존 설정은 <b>병합</b>됩니다(다른 도구의 hooks/plugins 등 보존) — 실행 전 상태는 매번 <code>*.llmgw-backup-&lt;timestamp&gt;</code> 로 자동 백업됩니다.</div>
+
+  <h2><span class="n">2</span> 로그인 (가상 키 발급 준비)</h2>
   <!--IF authMode=cognito-native-->
   <div class="variant">
     <div class="t">authMode: cognito-native</div>
@@ -77,20 +89,36 @@
   <!--IF authMode=org-sso-->
   <div class="variant">
     <div class="t">authMode: org-sso</div>
-    <p>SSO 프로필로 로그인합니다. 토큰 헬퍼가 SigV4로 서명합니다.</p>
+    <p>SSO 프로필로 로그인합니다(1단계 스크립트가 <code>llm-gateway</code> 프로필을 만들어 둡니다). 토큰 헬퍼가 SigV4로 서명합니다.</p>
     <pre>aws sso login --profile llm-gateway</pre>
   </div>
   <!--ENDIF-->
 
   <!--IF certMode=http-->
-  <h2><span class="n">2</span> 게이트웨이 접속 (HTTP — PoC 전용)</h2>
+  <h2><span class="n">3</span> 게이트웨이 접속 (HTTP — PoC 전용)</h2>
   <p>이 게이트웨이는 <b>HTTP(평문)</b> 로 서비스됩니다 — 가상 키와 프롬프트가 암호화 없이 전송되므로 PoC 용도로만 사용하세요. 접근은 허용된 사내 IP 대역(Security Group allowlist)에서만 가능합니다. 별도의 인증서 신뢰나 터널 설정은 필요 없습니다 — <code>{{GATEWAY_URL}}</code> 로 바로 접속합니다.</p>
   <div class="note">접속이 안 되면 현재 네트워크의 공인 IP가 관리자에게 등록된 허용 CIDR에 포함되는지 확인하세요.</div>
   <!--ENDIF-->
 
-  <h2><span class="n">3</span> Claude Code 설정</h2>
-  <p><code>~/.claude/settings.json</code> 에 아래를 병합합니다. <b>4개 모델 별칭을 모두</b> 넣어야 <code>/model</code> 선택기에 Fable 티어까지 노출됩니다.</p>
-  <pre>{
+  <h2><span class="n">4</span> 웹 검색 MCP 등록 (Claude Code)</h2>
+  <p>서버 측 등록만으로는 클라이언트에서 안 보입니다. 아래 명령 한 번으로 등록하세요 — <code>headersHelper</code> 가 회전 키를 동적 주입합니다.</p>
+  <pre>claude mcp add-json websearch '{
+  "type": "http",
+  "url": "{{GATEWAY_URL}}/mcp/",
+  "headersHelper": "{{MCP_HEADERS_CMD}}"
+}'</pre>
+  <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
+
+  <h2><span class="n">5</span> 동작 확인 — <code>healthcheck</code> 실행</h2>
+  <pre>./scripts/healthcheck.sh          <span class="c"># Windows: .\scripts\healthcheck.ps1</span>
+<span class="c"># 토큰 발급 → {{GATEWAY_URL}}/v1/models 호출까지 자동 검증
+# 기대: {{OPUS}}/{{SONNET}}/{{HAIKU}}/{{FABLE}} + {{GPT}} 목록</span></pre>
+  <p>이제 <code>claude</code> / <code>codex</code> 실행 시 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
+
+  <h2><span class="n">6</span> 참고 — 스크립트가 병합하는 설정 (수동 확인용)</h2>
+  <p>1단계 스크립트가 병합하는 내용입니다. <b>직접 편집할 필요는 없고</b>, 문제가 생겼을 때 아래 값이 들어갔는지 확인하는 용도입니다.</p>
+  <pre><span class="c"># ~/.claude/settings.json (우리 키만 병합 — 나머지는 그대로 유지)</span>
+{
   "env": {
     "ANTHROPIC_BASE_URL": "{{GATEWAY_URL}}",
     "AWS_REGION": "{{REGION}}",
@@ -101,12 +129,10 @@
   },
   "apiKeyHelper": "{{APIKEY_HELPER}}",
   "permissions": { "deny": ["WebSearch"] }
-}</pre>
-  <div class="note"><code>permissions.deny: ["WebSearch"]</code> 로 Claude 내장 WebSearch를 끕니다 — 대신 5단계의 관리형 웹 검색 MCP를 사용합니다.</div>
+}
 
-  <h2><span class="n">4</span> Codex 설정</h2>
-  <p><code>~/.codex/config.toml</code> 에 추가합니다.</p>
-  <pre>model = "{{GPT}}"
+<span class="c"># ~/.codex/config.toml (우리 provider 블록만 교체 — 다른 섹션은 그대로 유지)</span>
+model = "{{GPT}}"
 model_provider = "llm-gateway"
 
 [model_providers.llm-gateway]
@@ -118,20 +144,7 @@ wire_api = "responses"
 command = "{{TOKEN_CMD}}"
 refresh_interval_ms = 300000
 timeout_ms = 5000</pre>
-
-  <h2><span class="n">5</span> 웹 검색 MCP 등록 (Claude Code)</h2>
-  <p>서버 측 등록만으로는 클라이언트에서 안 보입니다. <code>headersHelper</code> 로 회전 키를 동적 주입하며 등록하세요.</p>
-  <pre>claude mcp add-json websearch '{
-  "type": "http",
-  "url": "{{GATEWAY_URL}}/mcp/",
-  "headersHelper": "{{MCP_HEADERS_CMD}}"
-}'</pre>
-  <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
-
-  <h2><span class="n">6</span> 동작 확인</h2>
-  <pre>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD}})"
-<span class="c"># 기대: {{OPUS}}/{{SONNET}}/{{HAIKU}}/{{FABLE}} + {{GPT}} 목록</span></pre>
-  <p>이제 <code>claude</code> / <code>codex</code> 실행 시 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
+  <div class="note">수동으로 확인하고 싶으면: <code>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD}})"</code></div>
 
   <div class="foot">
     문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 없습니다 — 가상 키는 로그인으로 자동 발급됩니다.

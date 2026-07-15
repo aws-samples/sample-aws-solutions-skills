@@ -327,7 +327,7 @@
     <div class="card pink"><h3>🔑 키 라이프사이클</h3><p>사용자별 가상키 발급·DynamoDB 캐시(TTL). master key는 Secrets Manager grantRead. 장기 키 배포 없음</p></div>
     <div class="card teal"><h3>📊 티어링 · 예산</h3><p>권한셋→LiteLLM 팀. economy=모델 allowlist + 예산 캡($50). standard=전 모델</p></div>
     <div class="card gold"><h3>🛡️ 정책 (Policy)</h3><p>Bedrock Guardrail + 시크릿 탐지가 모든 Claude 요청에 default 적용. MCP는 키별 access group으로 스코프</p></div>
-    <div class="card pink"><h3>🧾 감사 (Audit)</h3><p>키별 사용량·예산, Langfuse 프롬프트/트레이스, CloudWatch 지표. cdk-nag 억제는 사유 명시</p></div>
+    <div class="card pink"><h3>🧾 감사 (Audit)</h3><p>키별 사용량·예산, Langfuse 프롬프트/트레이스, <b>CloudWatch 사용량 대시보드</b>(모델·팀·사용자별 토큰/비용/지연 — EMF 자동 수집). cdk-nag 억제는 사유 명시</p></div>
   </div>
 </section>
 
@@ -393,9 +393,9 @@
     <thead><tr><th style="width:34px">#</th><th>선택축</th><th>config 필드</th><th>옵션</th></tr></thead>
     <tbody>
       <tr><td>1</td><td><b>엣지 TLS</b></td><td><code>litellm.certMode</code></td><td>acm(도메인+ACM · HTTPS) / http(도메인X · HTTP 평문 · PoC 전용) — 둘 다 SG CIDR allowlist(<code>albIngressCidrs</code>) 필수</td></tr>
-      <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만</td></tr>
+      <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만 — 어느 쪽이든 <b>CloudWatch 사용량 대시보드</b>(토큰·사용자별·시간대별)는 기본 제공</td></tr>
       <tr><td>3</td><td><b>모델·비용 티어</b></td><td>Token Lambda 팀 매핑</td><td>standard(전 모델) / economy(allowlist + 예산캡)</td></tr>
-      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT-5.x(bedrock_mantle) 조합</td></tr>
+      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT <b>5.5/5.4만</b>(bedrock_mantle — <b>⛔ 5.6-* 금지</b>: Codex 툴 사용 시 400)</td></tr>
       <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>awsRegion</code></td><td>config가 authoritative(constants 수정 불필요) · AgentCore/Mantle은 us-east-1 고정</td></tr>
       <tr><td>6</td><td><b>용량·비용</b></td><td><code>data.* · litellm.* · natGateways</code></td><td>Aurora ACU · Fargate 크기 · NAT 수</td></tr>
       <tr><td>7</td><td><b>부트스트랩</b></td><td><code>bootstrapQualifier</code></td><td>기본 / 커스텀(충돌 회피)</td></tr>
@@ -446,7 +446,8 @@
         <li><b>IaC 전부 CDK</b> — typecheck · synth · cdk-nag 게이트</li>
         <li><b>Token Service</b> — org-sso: API GW(IAM) / cognito-native: API GW(Cognito)+Lambda+DynamoDB</li>
         <li><b>LiteLLM 컨테이너</b> — config.yaml · Mantle Bearer 토큰 콜백(aws-bedrock-token-generator, uv 설치)</li>
-        <li><b>개발자 온보딩</b> — <code>setup-developer.sh</code>가 <b>outputs.json에서 전부 자동 유도</b>(zero-touch) · 기존 사용자 설정은 <b>병합·백업</b>(덮어쓰기 금지)</li>
+        <li><b>개발자 온보딩</b> — <code>setup-developer.sh</code>가 <b>outputs.json에서 전부 자동 유도</b>(zero-touch) · 기존 사용자 설정은 <b>병합·백업</b>(덮어쓰기 금지) · 온보딩 HTML은 <b>스크립트 실행 중심</b>(수동 편집 안내 없음)</li>
+        <li><b>사용량 대시보드</b> — <code>cloudwatch_usage</code> EMF 콜백 + ObservabilityStack 대시보드(토큰·사용자별·시간대별·비용·지연)</li>
         <li><b>테스트·억제</b> — synth 단언 · 정당화된 cdk-nag suppression</li>
       </ul>
       <p class="src">산업·티어·리전 입력에 맞춰 커스터마이즈되어 생성</p>
@@ -468,6 +469,9 @@
     <div class="card teal"><h3>🔀 사용자 설정 병합</h3><p><code>~/.claude</code>·<code>~/.codex</code>는 공유 파일 — 백업 후 우리 키만 갱신, 절대 덮어쓰지 않음</p></div>
     <div class="card pink"><h3>🔁 UI 리다이렉트</h3><p><code>PROXY_BASE_URL</code>/<code>NEXTAUTH_URL</code>=공개 URL 단독 메커니즘 (<code>--forwarded-allow-ips</code>는 이미지에 없음 — 금지)</p></div>
     <div class="card gold"><h3>🏗️ prod 전환 체크</h3><p>RETAIN·백업·per-AZ NAT·스코프 IAM·로그 — 각 항목 <code>PROD TODO</code></p></div>
+    <div class="card pink"><h3>🕳️ addListener 0.0.0.0/0</h3><p>CDK 기본 <code>open:true</code>가 SG allowlist 옆에 전세계 오픈 규칙을 <b>조용히 추가</b> → 모든 리스너에 <code>open:false</code> + 배포 후 SG 실사</p></div>
+    <div class="card teal"><h3>⛔ GPT-5.6 금지</h3><p>Codex 인증 목록 외 모델 — 툴 사용 시 <code>namespace</code> 타입이 Mantle 400 유발("high demand"로 오인 표시). <b>5.5/5.4만 제시</b></p></div>
+    <div class="card gold"><h3>📐 메트릭 카디널리티</h3><p>EMF 디멘전은 Model/Team(유한)만 — <b>사용자는 property</b>(무한 집합=메트릭 과금 폭발). 사용자별 뷰는 Logs Insights. SEARCH 범례엔 dynamic label 필수</p></div>
   </div>
   <p class="src">근거: shared/reference/constraints.md (실 배포에서 발견·역반영된 항목)</p>
 </section>
@@ -676,12 +680,50 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     </div>
     <div class="card gold">
       <h3>4️⃣ 사용자별 사용량 확인</h3>
-      <p style="margin:4px 0 8px">Admin UI → <b>Usage</b> → <b>Customer Usage</b> 탭 → 고객별 spend, 일별 추이, 모델별 사용 비중 확인</p>
+      <p style="margin:4px 0 8px">Admin UI → <b>Usage</b> → <b>Customer Usage</b> 탭 → 고객별 spend, 일별 추이, 모델별 사용 비중 확인 · 인프라 한눈 뷰는 <b>CloudWatch 사용량 대시보드</b>(다음 슬라이드)</p>
       <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Customer Usage: <a href="https://docs.litellm.ai/docs/proxy/customer_usage" style="color:#9af5d8">docs.litellm.ai/docs/proxy/customer_usage</a></p>
       <p style="font-size:12px;color:#9bb0cc;margin:2px 0">Spend Tracking 전반: <a href="https://docs.litellm.ai/docs/proxy/cost_tracking" style="color:#9af5d8">docs.litellm.ai/docs/proxy/cost_tracking</a></p>
     </div>
   </div>
   <p class="src">근거: shared/reference/litellm-admin-guide.md §5 · Enterprise 라이선스 불필요(Admin UI·팀·budget 모두 OSS 기능)</p>
+</section>
+
+<!-- 16b CLOUDWATCH USAGE DASHBOARD -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · CloudWatch 사용량 대시보드</div>
+  <h2>토큰 · 사용자 · 시간 — <span class="u">배포와 함께 생기는 대시보드</span></h2>
+  <div class="two">
+    <div>
+      <div class="card gold" style="margin-bottom:10px">
+        <h3>⚙️ 동작 원리 — EMF 한 줄이 전부</h3>
+        <p><code>cloudwatch_usage</code> 콜백이 요청마다 <b>EMF JSON 한 줄</b>을 stdout에 출력 → 기존 awslogs 파이프라인 → CloudWatch가 메트릭 <b>자동 추출</b>. 추가 IAM 없음 · API 호출 없음 · 요청 경로 오버헤드 없음</p>
+      </div>
+      <div class="card teal" style="margin-bottom:10px">
+        <h3>📐 설계 규칙</h3>
+        <p>디멘전=<b>Model/Team</b>(유한 집합, 그래프용) · <b>사용자=property</b>(무한 집합 — Logs Insights로 조회, 메트릭 과금 0). 사용자별 이력은 로그 보존(2주) 한도 — 장기 리포트는 LiteLLM Admin UI/DB</p>
+      </div>
+      <div class="card pink">
+        <h3>🔎 배포 직후 검증</h3>
+        <p>테스트 호출 1건 → 로그에 <code>"llmgw":"usage"</code> 라인 → ~2분 내 <code>list-metrics</code>에 TotalTokens → <code>DashboardUrl</code> 출력값 열기</p>
+      </div>
+    </div>
+    <div>
+      <table>
+        <thead><tr><th>위젯</th><th>보여주는 것</th></tr></thead>
+        <tbody>
+          <tr><td><b>토큰 by 모델/팀</b></td><td>TotalTokens 합계 추이 (SEARCH로 런타임 생성 팀 자동 발견)</td></tr>
+          <tr><td><b>Prompt vs Completion</b></td><td>모델별 입·출력 토큰 분리</td></tr>
+          <tr><td><b>비용(USD) by 팀</b></td><td>LiteLLM 자체 비용 계산치 합계</td></tr>
+          <tr><td><b>요청/실패 · 지연</b></td><td>모델별 Requests·Failures, LatencyMs avg/p99</td></tr>
+          <tr><td><b>사용자 Top-N</b></td><td>토큰·요청·비용 상위 20명 테이블 (Logs Insights)</td></tr>
+          <tr><td><b>시간대별 사용</b></td><td>시간별 토큰·요청·<b>활성 사용자 수</b></td></tr>
+          <tr><td><b>사용자×모델 드릴다운</b></td><td>누가 어떤 모델을 얼마나 (상위 50행)</td></tr>
+          <tr><td><b>ALB 상태</b></td><td>requests · 5xx · target p95</td></tr>
+        </tbody>
+      </table>
+      <p class="src" style="margin-top:8px">ObservabilityStack(<code>dashboardEnabled</code>) · <code>DashboardUrl</code> CfnOutput · 근거: shared/patterns/cdk-stacks.md §7 · litellm-gateway.md §4 · 실 배포 검증(60개 시계열 자동 추출 확인)</p>
+    </div>
+  </div>
 </section>
 
 <!-- 17 SSO USER GROUP LITELLM MAPPING -->

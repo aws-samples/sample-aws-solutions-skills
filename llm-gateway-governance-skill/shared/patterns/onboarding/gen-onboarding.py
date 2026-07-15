@@ -97,6 +97,9 @@ def main():
         "GATEWAY_URL": gateway_url,
         "ADMIN_UI_URL": pick(flat, "AdminUiUrl", default=gateway_url + "/ui/"),
         "TOKEN_SERVICE_URL": pick(flat, "TokenServiceUrl"),
+        # ObservabilityStack outputs (usage dashboard). '(disabled)' when dashboardEnabled=false.
+        "DASHBOARD_URL": pick(flat, "DashboardUrl",
+                              default="(CloudWatch console → Dashboards → %s)" % pick(flat, "DashboardName", default="disabled")),
         "LANGFUSE_URL": langfuse_url or "(비활성)",
         "REGION": region, "AUTH_MODE": auth_mode, "CERT_MODE": cert_mode,
         "OPUS": aliases.get("opus", "claude-opus-4-8"),

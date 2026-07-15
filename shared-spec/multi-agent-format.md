@@ -1,6 +1,6 @@
 # Multi-Agent Format Spec
 
-> **Core principle**: Write once, install three places. A single `SKILL.md` is placed verbatim into Claude Code, Kiro, and Amazon Quick — they differ only in install location.
+> **Core principle**: Write once, install three places. A single `SKILL.md` is placed verbatim into Claude Code, Kiro, and Codex — they differ only in install location.
 
 ## Why a single format
 
@@ -10,9 +10,9 @@ All three target tools natively accept the **[Anthropic Agent Skills](https://ag
 |---|---|---|
 | Claude Code | `~/.claude/skills/<name>/SKILL.md` | ✅ Native |
 | Kiro | `~/.kiro/skills/<name>/SKILL.md` | ✅ Native (in addition to Steering Rules / Specs) |
-| Amazon Quick | `~/.quickwork/skills/<name>/SKILL.md` | ✅ Native |
+| Codex | `~/.agents/skills/<name>/SKILL.md` | ✅ Native |
 
-→ Anthropic's Agent Skills spec is the **lowest common denominator across all three tools**, so we use it as our single canonical format. No per-tool entry-point variation is needed or beneficial.
+→ The open Agent Skills spec is the **lowest common denominator across all three tools**, so we use it as our single canonical format. No per-tool entry-point variation is needed or beneficial.
 
 ## SKILL.md format
 
@@ -24,7 +24,7 @@ name: <skill-name>
 description: |
   Concise statement of what the skill does and when it should activate. Include
   high-signal trigger keywords (English and Korean if applicable). Max 1024 characters.
-  Claude/Kiro/Quick all match user queries against this description.
+  Claude/Kiro/Codex all match user queries against this description.
 license: MIT
 metadata:
   version: "1.0"
@@ -90,7 +90,7 @@ The same SKILL.md is placed verbatim under each tool's `skills/` directory:
 ```
 <skill>/claude-code/skills/<name>/SKILL.md   # md5 = X
 <skill>/kiro/skills/<name>/SKILL.md          # md5 = X
-<skill>/quick/skills/<name>/SKILL.md         # md5 = X
+<skill>/codex/skills/<name>/SKILL.md         # md5 = X
 ```
 
 **Why three copies and not a single source-of-truth + symlinks?**
@@ -111,8 +111,8 @@ Hard CI rule: three SKILL.md files per skill must be md5-identical.
 SKILL=<skill-dir>
 md5_a=$(md5sum "$SKILL/claude-code/skills/"*/SKILL.md | awk '{print $1}')
 md5_k=$(md5sum "$SKILL/kiro/skills/"*/SKILL.md | awk '{print $1}')
-md5_q=$(md5sum "$SKILL/quick/skills/"*/SKILL.md | awk '{print $1}')
-[ "$md5_a" = "$md5_k" ] && [ "$md5_k" = "$md5_q" ] || { echo "DRIFT in $SKILL"; exit 1; }
+md5_x=$(md5sum "$SKILL/codex/skills/"*/SKILL.md | awk '{print $1}')
+[ "$md5_a" = "$md5_k" ] && [ "$md5_k" = "$md5_x" ] || { echo "DRIFT in $SKILL"; exit 1; }
 ```
 
 Editing workflow: pick one of the three (recommended: `claude-code/skills/<name>/SKILL.md`), edit, then run `scripts/sync-skills.sh` (provided in template) which copies it to the other two locations.
@@ -123,7 +123,7 @@ All three tools use **trigger-driven activation** for Skills:
 
 1. User issues a query.
 2. Tool matches query against the skill's `description` field.
-3. If matched (or user invokes explicitly with `/<skill-name>`), the skill body is loaded.
+3. If matched (or the user invokes it explicitly through the host skill picker, slash command, or Codex `$skill-name` mention), the skill body is loaded.
 4. Once loaded, the body stays in conversation context across turns.
 5. After auto-compaction, Claude Code re-attaches the most recent invocation's first 5,000 tokens.
 
@@ -165,17 +165,6 @@ Not a CLAUDE.md (project memory):
 Not a Kiro Steering Rule:
 - Kiro Steering is always-on guidance for a workspace. We use Kiro's Skills mechanism instead, which matches the trigger-driven model of the other two tools.
 
-## Migration notes (historical)
+## Migration notes
 
-Previous versions of this repo used per-tool entry-point variation:
-- `claude-code/CLAUDE.md` + `claude-code/commands/<name>.md`
-- `kiro/steering.md` + `kiro/specs/generate-<name>.md`
-- `quick/SKILL.md` (with custom frontmatter)
-
-This was abandoned because:
-
-1. All three tools accept Anthropic SKILL.md natively — per-tool variation provided no semantic gain.
-2. Three different entry formats meant drift between them was inevitable.
-3. The Anthropic Skills standard is actively maintained and supported across the ecosystem; rolling our own was reinventing.
-
-Skills authored in the old format have been migrated. The `template/` directory shows the new format.
+Older revisions used tool-specific entry files. Those were consolidated because all current targets accept `SKILL.md`, while separate formats created avoidable drift. If a legacy skill still has tool-specific commands, steering files, or custom frontmatter, extract the shared workflow into the canonical `SKILL.md`, place identical copies under `claude-code/`, `kiro/`, and `codex/`, and verify them with `scripts/sync-skills.sh verify`.

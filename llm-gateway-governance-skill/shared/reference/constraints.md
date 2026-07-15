@@ -71,6 +71,16 @@ GPT-5.x (Mantle) is **us-east-1 only**; reach it privately via cross-region VPC 
   the provider** — using it alone leaves the endpoint at `AWS_REGION` (gateway region) and the call
   fails with "Cannot connect to host bedrock-mantle.<gw-region>.api.aws".
 
+## ⛔ GATE: GPT-5.6 is not a valid model choice — offer only GPT-5.5 / GPT-5.4 (real-deploy incident)
+
+**Do not let Discovery/GATE-1 accept a GPT-5.6-family model (`gpt-5.6-sol`/`-terra`/`-luna` or any other `gpt-5.6-*`) for a Codex-facing deployment.** When a user asks for "the newest/fastest GPT" or names a `5.6` variant, the agent must redirect to `gpt-5.5` (flagship) / `gpt-5.4` (economy) and explain why, rather than deploying what was asked.
+
+- **OpenAI's own "Configure Codex with Amazon Bedrock" support article lists exactly four Bedrock model IDs**: `openai.gpt-5.5`, `openai.gpt-5.4`, `openai.gpt-oss-120b`, `openai.gpt-oss-20b` (recommended default: `gpt-5.5`). `gpt-5.6-*` is **not on that list** — it may exist as a Bedrock Mantle model, but it is not a model OpenAI has certified for the Codex↔Bedrock integration.
+- **Root-caused failure mode (do not re-diagnose this from scratch if seen again):** Codex CLI sets `namespace_tools: true` in its `ProviderCapabilities` for any provider using `wire_api = "responses"` (confirmed: this is not `amazon-bedrock`-provider-specific — the same wrapping fires for custom `model_providers.<id>` entries with `wire_api="responses"`, which is how this gateway's Codex client config works). Once **any real config with tools** is in play (built-in `shell`/`apply_patch`, or any registered MCP server — this repo's default Codex config registers `mcp_servers.node_repl`/`computer-use`), Codex serializes tool definitions using an OpenAI-proprietary `{"type": "namespace", ...}` wrapper. **Bedrock Mantle's Responses API schema validator only accepts `"function"` and `"mcp"` tool types** and rejects `"namespace"` with `400 validation_error: Invalid 'input'/'tools': value did not match any expected variant` / `unknown variant 'namespace'`. Symptom in the client: Codex reports this as "Reconnecting... N/5 — We're currently experiencing high demand" (misleading — it is a hard 400, not load), then gives up. See upstream: `openai/codex#25034` (closed) and OpenAI's own compatibility note: "Because MCP namespace tools and tool search are not currently available, MCP and tool discovery functionality may be limited in this configuration."
+- **This was reproduced end-to-end on `gpt-5.6-sol`** (CloudWatch: 138/149 `/v1/responses` calls in a live Codex session returned 500 with the `namespace` validation error; the only 200s were single-turn/no-tool requests) and **did not reproduce after switching the deployment to `gpt-5.5`/`gpt-5.4`** in the same Codex session with the same MCP servers registered — but treat that as **not yet a proven root-cause fix**; it may be coincidental (e.g., timing, a different Mantle backend build). Re-verify with a fresh multi-turn, tool-using Codex session before assuming GPT-5.6 vs GPT-5.5/5.4 is *the* deciding factor, independent of the `namespace_tools` mechanism above.
+- **Action for the skill**: `lib/config/constants.ts` `MODELS` should define `GPT55`/`GPT54` (`bedrock_mantle/openai.gpt-5.5` / `openai.gpt-5.4`) and never a `GPT56_*` entry; `config.yaml`'s `model_list` should route only those two. If a future user insists on `gpt-5.6-*` anyway, warn explicitly about the `namespace_tools`/`400 validation_error` failure mode above before deploying it, and confirm they understand Codex tool-use may break mid-session even though a plain first-turn call succeeds.
+
+
 ## Mantle Marketplace auto-subscribe + ALB idle timeout for long completions
 
 - Mantle models are **AWS Marketplace** offerings. The LiteLLM Task Role needs `aws-marketplace:Subscribe` (+ `ViewSubscriptions`/`Unsubscribe`) — without it the first GPT-5.x call returns `access_denied ... aws-marketplace:Subscribe`.
@@ -99,6 +109,13 @@ GPT-5.x (Mantle) is **us-east-1 only**; reach it privately via cross-region VPC 
 
 - The ALB is the edge (CloudFront removed). A **public, internet-facing ALB** fronts LiteLLM in both modes (`acm` HTTPS:443, `http` HTTP:80), with SG ingress restricted to the `albIngressCidrs` allowlist (no AWS WAF); the ECS tasks stay in `PRIVATE_WITH_EGRESS`. A **separate internal ALB (HTTP:4000)** always exists for the Token Service — its SSM URL `LITELLM_INTERNAL_URL` is **unchanged**, so the auth plane needs no edit and there is no NAT hairpin. Never expose the internal ALB or the `:4000` listener to the internet.
 - Single NAT gateway is a cost/HA tradeoff (dev). Production: one NAT per AZ.
+
+## CDK ELBv2 `addListener()` silently opens `0.0.0.0/0` (real-deploy incident — security)
+
+- **`elbv2.ApplicationLoadBalancer.addListener()` defaults `open: true`.** When the ALB is `internetFacing: true`, CDK auto-adds an ingress rule for **`0.0.0.0/0`** on the listener's port to the ALB's security group — *in addition to* whatever CIDR allowlist you already added via `securityGroup.addIngressRule(...)`. This silently defeats `config.litellm.albIngressCidrs`: the SG allowlist stays correct-looking in your own code, but the listener creation appends a second, world-open rule that CDK doesn't warn about.
+- **Fix: pass `open: false` on every `addListener()` call** on an internet-facing ALB (HTTP listener, HTTPS listener, and the HTTP→HTTPS redirect listener alike — see `litellm-stack.ts:252,301,309` and `langfuse-stack.ts:151,171`). This tells CDK not to auto-manage listener-level ingress; your explicit `albIngressCidrs` rule remains the only one.
+- **Verify after every deploy touching the ALB/listeners** — do not assume the flag alone proves it: `aws ec2 describe-security-groups --group-ids <PublicAlbSg-id>` and confirm the ingress rule list contains **only** the intended CIDR(s), with no stray `0.0.0.0/0` entry. This is a synth-time-invisible bug (no warning, no error) that only shows up by inspecting the deployed SG.
+
 
 ## Data
 

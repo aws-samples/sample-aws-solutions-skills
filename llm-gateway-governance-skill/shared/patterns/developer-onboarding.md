@@ -774,7 +774,7 @@ After a successful deploy, produce **two self-contained HTML docs** from the cdk
 
 | File | Audience | Contents | Secrets |
 |------|----------|----------|---------|
-| `developer-setup.html` | every developer (shareable) | Claude Code + Codex setup only, login, (http) plaintext/SG-allowlist notice, web search MCP, verify | **none** |
+| `developer-setup.html` | every developer (shareable) | **script-first**: run `setup-developer.sh`/`.ps1` (one-shot merge of Claude Code + Codex config, with backups), login, (http) plaintext/SG-allowlist notice, web search MCP register command, verify via `healthcheck.sh`/`.ps1`; the merged JSON/TOML appears only as a reference appendix — never as hand-edit instructions | **none** |
 | `admin-onboarding.html` | the deploying operator ONLY | endpoints, identity, real secret values, password-change, developer on/offboarding | master key, Langfuse pw |
 
 ```bash

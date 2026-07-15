@@ -6,7 +6,7 @@ This directory is an AI Skill that **conversationally generates** a multi-agent 
 
 The generated system: a single Orchestrator classifies intent and routes to the appropriate destination among (1) MCP server tools, (2) specialized Strands agents, and (3) a Knowledge Base.
 
-It is written in the **Anthropic Agent Skills standard (`SKILL.md`)** format, so Claude Code, Kiro, and Amazon Quick all receive the same SKILL.md (md5-identical).
+It is written in the **Anthropic Agent Skills standard (`SKILL.md`)** format, so Claude Code, Kiro, and Codex all receive the same SKILL.md (md5-identical).
 
 ## Triggers (invoke via natural language)
 
@@ -24,7 +24,7 @@ strands-agentcore-multi-agent-skill/
 ├── README.md                                                          (this file)
 ├── claude-code/skills/strands-agentcore-multi-agent/SKILL.md          ★ identical in 3 places (md5-identical)
 ├── kiro/skills/strands-agentcore-multi-agent/SKILL.md                 ★
-├── quick/skills/strands-agentcore-multi-agent/SKILL.md                ★
+├── codex/skills/strands-agentcore-multi-agent/SKILL.md                ★
 ├── shared/                                                             ⭐ the actual knowledge (~5,000 lines)
 │   ├── reference/
 │   │   ├── architecture.md
@@ -70,11 +70,11 @@ cp -r kiro/skills/strands-agentcore-multi-agent ~/.kiro/skills/
 cp -r shared ~/.kiro/skills/strands-agentcore-multi-agent/shared
 ```
 
-### Amazon Quick
+### Codex
 ```bash
-mkdir -p ~/.quickwork/skills
-cp -r quick/skills/strands-agentcore-multi-agent ~/.quickwork/skills/
-cp -r shared ~/.quickwork/skills/strands-agentcore-multi-agent/shared
+mkdir -p ~/.agents/skills
+cp -r codex/skills/strands-agentcore-multi-agent ~/.agents/skills/
+cp -r shared ~/.agents/skills/strands-agentcore-multi-agent/shared
 ```
 
 ## Core design principles

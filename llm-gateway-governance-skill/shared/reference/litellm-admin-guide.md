@@ -179,11 +179,24 @@ you need to confirm which permission set (`org-sso`) or Cognito User Pool Group 
 resolved `team`/`team_id` on each call — see `_resolve_team_id` in
 `shared/examples/economy-tiering.md`).
 
+### 3.4 CloudWatch usage dashboard — tokens · users · time (the at-a-glance layer)
+
+The `DashboardUrl` stack output (ObservabilityStack; name = the `DashboardName` output) opens a
+pre-built dashboard fed by the `cloudwatch_usage` EMF callback — one record per request, no setup:
+
+- **Token usage by model and by team** (total/prompt/completion), **spend (USD)** by team — LiteLLM's own cost calc.
+- **Per-user tables** (Logs Insights over the LiteLLM log group): top users by tokens/spend, per-user×model drill-down. History = the log retention (2 weeks); for longer ranges use the LiteLLM UI/DB (§3.1).
+- **Usage by hour**: tokens, requests, and distinct active users per hour — who is using the gateway *when*.
+- **Latency (avg/p99) per model, failures per model, ALB requests/5xx/p95.**
+
+Raw records are queryable ad hoc: Logs Insights on the LiteLLM log group, `filter llmgw = "usage"`.
+
 ### Decision guide — which layer to check first
 
 | Symptom | Check first |
 |---|---|
 | "Is my traffic reaching the gateway at all?" | LiteLLM UI → Usage (§3.1) |
+| "Who is using how many tokens / when / at what cost?" | CloudWatch usage dashboard (§3.4) |
 | "Why did the model answer that way?" / need the actual prompt | Langfuse (§3.2, if enabled) |
 | "I get a 403 before any model call" | CloudWatch: Token Service Lambda logs (§3.3) |
 | "The whole gateway is down / 5xx on every call" | CloudWatch: ECS/LiteLLM container logs (§3.3) |

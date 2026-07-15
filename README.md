@@ -5,11 +5,11 @@
 **Multi-tool AI Skills for AWS solution patterns.**
 
 Ship the *ability* to generate a solution — not a static template.
-One source of knowledge, one `SKILL.md` per skill, deployed verbatim to **Kiro · Claude Code · Amazon Quick**.
+One source of knowledge, one `SKILL.md` per skill, deployed verbatim to **Kiro · Claude Code · Codex**.
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](./LICENSE)
 [![Skills](https://img.shields.io/badge/skills-6-orange.svg)](#-skill-catalog)
-[![Tools](https://img.shields.io/badge/tools-Kiro%20%C2%B7%20Claude%20Code%20%C2%B7%20Amazon%20Quick-232f3e.svg)](#-supported-tools)
+[![Tools](https://img.shields.io/badge/tools-Kiro%20%C2%B7%20Claude%20Code%20%C2%B7%20Codex-232f3e.svg)](#-supported-tools)
 [![Standard](https://img.shields.io/badge/spec-Anthropic%20Agent%20Skills-5A45FF.svg)](https://agentskills.io/specification)
 
 </div>
@@ -72,8 +72,8 @@ Every skill ships **the same `SKILL.md` in three locations** — one per support
                                       │
                  ┌────────────────────┼────────────────────┐
                  ▼                    ▼                    ▼
-          Kiro                 Claude Code          Amazon Quick
-        ~/.kiro/skills/      ~/.claude/skills/   ~/.quickwork/skills/
+          Kiro                 Claude Code             Codex
+        ~/.kiro/skills/      ~/.claude/skills/      ~/.agents/skills/
                  │                    │                    │
                  └──────────── identical bytes ────────────┘
                                       │
@@ -92,7 +92,7 @@ Every skill ships **the same `SKILL.md` in three locations** — one per support
 |---|---|---|
 | **Kiro** | `<skill>/kiro/skills/<name>/SKILL.md` | `~/.kiro/skills/<name>/SKILL.md` |
 | **Claude Code** | `<skill>/claude-code/skills/<name>/SKILL.md` | `~/.claude/skills/<name>/SKILL.md` |
-| **Amazon Quick** | `<skill>/quick/skills/<name>/SKILL.md` | `~/.quickwork/skills/<name>/SKILL.md` |
+| **Codex** | `<skill>/codex/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
 
 ---
 
@@ -121,12 +121,12 @@ ln -sf "$(pwd)/<skill>/shared" ~/.claude/skills/<name>/shared   # only if the sk
 </details>
 
 <details>
-<summary><b>Amazon Quick</b></summary>
+<summary><b>Codex</b></summary>
 
 ```bash
-mkdir -p ~/.quickwork/skills
-ln -sf "$(pwd)/<skill>/quick/skills/<name>" ~/.quickwork/skills/<name>
-ln -sf "$(pwd)/<skill>/shared" ~/.quickwork/skills/<name>/shared   # only if the skill has shared/
+mkdir -p ~/.agents/skills
+ln -sf "$(pwd)/<skill>/codex/skills/<name>" ~/.agents/skills/<name>
+ln -sf "$(pwd)/<skill>/shared" ~/.agents/skills/<name>/shared   # only if the skill has shared/
 ```
 </details>
 
@@ -145,7 +145,7 @@ Once installed, start your tool and use a trigger phrase from the catalog (e.g. 
 ├── README.md                                       ← skill overview
 ├── kiro/skills/<name>/SKILL.md                     ★ md5-identical to ↓
 ├── claude-code/skills/<name>/SKILL.md              ★ canonical source (Anthropic Skills format)
-├── quick/skills/<name>/SKILL.md                    ★ md5-identical to ↑
+├── codex/skills/<name>/SKILL.md                    ★ md5-identical to ↑
 ├── shared/                                         ← single source of deep knowledge
 │   ├── reference/
 │   ├── patterns/
@@ -160,7 +160,7 @@ Once installed, start your tool and use a trigger phrase from the catalog (e.g. 
 ├── README.md
 ├── kiro/skills/<name>/SKILL.md                     ★ md5-identical
 ├── claude-code/skills/<name>/SKILL.md              ★ canonical source, ~50–60 KB self-contained
-└── quick/skills/<name>/SKILL.md                    ★ md5-identical
+└── codex/skills/<name>/SKILL.md                    ★ md5-identical
 ```
 
 Full specification: [`shared-spec/skill-structure.md`](./shared-spec/skill-structure.md).
