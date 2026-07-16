@@ -195,6 +195,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets'; // Platform.LINUX_ARM64 pin for ContainerImage.fromAsset() — see constraints.md "Docker build architecture mismatch on x86 hosts"
 
 /**
  * NetworkStack — VPC + shared-infra security groups + endpoints.
@@ -949,7 +950,18 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
     this.logGroup = logGroup;
 
     taskDef.addContainer('litellm', {
-      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '..', 'services', 'litellm')),
+      // WHY `platform: Platform.LINUX_ARM64`: ecs.ContainerImage.fromAsset() runs a local `docker
+      // build` on whatever machine executes `cdk deploy`, and Docker defaults to building for the
+      // HOST's own architecture. runtimePlatform above hard-codes ARM64 (Graviton) for the Fargate
+      // task, so on an x86_64 deploy host (Windows/Intel-Mac/x86 CI) an unpinned build silently
+      // produces an amd64 image. The stack still deploys successfully (ECR does not validate image
+      // architecture against the task definition) and the mismatch only surfaces at task launch as
+      // `exec format error` in CloudWatch Logs — see constraints.md "Docker build architecture
+      // mismatch on x86 hosts". Pin `platform` explicitly so the build always matches
+      // `runtimePlatform.cpuArchitecture`, regardless of the deploy host's own architecture.
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '..', 'services', 'litellm'), {
+        platform: ecrAssets.Platform.LINUX_ARM64,
+      }),
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'litellm', logGroup }),
       portMappings: [{ containerPort: PORTS.LITELLM }],
       environment: {

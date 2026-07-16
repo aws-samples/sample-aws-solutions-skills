@@ -117,6 +117,72 @@ GPT-5.x (Mantle) is **us-east-1 only**; reach it privately via cross-region VPC 
 - **Verify after every deploy touching the ALB/listeners** — do not assume the flag alone proves it: `aws ec2 describe-security-groups --group-ids <PublicAlbSg-id>` and confirm the ingress rule list contains **only** the intended CIDR(s), with no stray `0.0.0.0/0` entry. This is a synth-time-invisible bug (no warning, no error) that only shows up by inspecting the deployed SG.
 
 
+## Docker build architecture mismatch on x86 hosts (real-deploy incident — ECS tasks crash-loop)
+
+`ecs.ContainerImage.fromAsset(...)` (LiteLLM, and Langfuse if it also builds from source) runs a
+**local `docker build`/`buildx` on the machine executing `cdk deploy`**. CDK does not pin the build
+platform by default — Docker builds for the **host's own architecture**. The Fargate task definitions
+in this skill hard-code `runtimePlatform.cpuArchitecture: ecs.CpuArchitecture.ARM64` (Graviton, for
+cost). On an **x86_64 Windows/Linux/Intel-Mac deploy host**, this mismatch is silent at build and synth
+time — `docker build` succeeds, `cdk deploy` succeeds, the CloudFormation stack reaches
+`UPDATE_COMPLETE` — and only then does ECS fail to start the task:
+
+- **Symptom**: the LiteLLM (or Langfuse) service never reaches steady state. `aws ecs describe-services`
+  shows the deployment stuck with `runningCount: 0` and repeated task stops; the circuit breaker
+  eventually triggers an automatic **rollback** (Hard Constraint — see "Pinned-image CLI flags" above for
+  the general diagnosis pattern). `aws ecs describe-tasks` on a stopped task shows
+  `stoppedReason: "CannotPullContainerError"` or, if the pull succeeds, the container **exits immediately**
+  with `exec /usr/local/bin/entrypoint.sh: exec format error` (or `standard_init_linux.go:...: exec user
+  process caused: exec format error`) in the very first CloudWatch log line — because the kernel is being
+  asked to run an amd64 binary on an ARM64 (Graviton) Fargate instance.
+- **This is easy to misdiagnose as an application bug** because the error string mentions the entrypoint,
+  not "architecture" or "platform" — check the **image manifest architecture** before debugging application
+  logic: `docker inspect --format '{{.Architecture}}' <local-image>` (or, post-push,
+  `aws ecr describe-images` / `docker buildx imagetools inspect <ecr-uri>:<tag>` shows per-platform
+  manifests). If it says `amd64` while the task definition says `ARM64`, this is the root cause.
+- **Fix — force the build platform to match `runtimePlatform` regardless of the deploy host's own
+  architecture.** `ecs.ContainerImage.fromAsset()` accepts a `platform` option
+  (`ecrAssets.Platform.LINUX_ARM64` / `ecrAssets.Platform.LINUX_AMD64`) that is passed through to Docker as
+  `--platform`; set it explicitly instead of relying on the host default:
+  ```typescript
+  import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
+
+  taskDef.addContainer('litellm', {
+    image: ecs.ContainerImage.fromAsset(
+      path.join(__dirname, '..', 'services', 'litellm'),
+      { platform: Platform.LINUX_ARM64 }, // MUST match runtimePlatform.cpuArchitecture above
+    ),
+    // ...
+  });
+  ```
+  Apply the same `platform` option to every `ContainerImage.fromAsset()` call in the app (LiteLLM, and
+  Langfuse's Dockerfile build if `enableLangfuse=true`) — a mismatch on either stack reproduces the same
+  crash-loop independently.
+- **Why this bites Windows x86 hosts specifically**: Docker Desktop on Windows/Intel builds natively for
+  `linux/amd64` and does not cross-build to `arm64` unless QEMU emulation is available and the `platform`
+  flag is passed. Without `platform` set in CDK, `docker build` silently produces an amd64 image, `docker
+  push`/CDK's asset publishing silently accepts it (ECR does not validate architecture against the task
+  definition), and the mismatch surfaces only at ECS task launch — many minutes and a full deploy cycle
+  later. Apple Silicon (arm64) hosts do NOT hit this bug (host arch already matches Graviton), which is why
+  it is easy to miss in local testing on an M-series Mac and only appears when a teammate deploys from an
+  Intel/Windows machine or from x86_64 CI.
+- **Cross-building ARM64 images from an x86 host requires QEMU emulation** (`docker buildx` sets this up
+  automatically on Docker Desktop; on Linux, install `binfmt` support: `docker run --privileged --rm
+  tonistiigi/binfmt --install arm64`). Expect the build step to be noticeably slower under emulation — this
+  is expected, not a new failure.
+- **Verify before considering the deploy done**, not just after `cdk deploy` returns 0:
+  ```bash
+  aws ecs describe-services --cluster <cluster> --services <service> \
+    --query 'services[0].deployments[0].{running:runningCount,desired:desiredCount,rolloutState:rolloutState}'
+  # rolloutState should reach COMPLETED with running == desired; if it is stuck at IN_PROGRESS
+  # or the service rolled back, check CloudWatch Logs for exec format error before anything else.
+  ```
+- If switching `platform` requires a same-architecture alternative instead (e.g., a locked-down
+  environment where ARM64 emulation is unavailable or too slow), the other valid fix is to set
+  `runtimePlatform.cpuArchitecture: ecs.CpuArchitecture.X86_64` on the Fargate task definition to match the
+  deploy host — but this gives up the Graviton cost/perf advantage documented elsewhere in this skill, so
+  prefer fixing the build `platform` instead unless there is a specific reason to standardize on x86_64.
+
 ## Data
 
 - `removalPolicy: DESTROY` + deletion protection off is intentional for a tear-downable dev sample. **Production: `RETAIN` + backups + deletion protection.**

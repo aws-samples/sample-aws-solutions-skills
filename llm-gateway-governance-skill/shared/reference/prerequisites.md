@@ -24,7 +24,7 @@ See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -
 
 | Tool | Minimum version | Why | Verify |
 |---|---|---|---|
-| **Docker** (or Docker Desktop / Podman with Docker socket compat) | Any recent version, **daemon running** | `LiteLLMStack` builds the proxy image via CDK `fromAsset` (`services/litellm/Dockerfile`) at `cdk deploy` time — no daemon, no deploy | `docker info` succeeds |
+| **Docker** (or Docker Desktop / Podman with Docker socket compat) | Any recent version, **daemon running**, cross-arch build support (see note below) | `LiteLLMStack` builds the proxy image via CDK `fromAsset` (`services/litellm/Dockerfile`) at `cdk deploy` time — no daemon, no deploy | `docker info` succeeds |
 | **Node.js** | 18.x or 20.x LTS | CDK app + `npm`/`npx` toolchain | `node -v` |
 | **AWS CDK CLI** | v2 (`aws-cdk` npm package), matching the `aws-cdk-lib` pinned in `package.json` | `cdk synth`/`cdk deploy`/`cdk bootstrap` | `cdk --version` |
 | **AWS CLI** | v2 | SSO login, CLI verification calls (`sso-admin`, `identitystore`, `ec2 describe-vpc-endpoint-services`, `rds describe-db-engine-versions`) used throughout Phase 1–5 | `aws --version` |
@@ -32,6 +32,23 @@ See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -
 
 > Docker is the most common first-run blocker: `cdk deploy` fails late (after synth succeeds) with a Docker
 > daemon connection error if it isn't running. Start Docker before Phase 5, not after a failed deploy.
+
+> ⚠️ **Deploying from an x86_64 host (Windows, Intel Mac, x86 CI/CD)**: the Fargate task definitions in
+> this skill target **ARM64 (Graviton)** for cost. The generated CDK pins the Docker build to
+> `Platform.LINUX_ARM64` explicitly (see `shared/patterns/cdk-stacks.md` / `constraints.md`), so a correct
+> deploy cross-builds the ARM64 image even from an x86_64 host — but that cross-build requires **QEMU
+> emulation**, which is not automatic everywhere:
+> - **Docker Desktop (Windows/macOS)**: ships with `buildx` + QEMU emulation pre-configured — cross-builds
+>   work out of the box, just noticeably slower than a native build. No extra setup needed.
+> - **Linux (native Docker Engine, incl. most x86_64 CI runners)**: install `binfmt` emulation once per host
+>   before the first deploy: `docker run --privileged --rm tonistiigi/binfmt --install arm64`. Without this,
+>   `docker buildx build --platform linux/arm64` fails or silently falls back to the host architecture.
+> - **If a generated project's CDK does NOT pin `platform`** (e.g. an older generated project, or a
+>   hand-edited stack): the build silently produces an **amd64** image, `cdk deploy` still succeeds, and the
+>   failure only appears afterward as ECS tasks crash-looping with `exec format error` in CloudWatch Logs —
+>   not at build or synth time. See `shared/reference/constraints.md` → "Docker build architecture mismatch
+>   on x86 hosts" for the full symptom signature and fix. Verify the image architecture before debugging
+>   anything else: `docker inspect --format '{{.Architecture}}' <local-image>` should print `arm64`.
 
 ### 1.1 Install + verify, per OS
 
@@ -161,3 +178,4 @@ Only relevant if you plan to answer "yes" to the Phase 1 Observability question.
 - [ ] IdC is enabled; identity source known; at least one group/user available to assign
 - [ ] (`certMode=acm` only) domain ready — an existing regional ACM ARN, or a Route53 hosted zone (CDK issues the cert in `config.awsRegion`); (both modes) the source CIDRs for `litellm.albIngressCidrs` are known
 - [ ] Can run `cdk bootstrap` in the gateway region **and** us-east-1
+- [ ] (x86_64 deploy host only) QEMU/binfmt cross-arch emulation is available so the ARM64 Docker build succeeds — after deploy, confirm with `docker inspect --format '{{.Architecture}}' <local-image>` → `arm64`, and `aws ecs describe-services` shows `rolloutState: COMPLETED` with no crash-looping tasks
