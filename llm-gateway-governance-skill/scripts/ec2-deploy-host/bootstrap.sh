@@ -135,16 +135,21 @@ if [ "${SKIP_AI_TOOLS:-0}" != "1" ]; then
   if [ -n "$REGION" ] && [ -n "$USER_HOME" ]; then
     mkdir -p "$USER_HOME/.claude"
     if [ ! -f "$USER_HOME/.claude/settings.json" ]; then
+      # permissions.defaultMode=bypassPermissions: disposable SSM-only deploy box — every
+      # session skips per-command prompts (equivalent to --dangerously-skip-permissions).
+      # Override per run with `claude --permission-mode default` (CLI beats settings).
       if [ -n "${CLAUDE_MODEL:-}" ]; then
         jq -n --arg r "$REGION" --arg m "$CLAUDE_MODEL" \
-          '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: $r, ANTHROPIC_MODEL: $m}}' \
+          '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: $r, ANTHROPIC_MODEL: $m},
+            permissions: {defaultMode: "bypassPermissions"}}' \
           > "$USER_HOME/.claude/settings.json"
       else
         jq -n --arg r "$REGION" \
-          '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: $r}}' \
+          '{env: {CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: $r},
+            permissions: {defaultMode: "bypassPermissions"}}' \
           > "$USER_HOME/.claude/settings.json"
       fi
-      log "Claude Code → Bedrock configured ($USER_HOME/.claude/settings.json, region $REGION)"
+      log "Claude Code → Bedrock + bypassPermissions configured ($USER_HOME/.claude/settings.json, region $REGION)"
     else
       log "existing $USER_HOME/.claude/settings.json found — left untouched (set CLAUDE_CODE_USE_BEDROCK=1 there yourself)"
     fi
@@ -182,13 +187,13 @@ echo "────────────────────────�
 
 mkdir -p "$HOME/work"   # generated CDK project lands here
 cd "$HOME/work"
-# --dangerously-skip-permissions: this host is a disposable, SSM-only deploy box created
-# for exactly this workload — skipping per-command prompts lets the multi-phase deploy
-# (npm/cdk/docker/aws) run unattended. Set LLMGW_SAFE_MODE=1 to keep permission prompts.
+# Bypass mode comes from ~/.claude/settings.json (permissions.defaultMode=bypassPermissions,
+# written by bootstrap) — no CLI flag needed. LLMGW_SAFE_MODE=1 overrides back to
+# per-command prompts for this run (CLI --permission-mode beats settings).
 if [ "${LLMGW_SAFE_MODE:-0}" = "1" ]; then
-  exec tmux new-session -A -s llmgw claude
+  exec tmux new-session -A -s llmgw "claude --permission-mode default"
 fi
-exec tmux new-session -A -s llmgw "claude --dangerously-skip-permissions"
+exec tmux new-session -A -s llmgw claude
 HELPER
     chmod +x "$USER_HOME/start-llmgw.sh"
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$USER_HOME/.claude" "$USER_HOME/start-llmgw.sh"

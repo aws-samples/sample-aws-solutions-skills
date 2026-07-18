@@ -112,9 +112,10 @@ Code, then prints the same verify block as `prerequisites.md` §1.2. On an x86_6
 ARM64 binfmt emulation automatically. It additionally:
 
 - writes `~/.claude/settings.json` with `CLAUDE_CODE_USE_BEDROCK=1` + the instance's region — Claude
-  Code authenticates to **Bedrock via the instance role**, no API key, no login (an existing
-  `settings.json` is never overwritten). Pin a model with `CLAUDE_MODEL=<bedrock-inference-profile-id>
-  sudo -E bash bootstrap.sh`; by default Claude Code picks its own Bedrock default model.
+  Code authenticates to **Bedrock via the instance role**, no API key, no login — and
+  `permissions.defaultMode: "bypassPermissions"` (an existing `settings.json` is never overwritten).
+  Pin a model with `CLAUDE_MODEL=<bedrock-inference-profile-id> sudo -E bash bootstrap.sh`; by
+  default Claude Code picks its own Bedrock default model.
 - writes `~/start-llmgw.sh` (see §5) and a login hint in the message-of-the-day.
 
 ## 4. Connect — SSM only
@@ -148,10 +149,15 @@ then (4) starts **Claude Code inside tmux session `llmgw`** with `~/work` as the
 (the generated CDK project lands there). If the session already exists it re-attaches, so re-running
 after an SSM disconnect drops you back into the live deploy. Detach with `Ctrl-b d`.
 
-Claude Code starts with `--dangerously-skip-permissions` (bypass mode): this host is a disposable,
-single-purpose, SSM-only deploy box, and skipping per-command approval lets the long multi-phase
-deploy (npm/cdk/docker/aws calls) run unattended. If you'd rather approve each command — e.g. on a
-shared or long-lived host — start with `LLMGW_SAFE_MODE=1 ./start-llmgw.sh`.
+Claude Code starts in **bypass-permissions mode**, set declaratively in `~/.claude/settings.json`
+(`permissions.defaultMode: "bypassPermissions"`, written by bootstrap — no CLI flag): this host is a
+disposable, single-purpose, SSM-only deploy box, and skipping per-command approval lets the long
+multi-phase deploy (npm/cdk/docker/aws calls) run unattended. On the very first interactive session
+Claude Code shows a one-time acknowledgement dialog for this mode — accept it once. If you'd rather
+approve each command — e.g. on a shared or long-lived host — start with
+`LLMGW_SAFE_MODE=1 ./start-llmgw.sh` (passes `--permission-mode default`, which overrides the
+settings file for that run). Note bypass mode applies to *every* `claude` session on this host, not
+just ones started by the helper.
 
 Manual fallback (no helper): the repo `README.md` → Install has the `git clone` + `ln -sf` commands;
 run `claude` inside your own `tmux` session. (Repo with no reachable remote? `aws s3 cp` a tarball
