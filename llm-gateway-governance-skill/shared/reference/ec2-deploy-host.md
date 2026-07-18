@@ -148,6 +148,11 @@ then (4) starts **Claude Code inside tmux session `llmgw`** with `~/work` as the
 (the generated CDK project lands there). If the session already exists it re-attaches, so re-running
 after an SSM disconnect drops you back into the live deploy. Detach with `Ctrl-b d`.
 
+Claude Code starts with `--dangerously-skip-permissions` (bypass mode): this host is a disposable,
+single-purpose, SSM-only deploy box, and skipping per-command approval lets the long multi-phase
+deploy (npm/cdk/docker/aws calls) run unattended. If you'd rather approve each command — e.g. on a
+shared or long-lived host — start with `LLMGW_SAFE_MODE=1 ./start-llmgw.sh`.
+
 Manual fallback (no helper): the repo `README.md` → Install has the `git clone` + `ln -sf` commands;
 run `claude` inside your own `tmux` session. (Repo with no reachable remote? `aws s3 cp` a tarball
 through a bucket, or `rsync` over the SSH-over-SSM setup from §4.)

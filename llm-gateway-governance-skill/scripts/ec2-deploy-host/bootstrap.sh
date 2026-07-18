@@ -182,7 +182,13 @@ echo "────────────────────────�
 
 mkdir -p "$HOME/work"   # generated CDK project lands here
 cd "$HOME/work"
-exec tmux new-session -A -s llmgw claude
+# --dangerously-skip-permissions: this host is a disposable, SSM-only deploy box created
+# for exactly this workload — skipping per-command prompts lets the multi-phase deploy
+# (npm/cdk/docker/aws) run unattended. Set LLMGW_SAFE_MODE=1 to keep permission prompts.
+if [ "${LLMGW_SAFE_MODE:-0}" = "1" ]; then
+  exec tmux new-session -A -s llmgw claude
+fi
+exec tmux new-session -A -s llmgw "claude --dangerously-skip-permissions"
 HELPER
     chmod +x "$USER_HOME/start-llmgw.sh"
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$USER_HOME/.claude" "$USER_HOME/start-llmgw.sh"
