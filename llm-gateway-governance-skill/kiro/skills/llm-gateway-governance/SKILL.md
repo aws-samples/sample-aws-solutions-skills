@@ -47,6 +47,7 @@ not, which models, which tiers, **which region**, web search on/off).
 Read these before generating. All real knowledge lives in `shared/`:
 
 - `shared/reference/prerequisites.md` — **check before Phase 1**: local tooling (Docker, Node, CDK CLI, AWS CLI), AWS account access/IAM, Bedrock model access, IdC readiness, custom-domain/Route53 needs
+- `shared/reference/ec2-deploy-host.md` — run the skill from an **EC2 deploy host** instead of a laptop (Graviton → native ARM64 build, instance-profile credentials, SSM-only access, headless AI-tool auth); scripts in `scripts/ec2-deploy-host/`. Offer this when the operator's local machine can't satisfy the tooling prerequisites (no Docker, x86-only, unstable network)
 - `shared/reference/architecture.md` — the **10-stack** architecture, request lifecycle, and the "why"
 - `shared/reference/decision-tree.md` — map Discovery answers → `config/dev.json` + stack choices (region, web search, Mantle)
 - `shared/reference/aws-services.md` — service/model catalog (verify volatile IDs via MCP)

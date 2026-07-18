@@ -22,6 +22,11 @@ See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -
 
 ## 1. Local tooling
 
+> 💡 **No suitable local machine?** This whole section can run on an **EC2 deploy host** instead —
+> a Graviton instance builds the ARM64 image natively (no QEMU), the instance profile replaces local
+> AWS credentials, and access is SSM-only. See `shared/reference/ec2-deploy-host.md` for the manual
+> plus launch/bootstrap scripts (`scripts/ec2-deploy-host/`). Sections §2-§5 below apply either way.
+
 | Tool | Minimum version | Why | Verify |
 |---|---|---|---|
 | **Docker** (or Docker Desktop / Podman with Docker socket compat) | Any recent version, **daemon running**, cross-arch build support (see note below) | `LiteLLMStack` builds the proxy image via CDK `fromAsset` (`services/litellm/Dockerfile`) at `cdk deploy` time — no daemon, no deploy | `docker info` succeeds |

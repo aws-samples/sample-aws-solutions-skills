@@ -77,7 +77,7 @@ This skill generates a complete CDK app:
 ## Knowledge sources
 
 All real knowledge lives in [`shared/`](./shared/):
-- `shared/reference/` — **prerequisites** (Docker/CLI/IAM/Bedrock model access/IdC readiness), architecture, decision tree, AWS service/model catalog, constraints, SSO setup, **LiteLLM admin operations** (Admin UI login, team/user creation via SSO mapping, log/trace inspection, budget management)
+- `shared/reference/` — **prerequisites** (Docker/CLI/IAM/Bedrock model access/IdC readiness), **EC2 deploy host** (run the skill from a Graviton EC2 instance instead of a laptop — see also `scripts/ec2-deploy-host/`), architecture, decision tree, AWS service/model catalog, constraints, SSO setup, **LiteLLM admin operations** (Admin UI login, team/user creation via SSO mapping, log/trace inspection, budget management)
 - `shared/patterns/` — CDK stacks, Lambda handlers, LiteLLM gateway config, developer onboarding
 - `shared/examples/` — industry/domain instantiations
 
@@ -90,6 +90,7 @@ llm-gateway-governance-skill/
 ├── kiro/skills/llm-gateway-governance/SKILL.md            (md5-identical)
 ├── codex/skills/llm-gateway-governance/SKILL.md           (md5-identical)
 ├── shared/{reference,patterns,examples}/
+├── scripts/ec2-deploy-host/                                (launch + bootstrap an EC2 deploy host)
 └── evals/<scenario>.md
 ```
 
