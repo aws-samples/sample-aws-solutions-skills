@@ -1,4 +1,15 @@
 <!DOCTYPE html>
+<!--
+  developer-setup.html.tmpl — token-ized template consumed by scripts/gen-onboarding.py.
+  Tokens: https://llmgw.example.com us-east-1 cognito-native acm claude-opus-4-8 claude-sonnet-5
+          claude-haiku-4-5 claude-fable-5 gpt-5.5 ./scripts/get-gateway-token.sh ./scripts/get-gateway-token.sh py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" token
+          ~/.llm-gateway/get-mcp-headers.sh py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" mcp-headers llmgw-login
+  Conditional blocks (stripped by the generator when the condition does not match the deploy):
+           ... 
+           ... 
+           ... 
+  Contains NO admin secrets — safe to distribute to every developer.
+-->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -35,8 +46,6 @@
   .note{border-left:4px solid var(--teal);background:rgba(45,212,191,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:12px 0;font-size:14.5px}
   .variant{border-left:4px solid var(--purple);background:rgba(139,92,246,.08);border-radius:0 10px 10px 0;padding:10px 15px;margin:10px 0}
   .variant .t{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#c4b5fd;font-weight:800;margin-bottom:4px}
-  .tag{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:20px;background:rgba(59,130,246,.18);
-    border:1px solid rgba(59,130,246,.4);color:#bcd7ff;margin-left:6px;vertical-align:middle}
   .foot{margin-top:40px;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);color:#8299b5;font-size:13px}
   a{color:#8bd0ff}
 </style>
@@ -45,15 +54,15 @@
 <div class="wrap">
   <span class="kicker">Developer Onboarding</span>
   <h1>LLM Gateway — <span class="g">개발자 설정 가이드</span></h1>
-  <p class="lead">사내 LLM 게이트웨이를 통해 <b>Claude Code</b> 와 <b>Codex</b> 에서 승인된 모델을 사용하는 방법입니다. 관리자가 배포한 값으로 채워져 있습니다.</p>
+  <p class="lead">사내 LLM 게이트웨이를 통해 <b>Claude Code</b> 와 <b>Codex</b> 에서 승인된 모델을 사용하는 방법입니다.</p>
 
   <div class="card">
     <table>
       <tr><th>항목</th><th>값</th></tr>
       <tr><td>게이트웨이 URL</td><td><b>https://llmgw.example.com</b></td></tr>
       <tr><td>리전</td><td>us-east-1</td></tr>
-      <tr><td>사용 가능 모델</td><td><code>claude-opus</code> · <code>claude-sonnet</code> · <code>claude-haiku</code> · <code>claude-fable</code> · <code>gpt-5.5</code></td></tr>
-      <tr><td>로그인 방식</td><td>Cognito Hosted UI (<code>llmgw-login</code>) <span class="tag">authMode에 따라 상이</span></td></tr>
+      <tr><td>사용 가능 모델</td><td><code>claude-opus-4-8</code> · <code>claude-sonnet-5</code> · <code>claude-haiku-4-5</code> · <code>claude-fable-5</code> · <code>gpt-5.5</code></td></tr>
+      <tr><td>인증 모드 / TLS</td><td>cognito-native / acm</td></tr>
     </table>
     <div class="note">가상 키(virtual key)는 로그인 후 토큰 헬퍼가 자동 발급/회전합니다. <b>키를 직접 붙여넣지 마세요.</b> 설정 파일을 손으로 편집할 필요도 없습니다 — 아래 <b>생성된 스크립트를 실행</b>하면 모두 자동으로 구성됩니다.</div>
   </div>
@@ -71,35 +80,43 @@
   <div class="note">기존 설정은 <b>병합</b>됩니다(다른 도구의 hooks/plugins 등 보존) — 실행 전 상태는 매번 <code>*.llmgw-backup-&lt;timestamp&gt;</code> 로 자동 백업됩니다.</div>
 
   <h2><span class="n">2</span> 로그인 (가상 키 발급 준비)</h2>
+  
   <div class="variant">
-    <div class="t">authMode: cognito-native (Org SSO 미사용 환경)</div>
-    <p><code>llmgw-login</code> 실행 → 브라우저에 <b>Cognito Hosted UI</b>(이메일/비밀번호)가 열립니다. 로그인하면 토큰이 로컬에 캐시됩니다. <b>AWS CLI·자격증명 불필요.</b></p>
+    <div class="t">authMode: cognito-native</div>
+    <p><code>llmgw-login</code> 실행 → 브라우저에 <b>Cognito Hosted UI</b>(이메일/비밀번호)가 열립니다. 토큰이 로컬 캐시됩니다. <b>AWS CLI·자격증명 불필요.</b></p>
     <pre>llmgw-login          <span class="c"># Windows: llmgw-login.ps1</span></pre>
   </div>
+  
+  
   <div class="variant">
-    <div class="t">authMode: org-sso (IdC 조직 인스턴스)</div>
+    <div class="t">authMode: org-sso</div>
     <p>SSO 프로필로 로그인합니다(1단계 스크립트가 <code>llm-gateway</code> 프로필을 만들어 둡니다). 토큰 헬퍼가 SigV4로 서명합니다.</p>
     <pre>aws sso login --profile llm-gateway</pre>
   </div>
+  
 
-  <h2><span class="n">3</span> 게이트웨이 접속 <span class="tag">certMode: http 일 때만</span></h2>
-  <p>도메인 없는 PoC 배포(<b>certMode: http</b>)는 게이트웨이가 <b>HTTP(평문)</b> 로 서비스됩니다 — 가상 키와 프롬프트가 암호화 없이 전송되므로 PoC 용도로만 사용하세요. 접근은 허용된 사내 IP 대역(Security Group allowlist)에서만 가능합니다. 별도의 인증서 신뢰나 터널 설정은 필요 없습니다.</p>
-  <div class="note"><b>certMode: acm</b>(공인 인증서) 환경이면 이 단계는 건너뜁니다 — 공인 신뢰라 아무 설정도 필요 없습니다. http 환경에서 접속이 안 되면 현재 네트워크의 공인 IP가 관리자에게 등록된 허용 CIDR에 포함되는지 확인하세요.</div>
+  
+  <h2><span class="n">3</span> 게이트웨이 접속 (HTTP — PoC 전용)</h2>
+  <p>이 게이트웨이는 <b>HTTP(평문)</b> 로 서비스됩니다 — 가상 키와 프롬프트가 암호화 없이 전송되므로 PoC 용도로만 사용하세요. 접근은 허용된 사내 IP 대역(Security Group allowlist)에서만 가능합니다. 별도의 인증서 신뢰나 터널 설정은 필요 없습니다 — <code>https://llmgw.example.com</code> 로 바로 접속합니다.</p>
+  <div class="note">접속이 안 되면 현재 네트워크의 공인 IP가 관리자에게 등록된 허용 CIDR에 포함되는지 확인하세요.</div>
+  
 
   <h2><span class="n">4</span> 웹 검색 MCP 등록 (Claude Code)</h2>
   <p>서버 측 등록만으로는 클라이언트에서 안 보입니다. 아래 명령 한 번으로 등록하세요 — <code>headersHelper</code> 가 회전 키를 동적 주입합니다.</p>
   <pre>claude mcp add-json websearch '{
   "type": "http",
   "url": "https://llmgw.example.com/mcp/",
-  "headersHelper": "./scripts/get-mcp-headers.sh"
-}'</pre>
+  "headersHelper": "~/.llm-gateway/get-mcp-headers.sh"
+}'
+<span class="c"># Windows에서는 headersHelper 를 다음으로 바꾸세요 (setup 이 %USERPROFILE%\.llm-gateway 에 헬퍼를 설치합니다):
+#   "headersHelper": "py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" mcp-headers"</span></pre>
   <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
 
   <h2><span class="n">5</span> 동작 확인 — <code>healthcheck</code> 실행</h2>
   <pre>./scripts/healthcheck.sh          <span class="c"># Windows: .\scripts\healthcheck.ps1</span>
 <span class="c"># 토큰 발급 → https://llmgw.example.com/v1/models 호출까지 자동 검증
-# 기대: claude-opus/sonnet/haiku/fable + gpt-5.5 목록</span></pre>
-  <p>이제 <code>claude</code> / <code>codex</code> 를 실행하면 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
+# 기대: claude-opus-4-8/claude-sonnet-5/claude-haiku-4-5/claude-fable-5 + gpt-5.5 목록</span></pre>
+  <p>이제 <code>claude</code> / <code>codex</code> 실행 시 호출이 게이트웨이로 나가고, 사용량은 관리자 대시보드에 집계됩니다.</p>
 
   <h2><span class="n">6</span> 참고 — 스크립트가 병합하는 설정 (수동 확인용)</h2>
   <p>1단계 스크립트가 병합하는 내용입니다. <b>직접 편집할 필요는 없고</b>, 문제가 생겼을 때 아래 값이 들어갔는지 확인하는 용도입니다.</p>
@@ -108,12 +125,13 @@
   "env": {
     "ANTHROPIC_BASE_URL": "https://llmgw.example.com",
     "AWS_REGION": "us-east-1",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL":   "claude-opus",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "claude-haiku",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL":  "claude-fable"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL":   "claude-opus-4-8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "claude-haiku-4-5",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL":  "claude-fable-5"
   },
   "apiKeyHelper": "./scripts/get-gateway-token.sh",
+  <span class="c">// Windows: setup 이 apiKeyHelper 를 python 절대경로 형태로 기록합니다 — 예: py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" token</span>
   "permissions": { "deny": ["WebSearch"] }
 }
 
@@ -130,11 +148,11 @@ wire_api = "responses"
 command = "./scripts/get-gateway-token.sh"
 refresh_interval_ms = 300000
 timeout_ms = 5000</pre>
-  <div class="note">수동으로 확인하고 싶으면: <code>curl -s https://llmgw.example.com/v1/models -H "Authorization: Bearer $(./scripts/get-gateway-token.sh)"</code></div>
+  <div class="note">수동으로 확인하고 싶으면: <code>curl -s https://llmgw.example.com/v1/models -H "Authorization: Bearer $(./scripts/get-gateway-token.sh)"</code><br>
+  Windows PowerShell: <code>curl.exe -s https://llmgw.example.com/v1/models -H "Authorization: Bearer $(py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" token)"</code></div>
 
   <div class="foot">
-    문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 포함되지 않습니다 — 여러분의 가상 키는 로그인으로 자동 발급됩니다.<br>
-    <em>(예시 값으로 렌더링된 미리보기입니다. 실제 배포 시 관리자가 배포값으로 채운 문서를 받게 됩니다.)</em>
+    문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 없습니다 — 가상 키는 로그인으로 자동 발급됩니다.
   </div>
 </div>
 </body>

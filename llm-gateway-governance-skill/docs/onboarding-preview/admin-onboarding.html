@@ -1,4 +1,17 @@
 <!DOCTYPE html>
+<!--
+  admin-onboarding.html.tmpl — token-ized template consumed by scripts/gen-onboarding.py.
+  OPERATOR-ONLY. Contains real secret values once filled (LiteLLM master key, Langfuse admin
+  password). The generator writes the filled file with 0600 perms and prints a "do not share/commit"
+  warning; add the output path to .gitignore.
+  Tokens: https://llmgw.example.com https://llmgw.example.com/ui/ https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth/token https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=llmgw-dev-dashboard https://langfuse.example.com us-east-1
+          cognito-native acm us-east-1_ABC123XYZ 1a2b3c4d5e6f7g8h9i0j llmgw-auth.auth.us-east-1.amazoncognito.com
+          https://cognito-idp.us-east-1.amazonaws.com/us-east-1_ABC123XYZ llmgw- https://d-1234567890.awsapps.com/start 111122223333 LlmGatewayUser
+          sk-Xy9EXAMPLEmasterKEYdoNOTshare llmgw-litellm-admin-key admin@example.com Adm1n-EXAMPLE-pw
+          llmgw-langfuse-admin llmgw-litellm litellm llmgw-team1
+  Conditional blocks: ..  ..
+                      ..
+-->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -57,9 +70,11 @@
       <tr><td>게이트웨이 URL (개발자 base URL)</td><td><b>https://llmgw.example.com</b></td></tr>
       <tr><td>LiteLLM Admin UI</td><td><b>https://llmgw.example.com/ui/</b></td></tr>
       <tr><td>Token Service</td><td class="mono">https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth/token</td></tr>
-      <tr><td>Langfuse</td><td>https://langfuse.example.com <span style="color:#8299b5">(enableLangfuse=true 일 때)</span></td></tr>
+      <tr><td>CloudWatch 사용량 대시보드</td><td class="mono">https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=llmgw-dev-dashboard</td></tr>
+      <tr><td>Langfuse</td><td>https://langfuse.example.com</td></tr>
       <tr><td>리전 / authMode / certMode</td><td>us-east-1 / <b>cognito-native</b> / <b>acm</b></td></tr>
     </table>
+    
     <h3>신원 (cognito-native)</h3>
     <table>
       <tr><td>Cognito User Pool ID</td><td class="mono">us-east-1_ABC123XYZ</td></tr>
@@ -68,75 +83,88 @@
       <tr><td>Issuer</td><td class="mono">https://cognito-idp.us-east-1.amazonaws.com/us-east-1_ABC123XYZ</td></tr>
       <tr><td>Team Group Prefix</td><td><code>llmgw-</code> <span style="color:#8299b5">(이 접두어 그룹 = LiteLLM 팀)</span></td></tr>
     </table>
-    <div class="note"><b>org-sso 배포</b>였다면 이 표 대신 SSO Start URL / Account / Role / Permission Set 이 표시됩니다.</div>
+    
+    
+    <h3>신원 (org-sso)</h3>
+    <table>
+      <tr><td>SSO Start URL</td><td class="mono">https://d-1234567890.awsapps.com/start</td></tr>
+      <tr><td>Account ID</td><td class="mono">111122223333</td></tr>
+      <tr><td>Permission Set / Role</td><td class="mono">LlmGatewayUser</td></tr>
+    </table>
+    
   </div>
 
   <h2><span class="n">2</span> 시크릿 (실제값 — 취급 주의)</h2>
   <div class="secret">
     <table>
-      <tr><th>시크릿</th><th>값</th><th>보관 위치</th></tr>
-      <tr><td>LiteLLM 마스터 키<br><span style="color:#8299b5">(Admin UI 로그인 = 전체 관리자)</span></td><td class="mono">sk-Xy9EXAMPLEmasterKEYdoNOTshare</td><td class="mono">SM: llmgw-litellm-admin-key</td></tr>
-      <tr><td>Langfuse 관리자</td><td class="mono">admin@example.com / P@ssEXAMPLE!</td><td class="mono">SM: llmgw-langfuse-admin</td></tr>
+      <tr><th>시크릿</th><th>값</th><th>보관 위치 (Secrets Manager)</th></tr>
+      <tr><td>LiteLLM 마스터 키<br><span style="color:#8299b5">(Admin UI 로그인 = 전체 관리자)</span></td><td class="mono">sk-Xy9EXAMPLEmasterKEYdoNOTshare</td><td class="mono">llmgw-litellm-admin-key</td></tr>
+      <tr><td>Langfuse 관리자</td><td class="mono">admin@example.com / Adm1n-EXAMPLE-pw</td><td class="mono">llmgw-langfuse-admin</td></tr>
     </table>
-    <p style="margin:6px 0 0;color:#fca5a5;font-size:13.5px">※ SM = AWS Secrets Manager. 위 값은 예시 미리보기입니다. 실제 문서는 배포 시 관리자 자격증명으로 조회해 채워집니다.</p>
   </div>
   <p><b>빠른 관리자 테스트</b>(로그인 생략): 마스터 키를 직접 Bearer로 사용해 게이트웨이를 확인할 수 있습니다.</p>
-  <pre>curl -s https://llmgw.example.com/v1/models -H "Authorization: Bearer sk-...마스터키..."</pre>
+  <pre>curl -s https://llmgw.example.com/v1/models -H "Authorization: Bearer sk-Xy9EXAMPLEmasterKEYdoNOTshare"</pre>
 
   <h2><span class="n">3</span> 비밀번호 / 키 변경 방법</h2>
-
   <h3>LiteLLM 마스터 키 회전</h3>
   <p>마스터 키는 Secrets Manager에 있고 컨테이너 시작 시 로드됩니다. 값 갱신 후 <b>ECS 강제 재배포</b>로 반영합니다.</p>
   <pre>aws secretsmanager put-secret-value \
-  --secret-id llmgw-litellm-admin-key \
-  --secret-string 'sk-새로운마스터키'
-aws ecs update-service --cluster llmgw-litellm --service &lt;service&gt; --force-new-deployment</pre>
+  --secret-id llmgw-litellm-admin-key --secret-string 'sk-새로운마스터키'
+aws ecs update-service --cluster llmgw-litellm --service litellm --force-new-deployment</pre>
   <div class="note">개발자 가상 키는 별도 DB 레코드라 마스터 키 회전에 영향받지 않습니다. Admin UI 재로그인만 새 키로 하면 됩니다.</div>
-
+  
   <h3>Langfuse 관리자 비밀번호</h3>
-  <p>Langfuse UI 로그인 → <b>Settings → Account</b> 에서 변경하는 것이 가장 간단합니다. (초기값은 위 Secrets Manager 시드)</p>
-
+  <p>Langfuse UI 로그인 → <b>Settings → Account</b> 에서 변경이 가장 간단합니다. (초기값은 위 Secrets Manager 시드)</p>
+  
+  
   <h3>Cognito 사용자 비밀번호</h3>
   <pre><span class="c"># 관리자 강제 재설정</span>
 aws cognito-idp admin-set-user-password \
-  --user-pool-id us-east-1_ABC123XYZ \
-  --username dev@example.com --password '새비밀번호' --permanent
+  --user-pool-id us-east-1_ABC123XYZ --username dev@example.com --password '새비밀번호' --permanent
 <span class="c"># 사용자 셀프 재설정: Hosted UI의 "Forgot password"</span></pre>
+  
 
   <h2><span class="n">4</span> 개발자 온보딩 (관리자 작업)</h2>
+  
   <h3>cognito-native — 사용자 생성 + 팀 그룹 배정</h3>
   <pre>aws cognito-idp admin-create-user --user-pool-id us-east-1_ABC123XYZ \
   --username dev@example.com --user-attributes Name=email,Value=dev@example.com \
   --desired-delivery-mediums EMAIL
 aws cognito-idp admin-add-user-to-group --user-pool-id us-east-1_ABC123XYZ \
   --username dev@example.com --group-name llmgw-team1   <span class="c"># 그룹명 = LiteLLM 팀</span></pre>
+  
+  
+  <h3>org-sso — permission set 할당</h3>
+  <p>IdC에서 해당 permission set을 사용자/그룹에 할당합니다. 신규 팀 = 신규 permission set + LiteLLM Admin UI 팀 설정(코드 재배포 불필요).</p>
+  
   <p>그다음 개발자에게 <code>developer-setup.html</code> 을 전달하면 끝입니다.</p>
-  <h3>org-sso</h3>
-  <p>IdC에서 해당 permission set을 사용자/그룹에 할당합니다. (신규 팀 = 신규 permission set + LiteLLM Admin UI 팀 설정, 코드 재배포 불필요)</p>
 
   <h2><span class="n">5</span> 오프보딩 (접근 회수)</h2>
   <div class="card">
+    
     <h3>cognito-native</h3>
     <pre><span class="c"># 비활성(복구 가능) / 삭제 / 팀에서만 제거 중 택1</span>
-aws cognito-idp admin-disable-user     --user-pool-id us-east-1_ABC123XYZ --username dev@example.com
-aws cognito-idp admin-delete-user      --user-pool-id us-east-1_ABC123XYZ --username dev@example.com
+aws cognito-idp admin-disable-user --user-pool-id us-east-1_ABC123XYZ --username dev@example.com
+aws cognito-idp admin-delete-user  --user-pool-id us-east-1_ABC123XYZ --username dev@example.com
 aws cognito-idp admin-remove-user-from-group --user-pool-id us-east-1_ABC123XYZ --username dev@example.com --group-name llmgw-team1</pre>
+    
+    
     <h3>org-sso</h3>
     <p>IdC에서 permission set 할당을 해제합니다.</p>
+    
     <div class="danger">⏱ <b>즉시 차단하려면 LiteLLM Admin UI에서 해당 가상 키를 revoke 하세요.</b> 키는 DynamoDB 캐시에 TTL 동안 남아, revoke 없이는 로그인 차단 후에도 기존 키가 TTL 만료까지 동작할 수 있습니다.</div>
   </div>
 
   <h2><span class="n">6</span> 운영 참고</h2>
   <ul>
-    <li>팀/예산/모델 허용목록 조정 → LiteLLM Admin UI (<code>/ui/</code>, 마스터 키 로그인)</li>
+    <li>팀/예산/모델 허용목록 조정 → LiteLLM Admin UI (<code>https://llmgw.example.com/ui/</code>, 마스터 키 로그인)</li>
+    <li>토큰 사용량·사용자별·시간대별 현황 → CloudWatch 사용량 대시보드 (<code>https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=llmgw-dev-dashboard</code>: 모델/팀별 토큰·비용·지연, 사용자 Top-N, 시간대별 활동)</li>
     <li>요청 로그/트레이스 → LiteLLM UI · Langfuse(활성 시) · CloudWatch</li>
     <li>상세 운영: <code>shared/reference/litellm-admin-guide.md</code></li>
     <li>전체 teardown: <code>cdk destroy</code> (프로덕션은 RETAIN 정책 리소스 주의)</li>
   </ul>
 
-  <div class="foot">
-    예시 값으로 렌더링된 미리보기입니다. 실제 배포 시 <code>gen-onboarding.py</code> 가 <code>outputs.json</code> + 관리자 자격증명으로 실제 값을 채웁니다.
-  </div>
+  <div class="foot">gen-onboarding.py 가 outputs.json + 관리자 자격증명으로 채운 문서입니다. 취급 주의.</div>
 </div>
 </body>
 </html>

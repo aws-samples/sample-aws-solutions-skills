@@ -2,7 +2,8 @@
 <!--
   developer-setup.html.tmpl — token-ized template consumed by scripts/gen-onboarding.py.
   Tokens: {{GATEWAY_URL}} {{REGION}} {{AUTH_MODE}} {{CERT_MODE}} {{OPUS}} {{SONNET}}
-          {{HAIKU}} {{FABLE}} {{GPT}} {{APIKEY_HELPER}} {{TOKEN_CMD}} {{MCP_HEADERS_CMD}} {{LOGIN_CMD}}
+          {{HAIKU}} {{FABLE}} {{GPT}} {{APIKEY_HELPER}} {{TOKEN_CMD}} {{TOKEN_CMD_WIN}}
+          {{MCP_HEADERS_CMD}} {{MCP_HEADERS_CMD_WIN}} {{LOGIN_CMD}}
   Conditional blocks (stripped by the generator when the condition does not match the deploy):
           <!--IF authMode=cognito-native--> ... <!--ENDIF-->
           <!--IF authMode=org-sso--> ... <!--ENDIF-->
@@ -106,7 +107,9 @@
   "type": "http",
   "url": "{{GATEWAY_URL}}/mcp/",
   "headersHelper": "{{MCP_HEADERS_CMD}}"
-}'</pre>
+}'
+<span class="c"># Windows에서는 headersHelper 를 다음으로 바꾸세요 (setup 이 %USERPROFILE%\.llm-gateway 에 헬퍼를 설치합니다):
+#   "headersHelper": "{{MCP_HEADERS_CMD_WIN}}"</span></pre>
   <p>등록 후 도구 이름: <code>websearch-web-search-tool___WebSearch</code></p>
 
   <h2><span class="n">5</span> 동작 확인 — <code>healthcheck</code> 실행</h2>
@@ -128,6 +131,7 @@
     "ANTHROPIC_DEFAULT_FABLE_MODEL":  "{{FABLE}}"
   },
   "apiKeyHelper": "{{APIKEY_HELPER}}",
+  <span class="c">// Windows: setup 이 apiKeyHelper 를 python 절대경로 형태로 기록합니다 — 예: {{TOKEN_CMD_WIN}}</span>
   "permissions": { "deny": ["WebSearch"] }
 }
 
@@ -144,7 +148,8 @@ wire_api = "responses"
 command = "{{TOKEN_CMD}}"
 refresh_interval_ms = 300000
 timeout_ms = 5000</pre>
-  <div class="note">수동으로 확인하고 싶으면: <code>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD}})"</code></div>
+  <div class="note">수동으로 확인하고 싶으면: <code>curl -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD}})"</code><br>
+  Windows PowerShell: <code>curl.exe -s {{GATEWAY_URL}}/v1/models -H "Authorization: Bearer $({{TOKEN_CMD_WIN}})"</code></div>
 
   <div class="foot">
     문제가 있으면 게이트웨이 관리자에게 문의하세요. 이 문서에는 관리자 비밀·마스터 키가 없습니다 — 가상 키는 로그인으로 자동 발급됩니다.

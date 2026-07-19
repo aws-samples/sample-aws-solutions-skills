@@ -98,14 +98,15 @@ No `identitystore:*` (or any IdC) IAM actions are required.
 | Healthcheck | `scripts/healthcheck.sh` | `scripts/healthcheck.ps1` |
 | Shared core | `scripts/gateway_auth.py` | same file (`python gateway_auth.py ...`) |
 
-`gateway_auth.py` uses only `webbrowser`, `http.server`, `pathlib`, `urllib`, `json` (no shell-only behavior), so it runs unmodified from a `.sh` or `.ps1` launcher. Its subcommands are `login`, `token`, `healthcheck`, and `mcp-headers`. Tokens are stored under `~/.llm-gateway/` with user-only permissions where the OS supports it; refresh tokens are never printed.
+`gateway_auth.py` uses only `webbrowser`, `http.server`, `pathlib`, `urllib`, `json` (no shell-only behavior), so it runs unmodified from a `.sh` or `.ps1` launcher. Its subcommands are `setup`, `login`, `token`, `healthcheck`, and `mcp-headers` — **`setup` holds ALL derivation/merge logic once** (the `.sh`/`.ps1` setup scripts are thin wrappers), copies the core to `~/.llm-gateway/gateway_auth.py` (a stable, repo-independent path), and writes `~/.llm-gateway/config.json`. Tokens are stored under `~/.llm-gateway/` (= `%USERPROFILE%\.llm-gateway` on Windows) with user-only permissions — POSIX `0600`, plus `icacls` on Windows where `chmod` is a no-op; refresh tokens are never printed.
 
-The launchers resolve their own real path (bash: a `readlink` loop over `$BASH_SOURCE`; PowerShell: `$MyInvocation.MyCommand.Path`) so they work from **any** working directory — including a `~/.local/bin` symlink or a PowerShell-profile function. Do not write launchers that assume the repository cwd.
+The launchers resolve their own real path (bash: a `readlink` loop over `$BASH_SOURCE`; PowerShell: `$PSScriptRoot`) so they work from **any** working directory — including a `~/.local/bin` symlink or a PowerShell-profile function. Do not write launchers that assume the repository cwd. **Every `.ps1` launcher must end with `exit $LASTEXITCODE`** (PowerShell 5.1 does not propagate native exit codes otherwise — the token helper's non-zero-exit contract breaks silently) and should prefer the `py -3` launcher over bare `python` (Microsoft Store alias stub risk).
 
-For Windows, prefer explicit Python invocation when a tool cannot run PowerShell directly:
+For Windows, `setup` writes the client config values as an explicit Python invocation (no execution-policy dependency, no bash). It uses `sys.executable` (never bare `python`) plus the `~/.llm-gateway` copy it just installed, so this path really exists:
 
 ```jsonc
-"apiKeyHelper": "python C:\\Users\\<user>\\.llm-gateway\\gateway_auth.py token --config C:\\Users\\<user>\\.llm-gateway\\config.json"
+// written automatically by `gateway_auth.py setup` on Windows
+"apiKeyHelper": "\"C:\\Program Files\\Python312\\python.exe\" \"C:\\Users\\<user>\\.llm-gateway\\gateway_auth.py\" token"
 ```
 
 ## Verification checklist
@@ -117,14 +118,15 @@ For Windows, prefer explicit Python invocation when a tool cannot run PowerShell
 - [ ] A user in no matching `teamGroupPrefix` group receives 403.
 - [ ] A user in two matching groups receives 403 under `require-single-team-group`.
 - [ ] The returned LiteLLM virtual key can call `GET /v1/models` through the gateway URL (the `GatewayUrl` output = the ALB domain; CloudFront is removed).
-- [ ] Windows PowerShell setup and token helper work without `sed`, `chmod`, or Unix path assumptions, and from any cwd.
+- [ ] Windows PowerShell setup and token helper work without `sed`, `chmod`, or Unix path assumptions, and from any cwd; each `.ps1` propagates the exit code (`exit $LASTEXITCODE`) so a failed token fetch is visible to Claude Code/Codex.
 - [ ] Existing `org-sso` path still uses `aws sso login` and `AWSReservedSSO_` ARN parsing unchanged.
 
 ## Gotchas
 
+- **Hosted UI domain prefix is GLOBALLY unique (real-deploy incident)**: a generic `domainPrefix` like `llmgw-dev-auth` may already be owned by another AWS customer anywhere in the world, and the AuthStack deploy fails with a **misleading "domain ... does not exist"** error (it means AlreadyExists). The generated AuthStack suffixes the account id (`llmgw-dev-auth-<accountId>`) — see `constraints.md` → "Cognito Hosted UI domain prefix".
 - **id_token vs access_token**: the API Gateway `COGNITO_USER_POOLS` authorizer accepts only `token_use=access`. Send the id_token and you get 401 — a subtle bug because both tokens carry `cognito:groups`.
 - **Stale local client config → blank Hosted UI page (real-deploy incident)**: leftover `~/.llm-gateway/config.json`/token caches from a previous/different deployment carry an old `appClientId`/domain — Cognito's Hosted UI renders a **blank page** for an invalid `client_id` (no error shown). After any redeploy, regenerate the local config from the new outputs and delete stale token caches; verify server-side with `aws cognito-idp describe-user-pool-client --client-id <id>` (`ResourceNotFoundException` = stale id) instead of debugging the browser.
 - **Do not attempt SAML/IdC federation on an account instance** — it is not offered by AWS (see the callout at the top).
 - Group names are operational API contracts. Renaming a Cognito group changes team routing unless an external mapping layer is introduced.
 - Browser loopback redirect must be allow-listed in the Cognito app client. Some locked-down desktops block local listeners; document a device-code alternative only after validating it.
-- Token cache files are bearer material. Store with user-only permissions where the OS supports it and never print refresh tokens in diagnostics.
+- Token cache files are bearer material. Store with user-only permissions and never print refresh tokens in diagnostics. ⚠️ `chmod 0600` is a **no-op on Windows** — back it with `icacls <file> /inheritance:r /grant:r <user>:F` (the `_restrict_perms` helper in `gateway_auth.py` does both).

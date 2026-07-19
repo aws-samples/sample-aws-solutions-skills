@@ -15,7 +15,7 @@ Usage:
   python scripts/gen-onboarding.py --outputs outputs.json --config config/dev.json \
       --templates templates/onboarding --out-dir onboarding [--fetch-secrets]
 """
-import argparse, json, os, re, stat, sys
+import argparse, json, os, re, stat, subprocess, sys
 from pathlib import Path
 
 
@@ -48,18 +48,10 @@ def fill(html, tokens):
     return html
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--outputs", default="outputs.json")
-    ap.add_argument("--config", default="config/dev.json")
-    ap.add_argument("--templates", default="templates/onboarding")
-    ap.add_argument("--out-dir", default="onboarding")
-    ap.add_argument("--fetch-secrets", action="store_true",
-                    help="pull the Langfuse admin secret value from AWS Secrets Manager (needs AWS creds)")
-    args = ap.parse_args()
-
-    flat = flatten_outputs(json.loads(Path(args.outputs).read_text()))
-    config = json.loads(Path(args.config).read_text())
+def build_tokens(flat, config, fetch_secrets=False):
+    """Token dict + active-conditional set from flattened cdk outputs + config.
+    Shared by main() and docs/onboarding-preview/regen-preview.py (which feeds
+    sample values and keeps ALL conditional blocks for the showcase render)."""
     litellm = config.get("litellm", {})
     lf = config.get("langfuse", {})
     aliases = litellm.get("modelAliases", {})
@@ -80,7 +72,7 @@ def main():
 
     langfuse_pw = lf.get("adminPassword", "(Secrets Manager 참조)")
     langfuse_secret = pick(flat, "LangfuseAdminSecretArn", default="%s-langfuse-admin" % config.get("projectPrefix", "llmgw"))
-    if args.fetch_secrets and langfuse_on:
+    if fetch_secrets and langfuse_on:
         try:
             import boto3
             sm = boto3.client("secretsmanager", region_name=region)
@@ -89,9 +81,16 @@ def main():
         except Exception as e:  # noqa: BLE001
             print("WARN: could not fetch Langfuse secret: %s" % e, file=sys.stderr)
 
-    token_cmd = litellm.get("helperPath", "~/.local/bin/get-gateway-token.sh")
-    mcp_headers_cmd = ("~/.local/bin/gateway_auth.py mcp-headers"
-                       if auth_mode == "cognito-native" else token_cmd + " mcp-headers")
+    # POSIX commands (the .sh launchers / files written by `gateway_auth.py setup`).
+    token_cmd = litellm.get("helperPath", "./scripts/get-gateway-token.sh")
+    mcp_headers_cmd = "~/.llm-gateway/get-mcp-headers.sh"  # written by setup (POSIX)
+    # Windows commands — no bash: the doc must show the python form against the
+    # ~/.llm-gateway copy that `setup` installs (setup itself writes the client
+    # configs with the absolute sys.executable path; `py -3` is the safe generic
+    # form for a doc, since bare `python` may hit the Microsoft Store alias stub).
+    token_cmd_win = litellm.get(
+        "helperPathWindows", r'py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" token')
+    mcp_headers_cmd_win = r'py -3 "%USERPROFILE%\.llm-gateway\gateway_auth.py" mcp-headers'
 
     tokens = {
         "GATEWAY_URL": gateway_url,
@@ -108,7 +107,9 @@ def main():
         "FABLE": aliases.get("fable", "claude-fable-5"),
         "GPT": aliases.get("gpt", "gpt-5.5"),
         "APIKEY_HELPER": token_cmd, "TOKEN_CMD": token_cmd,
-        "MCP_HEADERS_CMD": mcp_headers_cmd, "LOGIN_CMD": "llmgw-login",
+        "TOKEN_CMD_WIN": token_cmd_win,
+        "MCP_HEADERS_CMD": mcp_headers_cmd, "MCP_HEADERS_CMD_WIN": mcp_headers_cmd_win,
+        "LOGIN_CMD": "llmgw-login",
         "COGNITO_POOL_ID": pick(flat, "CognitoUserPoolId"),
         "COGNITO_CLIENT_ID": pick(flat, "CognitoAppClientId"),
         "COGNITO_HOSTED_UI": pick(flat, "CognitoHostedUiDomain"),
@@ -127,6 +128,22 @@ def main():
     active = {"authMode=%s" % auth_mode, "certMode=%s" % cert_mode}
     if langfuse_on:
         active.add("langfuse=on")
+    return tokens, active
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--outputs", default="outputs.json")
+    ap.add_argument("--config", default="config/dev.json")
+    ap.add_argument("--templates", default="templates/onboarding")
+    ap.add_argument("--out-dir", default="onboarding")
+    ap.add_argument("--fetch-secrets", action="store_true",
+                    help="pull the Langfuse admin secret value from AWS Secrets Manager (needs AWS creds)")
+    args = ap.parse_args()
+
+    flat = flatten_outputs(json.loads(Path(args.outputs).read_text()))
+    config = json.loads(Path(args.config).read_text())
+    tokens, active = build_tokens(flat, config, fetch_secrets=args.fetch_secrets)
 
     tdir = Path(args.templates)
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
@@ -137,7 +154,18 @@ def main():
         dst = out / ("%s.html" % name)
         dst.write_text(html, encoding="utf-8")
         if secret:
-            os.chmod(dst, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+            os.chmod(dst, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (POSIX)
+            if os.name == "nt":
+                # chmod is a NO-OP on Windows (read-only flag only) — enforce
+                # user-only access via icacls instead (best-effort).
+                try:
+                    user = os.environ.get("USERNAME", "")
+                    if user:
+                        subprocess.run(["icacls", str(dst), "/inheritance:r",
+                                        "/grant:r", "%s:F" % user],
+                                       capture_output=True, check=False)
+                except Exception as e:  # noqa: BLE001
+                    print("WARN: could not restrict Windows ACL on %s: %s" % (dst, e), file=sys.stderr)
             print("⚠  %s contains REAL admin secrets (master key, Langfuse pw)." % dst)
             print("   Do NOT commit or share broadly. Add it to .gitignore.")
         print("wrote %s" % dst)
