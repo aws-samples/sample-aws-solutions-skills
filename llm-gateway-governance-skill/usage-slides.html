@@ -268,8 +268,8 @@
       <rect x="940" y="30" width="260" height="108" rx="12" fill="url(#nodeGrad)" stroke="#EC4899" stroke-width="1.4"/>
       <circle cx="966" cy="56" r="14" fill="#EC4899"/><text x="966" y="61" text-anchor="middle" fill="#fff" font-size="14" font-weight="800">4</text>
       <text x="988" y="60" fill="#fff" font-size="15" font-weight="700">가상키 발급·캐시</text>
-      <text x="956" y="84" fill="#aebfd6" font-size="11.5">LiteLLM /key/generate</text>
-      <text x="956" y="100" fill="#aebfd6" font-size="11.5">(master key는 Secrets Mgr)</text>
+      <text x="956" y="84" fill="#aebfd6" font-size="11.5">LiteLLM /key/generate — 1시간 만료</text>
+      <text x="956" y="100" fill="#aebfd6" font-size="11.5">만료 시 helper가 자동 재발급</text>
       <text x="956" y="116" fill="#aebfd6" font-size="11.5">→ 모델 allowlist·예산·MCP</text>
       <rect x="1105" y="118" width="76" height="18" rx="9" fill="rgba(45,212,191,.15)" stroke="#2DD4BF" stroke-width="1"/>
       <text x="1143" y="131" text-anchor="middle" fill="#9af5d8" font-size="10">키 거버넌스</text>
@@ -314,6 +314,7 @@
       <text x="518" y="339" text-anchor="middle" fill="#9af5d8" font-size="10">감사·관측</text>
     </g>
     <text x="20" y="420" fill="#7e93ad" font-size="12">1→4: 신원 확보·인가·발급 (Auth 스택) · 5→6: 공개 ALB 경유·모델 호출 (LiteLLM 스택) · 7: 관측 (Observability·Langfuse)</text>
+    <text x="20" y="444" fill="#9af5d8" font-size="12">🔑 가상키는 1시간 만료·자동 회전 — 재로그인 주기는 IdP 세션이 결정(org-sso: IdC 8h · cognito: refresh 30d) → SSO 만료/권한 회수 시 잔존 접근 ≤ 1시간</text>
   </svg>
 </section>
 
@@ -768,6 +769,70 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     <p style="margin:2px 0">Token Lambda(<code>_resolve_team_id</code>)는 검증된 <code>cognito:groups</code> 중 <code>teamGroupPrefix</code>에 맞는 <b>하나</b>를 그대로 <code>team_alias</code>로 씁니다(<code>require-single-team-group</code>: 0개·다중이면 거부). Identity Store 호출·매핑 테이블·if/else 분기 없음 — 2번 Group명과 4번 team_alias가 다르면 엉뚱한 팀으로 연결됩니다. ⚠️ 토큰은 <b>access token만</b> 허용(<code>id_token</code>은 401).</p>
   </div>
   <p class="src">org-sso 대비: permission set → Cognito User Pool Group · <code>aws sso login</code> → <code>llmgw-login</code> · 근거: shared/reference/account-instance-setup.md · shared/patterns/lambda-handlers.md · shared/reference/litellm-admin-guide.md</p>
+</section>
+
+<!-- 18c DEVELOPER ONBOARDING (CLIENT) -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · 개발자 온보딩 (Claude Code + Codex 클라이언트)</div>
+  <h2>개발자 온보딩 — <span class="u">setup 한 번</span>이면 클코·코덱스 동시 연결</h2>
+  <div class="grid g2" style="flex:1;min-height:0;gap:12px">
+    <div class="card teal">
+      <h3>🚀 한 번에 끝 (제로터치)</h3>
+      <ul style="margin-top:2px">
+        <li><code>scripts/setup-developer.sh</code> (Windows: <code>.ps1</code> / <code>py -3 gateway_auth.py setup</code>) — <code>outputs.json</code>에서 게이트웨이 URL·모델 별칭·인증모드 자동 도출</li>
+        <li><code>~/.claude/settings.json</code> + <code>~/.codex/config.toml</code>을 <b>병합</b>(백업 후 우리 키만 수정 — hooks·플러그인 보존)</li>
+        <li>이후 로그인: org-sso <code>aws sso login</code>(IdC 세션 8h) / cognito <code>llmgw-login</code>(refresh 30d)</li>
+      </ul>
+    </div>
+    <div class="card gold">
+      <h3>🧹 병합이 "지우는" 것 (실사고 2건)</h3>
+      <ul style="margin-top:2px">
+        <li>직접호출 잔재 <code>CLAUDE_CODE_USE_BEDROCK</code>·<code>AWS_BEARER_TOKEN_BEDROCK</code> 제거 — 남으면 두 인증 경로 충돌 → <b>403 "API key not valid"</b></li>
+        <li>최상위 <code>model</code>(raw Bedrock ID) 제거 — 별칭보다 우선 적용돼 <b>"team not allowed to access model"</b></li>
+      </ul>
+    </div>
+    <div class="card pink">
+      <h3>⚙️ Codex 특칙 (실사고 2건)</h3>
+      <ul style="margin-top:2px">
+        <li>auth는 <code>command</code>(실행파일)+<code>args</code>(배열) <b>분리</b> — Codex는 셸 없이 spawn, 합친 문자열은 <b>401 "No api key"</b></li>
+        <li><code>web_search = "disabled"</code> <b>필수</b> — Mantle이 web_search 툴 거부 → <b>"high demand" 오표시 루프</b>. 검색은 게이트웨이 AgentCore MCP로</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🔑 인증 체감 — 개발자는 로그인만</h3>
+      <ul style="margin-top:2px">
+        <li>가상키는 <b>1시간마다 자동 회전</b> — <code>apiKeyHelper</code>/<code>auth.command</code>가 만료 시 조용히 재발급, 개발자 무감</li>
+        <li>재로그인 주기는 <b>IdP 세션이 결정</b>(키 duration과 무관) — 짧은 키 수명은 보안 창만 좁힘</li>
+        <li>검증: <code>healthcheck</code> → <code>/v1/models</code>에서 별칭 목록 확인</li>
+      </ul>
+    </div>
+  </div>
+  <p class="src">근거: shared/patterns/developer-onboarding.md · shared/reference/constraints.md "Cross-platform client onboarding" · 실배포(Windows 포함) 검증</p>
+</section>
+
+<!-- 18d OFFBOARDING -->
+<section class="slide">
+  <div class="kicker">배포 후 운영 · 오프보딩 (권한 회수)</div>
+  <h2>오프보딩 — <span class="u">IdP 제거만으로는 안 끊긴다</span></h2>
+  <div class="card gold" style="margin-bottom:10px">
+    <h3>⚠️ 핵심 사실</h3>
+    <p style="margin:2px 0">SSO/Cognito는 가상키의 <b>발급</b>만 통제합니다. IdC에서 사용자를 지워도(또는 SSO 세션이 만료돼도) <b>이미 발급된 가상키는 만료 시점까지 동작</b> — 이 게이트웨이는 키를 1시간 만료로 발급하므로 잔존 창 ≤ 1시간, <b>즉시 차단은 LiteLLM revoke가 유일</b>합니다. (duration 없이 발급하던 과거 배포는 무기한 — 반드시 revoke)</p>
+  </div>
+  <div class="timeline" style="flex:none">
+    <div class="tl"><div class="n">1</div><div><div class="b">LiteLLM 가상키 revoke — 즉시 차단</div><div class="d">Admin UI → <b>Virtual Keys</b> → 별칭(<code>sso-…</code>/<code>cognito-…</code>) 삭제, 또는 <code>POST /key/delete {"key_aliases":[…]}</code> (master key) · 복귀 가능성 있으면 <code>/key/block</code>(정지)</div></div><div class="gv">차단 완료</div></div>
+    <div class="tl"><div class="n">2</div><div><div class="b">재발급 차단 — IdP에서 제거</div><div class="d">org-sso: IdC 그룹/계정 할당 제거 · cognito: <code>admin-disable-user</code>(+<code>admin-user-global-sign-out</code>) — 이제 새 키를 받을 수 없음</div></div><div class="gv">재발급 차단</div></div>
+    <div class="tl"><div class="n">3</div><div><div class="b">정리·확인</div><div class="d">DynamoDB 키캐시 항목(<code>USER#…</code>) 삭제(위생) → Admin UI <b>Logs</b>/CloudWatch에서 해당 <code>user_id</code> 요청이 멈췄는지 확인</div></div><div class="gv">감사 확인</div></div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr><th>자격증명</th><th>수명</th><th>즉시 회수 방법</th></tr></thead>
+    <tbody>
+      <tr><td>SSO 세션 (org-sso)</td><td>IdC 기본 8h</td><td>자동 만료 (발급 관문만 잠김)</td></tr>
+      <tr><td>Cognito access / refresh</td><td>1h / 30d</td><td><code>admin-user-global-sign-out</code></td></tr>
+      <tr><td><b>LiteLLM 가상키</b></td><td><b>1h 자동 만료·회전</b></td><td><b><code>/key/delete</code> · <code>/key/block</code> (Admin UI)</b></td></tr>
+      <tr><td>master key</td><td>무기한</td><td>Secrets Manager 회전 + ECS 재배포</td></tr>
+    </tbody>
+  </table>
+  <p class="src">순서가 중요: ①revoke 먼저(즉시) → ②IdP 제거(재발급 차단) · 근거: shared/reference/litellm-admin-guide.md §6 Offboarding · constraints.md "Virtual-key lifetime ≠ SSO session" · 실배포에서 1h 자동회전 검증(2026-07)</p>
 </section>
 
 <!-- 18 REAL PROOF -->
