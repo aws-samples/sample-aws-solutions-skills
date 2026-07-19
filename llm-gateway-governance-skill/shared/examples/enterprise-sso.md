@@ -42,7 +42,7 @@ developers on a corporate-standard domain, with both prompt/trace auditing (Lang
     "cpu": 2048,
     "memoryLimitMiB": 4096
   },
-  "auth": { "keyCacheTtlSeconds": 2592000 },
+  "auth": { "keyCacheTtlSeconds": 2592000, "keyDurationSeconds": 86400 },
   "sso": {
     "startUrl": "https://d-9067890abc.awsapps.com/start",
     "region": "us-east-1",

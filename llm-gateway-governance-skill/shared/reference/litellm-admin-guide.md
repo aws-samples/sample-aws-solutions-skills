@@ -339,6 +339,45 @@ model-mix breakdown per customer.
 
 ---
 
+## 6. Offboarding — revoking a developer's access
+
+> ⚠️ **Removing a user from IdC (or disabling them in Cognito) does NOT cut off gateway access.**
+> SSO/Cognito gates only the *issuance* of a virtual key. The key the developer already holds keeps
+> working until it expires — `auth.keyDurationSeconds` (default 24h) in current deployments, and
+> **forever** in deployments generated before key expiry was added (no `duration` on `/key/generate`).
+> Treat LiteLLM key revocation as a mandatory offboarding step, not an optional cleanup.
+
+Run the steps in this order — revocation first (immediate effect), identity removal second:
+
+1. **Revoke the virtual key (immediate cutoff).** Admin UI → **Virtual Keys** → filter by the user's
+   alias (`sso-<username>` in org-sso, `cognito-<username>` in cognito-native) → delete. Or via API:
+
+   ```bash
+   curl -sS -X POST "$GATEWAY_URL/key/delete" \
+     -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"key_aliases": ["sso-<username>"]}'
+   ```
+
+   Reversible alternative (suspension rather than offboarding): `POST /key/block` with the same
+   auth, then `/key/unblock` to restore — the key value survives, so clients resume without re-setup.
+
+2. **Prevent re-issuance.**
+   - `org-sso`: remove the user's group membership / account assignment for the gateway permission
+     set in IAM Identity Center (they can no longer SigV4 the Token Service).
+   - `cognito-native`: `aws cognito-idp admin-disable-user --user-pool-id <pool> --username <email>`
+     (or remove them from the `llmgw-*` team group).
+
+3. **Clear the Token Service cache (hygiene).** Delete the DynamoDB item `pk=USER#<username>,
+   sk=VIRTUAL_KEY` from the Auth stack's ConfigTable. Not security-critical after step 1 (the cached
+   key is already dead), but it avoids confusing 401s if the user is later restored, and removes the
+   revoked key material from the cache.
+
+4. **Audit the tail.** LiteLLM UI → Logs (or Langfuse/CloudWatch) filtered by `user_id=<username>`
+   confirms the last activity and that requests stop after revocation.
+
+---
+
 ## Related documents
 
 - `shared/reference/sso-setup.md` — provisioning the IdC permission sets/groups that drive team creation

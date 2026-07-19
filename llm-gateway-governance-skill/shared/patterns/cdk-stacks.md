@@ -1552,6 +1552,10 @@ export class AuthStack extends cdk.Stack implements AuthExports {
         LITELLM_MASTER_KEY_ARN: litellm.masterKeySecret.secretArn,
         LITELLM_ENDPOINT_SSM: SSM.LITELLM_INTERNAL_URL,
         KEY_CACHE_TTL_SECONDS: String(config.keyCacheTtlSeconds),
+        // Virtual keys EXPIRE after this window (default 24h) — SSO/Cognito revocation alone
+        // never kills an already-issued key, so this bounds residual access; the Lambda also
+        // caps the cache TTL below it. See lambda-handlers.md + litellm-admin-guide.md → Offboarding.
+        KEY_DURATION_SECONDS: String(config.keyDurationSeconds ?? 86400),
         RESPONSE_KEY: TOKEN_SERVICE.RESPONSE_KEY,
         AUTH_MODE: authMode,
         // org-sso input

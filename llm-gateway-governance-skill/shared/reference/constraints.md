@@ -262,6 +262,15 @@ The UIs must not redirect the browser to an unreachable host. With CloudFront re
 On the very first key issuance, two near-simultaneous client calls (Claude Code/Codex fire the key helper more than once) can race: call A creates the virtual key (`/key/generate` 200) and caches it; call B then hits `/key/generate` 400 (`Key with alias 'sso-<user>' already exists`) and the reference recovery path queries `/user/info?user_id=<user>` which returns **404** (the user was never registered as a LiteLLM user, only as key metadata) → the Lambda returns 500. It **self-heals** once the cache is populated (subsequent calls hit DynamoDB), so it's a transient on first use. **Robust fix for generated code:** recover the existing key by **alias lookup** (`/key/info` / `/key/list` filtered by `key_alias`) instead of `/user/info`, and/or re-check the DynamoDB cache immediately before calling `/key/generate` to close the race window.
 
 
+## Virtual-key lifetime ≠ SSO session (governance — keys must expire, offboarding must revoke)
+
+- **SSO/Cognito expiry gates only key *issuance*, never key *use*.** An already-issued LiteLLM virtual key keeps authenticating requests after the SSO session expires — and even after the user is removed from IdC/Cognito entirely (real finding: a client with a cached key kept working across an expired SSO session; only *re-minting* failed).
+- Therefore the Token Service **must pass `duration` on `/key/generate`** (`KEY_DURATION_SECONDS`, default 86400 = 24h, from `auth.keyDurationSeconds`). This bounds residual access after any revocation to at most the duration window; re-minting requires a live SSO/Cognito login. Never generate a token service without it — a duration-less key is **non-expiring**.
+- **Two traps that come with key expiry** (both handled in `lambda-handlers.md` — do not regress):
+  - *Cache outliving the key*: the DynamoDB cache TTL must stay below the key duration (`min(KEY_CACHE_TTL_SECONDS, KEY_DURATION_SECONDS - 3600)`), or the Token Service serves an expired key from cache → 401 loop.
+  - *Alias-collision recovery resurrecting a dead key*: an expired key row still occupies its `key_alias`, so `/key/generate` 400s; `_recover_existing_key` must check `expires`, delete the stale key, and let the caller re-create — recovering it verbatim hands the client a dead key.
+- **Offboarding is a two-step procedure, in this order**: ① revoke the key in LiteLLM (`/key/delete` by `key_aliases`, or `/key/block` for reversible suspension) — immediate cutoff; ② remove IdC assignment / disable the Cognito user — blocks re-issuance. IdP removal alone leaves access alive for up to the duration window (or forever on pre-duration deployments). Full procedure: `litellm-admin-guide.md` → "Offboarding".
+
 ## Security Group descriptions must be ASCII (deploy-time failure)
 
 EC2 `GroupDescription` only accepts the ASCII set `[a-zA-Z0-9 ._\-:/()#,@\[\]+=&;{}!$*]`.

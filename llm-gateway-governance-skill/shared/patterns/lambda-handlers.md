@@ -46,7 +46,8 @@ Key environment variables (all injected by CDK):
 | `CONFIG_TABLE_NAME` | Auth Stack (DynamoDB) | per-user virtual-key cache table |
 | `LITELLM_MASTER_KEY_ARN` | LiteLLM Stack (Secrets Manager) | master key for the `/key/generate` call |
 | `LITELLM_ENDPOINT_SSM` | LiteLLM Stack (SSM Parameter) | LiteLLM ALB endpoint URL |
-| `KEY_CACHE_TTL_SECONDS` | Auth Stack (default 2592000=30 days) | cache entry TTL |
+| `KEY_DURATION_SECONDS` | Auth Stack (default 86400 = 24h) | virtual-key `duration` passed to `/key/generate` — keys **expire** so access cannot outlive SSO/Cognito re-auth by more than this window (governance: SSO expiry alone never kills an already-issued key) |
+| `KEY_CACHE_TTL_SECONDS` | Auth Stack (default 2592000=30 days) | cache entry TTL — effective TTL is `min(this, KEY_DURATION_SECONDS - 3600)` so the cache can never serve a key past its expiry |
 | `RESPONSE_KEY` | Auth Stack (default `api_key`) | key name in the response JSON |
 
 ---
@@ -94,6 +95,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import boto3
@@ -146,7 +148,12 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             virtual_key = _create_virtual_key(endpoint, master_key, principal)
         except urllib.error.HTTPError as exc:
             if exc.code == 400:
+                # Alias collision. Recover the live key — or, if the existing key has
+                # EXPIRED (KEY_DURATION_SECONDS), recover deletes it and returns None:
+                # retry the create once so the user gets a fresh key, not a dead one.
                 virtual_key = _recover_existing_key(endpoint, master_key, principal.user_key)
+                if virtual_key is None:
+                    virtual_key = _create_virtual_key(endpoint, master_key, principal)
             else:
                 raise
         _cache_key(principal.user_key, virtual_key, principal.source)
@@ -247,6 +254,12 @@ def _create_virtual_key(endpoint: str, master_key: str, principal: Principal) ->
         "key_alias": f"{principal.source}-{principal.user_key}",
         "user_id": principal.user_key,
         "end_user_id": principal.display_name,
+        # WHY duration: without it LiteLLM issues a NON-EXPIRING key, so a user whose
+        # SSO/Cognito access was revoked keeps working forever on the old key. With it,
+        # residual access after revocation is bounded by KEY_DURATION_SECONDS (re-mint
+        # requires a live SSO/Cognito login). Immediate cutoff = admin /key/delete
+        # (litellm-admin-guide.md → Offboarding).
+        "duration": f"{int(os.environ.get('KEY_DURATION_SECONDS', '86400'))}s",
         "metadata": principal.metadata | {"auth_mode": principal.source},
     }
     team_id = _resolve_team_id(endpoint, master_key, principal.team_alias)
@@ -388,8 +401,13 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         except urllib.error.HTTPError as exc:
             # WHY: if the same key_alias already exists, LiteLLM returns 400.
             #      In that case, do not create a new one — recover the existing key (idempotency).
+            #      EXCEPT when the existing key has EXPIRED (KEY_DURATION_SECONDS): recover
+            #      deletes the stale row (freeing the alias) and returns None → retry create
+            #      once, so the user gets a fresh key instead of a dead one (401 loop).
             if exc.code == 400:
                 virtual_key = _recover_existing_key(endpoint, master_key, username)
+                if virtual_key is None:
+                    virtual_key = _create_virtual_key(endpoint, master_key, username, account, user_arn, permission_set)
             else:
                 raise
 
@@ -447,9 +465,14 @@ def _get_cached_key(username: str) -> Optional[str]:
 
 
 def _cache_key(username: str, virtual_key: str) -> None:
-    # WHY: single-item structure pk=USER#<username>, sk=VIRTUAL_KEY. Auto-expires via TTL (default 30 days).
+    # WHY: single-item structure pk=USER#<username>, sk=VIRTUAL_KEY. Auto-expires via TTL.
     #      Even if the write fails, the key is already issued, so it is best-effort — swallow the exception.
-    ttl_seconds = int(os.environ.get("KEY_CACHE_TTL_SECONDS", "2592000"))
+    # WHY min(): the cache must expire BEFORE the key does (KEY_DURATION_SECONDS), or the
+    #      Token Service would keep serving an already-expired key from cache → 401 loop.
+    ttl_seconds = min(
+        int(os.environ.get("KEY_CACHE_TTL_SECONDS", "2592000")),
+        max(int(os.environ.get("KEY_DURATION_SECONDS", "86400")) - 3600, 300),
+    )
     try:
         _table().put_item(
             Item={
@@ -500,6 +523,11 @@ def _create_virtual_key(
         "key_alias": f"sso-{username}",
         "user_id": username,
         "end_user_id": username,
+        # WHY duration: without it LiteLLM issues a NON-EXPIRING key — SSO expiry or even
+        # removing the user from IdC does NOT kill an already-issued key. With it, residual
+        # access is bounded by KEY_DURATION_SECONDS (default 24h); re-minting requires a live
+        # SSO login. Immediate cutoff = admin /key/delete (litellm-admin-guide.md → Offboarding).
+        "duration": f"{int(os.environ.get('KEY_DURATION_SECONDS', '86400'))}s",
         # WHY: stamping the SSO origin into metadata lets you trace, from LiteLLM logs/Langfuse traces,
         #      which SSO identity/account/permission set made the call (audit trail).
         "metadata": {"sso_arn": user_arn, "account": account, "permission_set": permission_set},
@@ -576,13 +604,24 @@ def _ensure_team(
     return None
 
 
-def _recover_existing_key(endpoint: str, master_key: str, username: str) -> str:
-    # WHY: recovery path for a key_alias collision (400). Find the sso- prefixed key in user/info and reuse its token.
-    #      This way, a key is not duplicated for the same SSO user (idempotent issuance).
+def _recover_existing_key(endpoint: str, master_key: str, username: str) -> Optional[str]:
+    # WHY: recovery path for a key_alias collision (400). Find the sso-/cognito- prefixed key
+    #      in user/info and reuse its token (idempotent issuance) — but ONLY if it has not
+    #      EXPIRED. With KEY_DURATION_SECONDS, an expired key row still occupies the alias;
+    #      returning it would hand the client a dead key (401 loop). Expired → delete the
+    #      stale key (frees the alias) and return None so the caller re-creates once.
     response = _litellm("GET", f"{endpoint}/user/info?user_id={username}", master_key)
     for key_info in response.get("keys", []):
-        if str(key_info.get("key_alias", "")).startswith("sso-"):
-            return key_info["token"]
+        alias = str(key_info.get("key_alias", ""))
+        if not alias.startswith(("sso-", "cognito-")):
+            continue
+        expires = key_info.get("expires")  # ISO-8601 string, or None for legacy non-expiring keys
+        if expires:
+            expires_at = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+            if expires_at <= datetime.now(timezone.utc):
+                _litellm("POST", f"{endpoint}/key/delete", master_key, {"key_aliases": [alias]})
+                return None
+        return key_info["token"]
     raise RuntimeError(f"could not recover existing key for user={username}")
 
 
@@ -705,6 +744,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import boto3
@@ -757,7 +797,12 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             virtual_key = _create_virtual_key(endpoint, master_key, principal)
         except urllib.error.HTTPError as exc:
             if exc.code == 400:
+                # Alias collision. Recover the live key — or, if the existing key has
+                # EXPIRED (KEY_DURATION_SECONDS), recover deletes it and returns None:
+                # retry the create once so the user gets a fresh key, not a dead one.
                 virtual_key = _recover_existing_key(endpoint, master_key, principal.user_key)
+                if virtual_key is None:
+                    virtual_key = _create_virtual_key(endpoint, master_key, principal)
             else:
                 raise
         _cache_key(principal.user_key, virtual_key, principal.source)
@@ -858,6 +903,12 @@ def _create_virtual_key(endpoint: str, master_key: str, principal: Principal) ->
         "key_alias": f"{principal.source}-{principal.user_key}",
         "user_id": principal.user_key,
         "end_user_id": principal.display_name,
+        # WHY duration: without it LiteLLM issues a NON-EXPIRING key, so a user whose
+        # SSO/Cognito access was revoked keeps working forever on the old key. With it,
+        # residual access after revocation is bounded by KEY_DURATION_SECONDS (re-mint
+        # requires a live SSO/Cognito login). Immediate cutoff = admin /key/delete
+        # (litellm-admin-guide.md → Offboarding).
+        "duration": f"{int(os.environ.get('KEY_DURATION_SECONDS', '86400'))}s",
         "metadata": principal.metadata | {"auth_mode": principal.source},
     }
     team_id = _resolve_team_id(endpoint, master_key, principal.team_alias)
