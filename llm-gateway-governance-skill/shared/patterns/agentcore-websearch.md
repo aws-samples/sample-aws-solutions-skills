@@ -148,6 +148,8 @@ const agentcoreGateway = new AgentCoreGatewayStack(app, 'AgentCoreGatewayStack',
   stackName: ns('websearch-gateway'), tags,
   config: config.agentcore,
 });
+// ⚠️ Also add to app.ts's suppression list: `allStacks.push(agentcoreGateway)` — a stack
+// missing from allStacks gets no dev suppressions and synth fails on cdk-nag ERRORs.
 const litellm = new LiteLLMStack(app, 'LiteLLMStack', {
   ...stackProps('litellm'),
   crossRegionReferences: true,

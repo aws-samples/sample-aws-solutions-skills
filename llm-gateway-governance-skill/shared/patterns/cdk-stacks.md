@@ -137,7 +137,9 @@ const auth = new AuthStack(app, 'AuthStack', {
 });
 
 // ---- 6. Observability -------------------------------------------------------
-new ObservabilityStack(app, 'ObservabilityStack', {
+// Assigned to a variable (NOT bare `new`) so it can join allStacks below — a bare
+// `new` here left ObservabilityStack out of the suppression pass (real-deploy lesson).
+const observability = new ObservabilityStack(app, 'ObservabilityStack', {
   ...stackProps('observability'),
   config: config.observability,
   litellm,
@@ -155,11 +157,18 @@ new ObservabilityStack(app, 'ObservabilityStack', {
 // ---- Security checks --------------------------------------------------------
 cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
-const allStacks: cdk.Stack[] = [network, data, litellm, auth];
+// ⚠️ EVERY instantiated stack must be in this array (real-deploy lesson): a stack left
+// out receives no dev suppressions at all and synth fails with unsuppressed cdk-nag
+// ERRORs — guardrail and observability were the ones actually missed.
+const allStacks: cdk.Stack[] = [network, data, guardrail, litellm, auth, observability];
 if (langfuse) allStacks.push(langfuse);
+// Conditional us-east-1 stacks (only when web search / GPT-Mantle are enabled — see
+// agentcore-websearch.md / mantle-peering.md). When generated, push them too:
+//   allStacks.push(agentcoreGateway);
+//   allStacks.push(mantleNetwork, mantleRoutes);
 applyDevSuppressions(allStacks);
 applyResourceSuppressions({
-  network, data, litellm, auth,
+  network, data, guardrail, litellm, auth, observability,
   ...(langfuse ? { langfuse } : {}),
 });
 
@@ -1499,8 +1508,12 @@ export class AuthStack extends cdk.Stack implements AuthExports {
         },
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
+      // ⚠️ Hosted UI domain prefixes are GLOBALLY unique across ALL AWS accounts — a bare
+      // ns('auth') ("llmgw-dev-auth") can already be taken by another AWS customer, and the
+      // CFN failure then reads, misleadingly, "domain ... does not exist" (it means
+      // AlreadyExists — real-deploy incident). The account-id suffix restores uniqueness.
       userPoolDomain = userPool.addDomain('Domain', {
-        cognitoDomain: { domainPrefix: ns('auth').replace(/[^a-z0-9-]/g, '') },
+        cognitoDomain: { domainPrefix: `${ns('auth')}-${this.account}`.replace(/[^a-z0-9-]/g, '') },
       });
       // One User Pool Group per team; the group name IS the LiteLLM team_alias, 1:1.
       // Cognito auto-stamps `cognito:groups` into every token based on membership.
@@ -1862,6 +1875,16 @@ export function applyDevSuppressions(stacks: cdk.Stack[]): void {
       {
         id: 'AwsSolutions-EC23',
         reason: 'Public ALB SG ingress comes from the albIngressCidrs Discovery answer; 0.0.0.0/0 appears only if the user chose it (GATE-1 acknowledged). PROD TODO: restrict ingress CIDRs.',
+      },
+      // Cognito findings (cognito-native only — no-op suppressions in org-sso, where no
+      // User Pool exists). Both fired unsuppressed in a real deploy:
+      {
+        id: 'AwsSolutions-COG2',
+        reason: 'cognito-native dev sample: MFA is intentionally not required on the User Pool (email+password with a strong password policy + PKCE loopback flow). PROD TODO: require MFA (TOTP).',
+      },
+      {
+        id: 'AwsSolutions-COG8',
+        reason: 'cognito-native dev sample: the Cognito Plus feature plan (threat protection / advanced security) is not enabled to limit cost. PROD TODO: enable the Plus feature plan with ENFORCED threat protection.',
       },
       // CloudFront suppressions (CFR2/CFR3/CFR4/CFR5) removed — CloudFront is gone, so cdk-nag no
       // longer emits CFR* (there is no distribution). PROD TODO instead: tighten albIngressCidrs

@@ -228,6 +228,8 @@ const mantleRoutes = new MantlePeeringRoutesStack(app, 'MantlePeeringRoutesStack
   peeringConnectionId: mantleNetwork.peeringConnectionId,
 });
 mantleRoutes.addDependency(mantleNetwork);
+// ⚠️ Also add to app.ts's suppression list: `allStacks.push(mantleNetwork, mantleRoutes)` —
+// a stack missing from allStacks gets no dev suppressions and synth fails on cdk-nag ERRORs.
 ```
 
 And LiteLLM env (the vars the provider actually reads):
