@@ -618,6 +618,12 @@ def _merge_codex_config(gw: str, aliases: dict, prog_args: "tuple[str, list[str]
 
     top = upsert(top, "model_provider", 'model_provider = "llm-gateway"')
     top = upsert(top, "model", f'model = "{aliases["gpt"]}"')
+    # web_search MUST be disabled (real incident): custom providers default the
+    # web_search capability ON, Codex's interactive TUI then attaches a web_search
+    # tool, and Mantle rejects it ("Live web access is not yet available") -> LiteLLM
+    # 500 -> Codex shows a misleading "Reconnecting... high demand" loop. `codex exec`
+    # doesn't attach the tool, so the failure only appears in interactive sessions.
+    top = upsert(top, "web_search", 'web_search = "disabled"')
     parts = [top.rstrip("\n"), rest.strip("\n"), block.rstrip("\n")]
     p.write_text("\n\n".join(s for s in parts if s) + "\n")
     _log(f"    merged: {p}")
@@ -919,6 +925,7 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" healthcheck "$@"
 
 model = "gpt-5.5"
 model_provider = "llm-gateway"
+web_search = "disabled"
 
 [model_providers.llm-gateway]
 name = "Company LLM Gateway (LiteLLM)"
@@ -947,6 +954,14 @@ timeout_ms = 5000
 > `command = "\"C:\\...\\python.exe\" \"...gateway_auth.py\" token"` is treated as one executable path:
 > process creation fails (os error 123), no `Authorization` header is attached, and every request fails
 > with 401 "No api key passed in". `gateway_auth.py setup` writes the split form via `_helper_program_args()`.
+>
+> ⚠️ **WHY `web_search = "disabled"` (real incident)?** Codex custom providers default the `web_search`
+> capability ON; the interactive TUI then attaches a `web_search` tool that Bedrock Mantle rejects with
+> `validation_error: "Live web access is not yet available"` → LiteLLM 500 → Codex shows a misleading
+> **"Reconnecting... We're currently experiencing high demand"** loop. `codex exec` doesn't attach the
+> tool, so the failure appears **only in interactive sessions** — deceptive to debug. Search flows
+> through the gateway's AgentCore Web Search MCP instead (same governance intent as Claude Code's
+> `permissions.deny: ["WebSearch"]`). `setup` upserts this key automatically.
 
 > **Pitfall (Mantle + Guardrail)**: the GPT (Mantle) path is **not covered by the Bedrock Guardrail**
 > (Guardrails are bedrock-runtime only). Content/PII protection for GPT traffic relies on the LiteLLM `hide-secrets` callback.

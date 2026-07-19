@@ -50,7 +50,7 @@ no `*.cloudfront.net` default domain, no self-signed mode, no SSM tunnel, and no
     "cpu": 2048,
     "memoryLimitMiB": 4096
   },
-  "auth": { "keyCacheTtlSeconds": 2592000, "keyDurationSeconds": 86400 },
+  "auth": { "keyCacheTtlSeconds": 2592000, "keyDurationSeconds": 3600 },
   "sso": {
     "startUrl": "https://d-1234567890.awsapps.com/start",
     "region": "us-east-1",
