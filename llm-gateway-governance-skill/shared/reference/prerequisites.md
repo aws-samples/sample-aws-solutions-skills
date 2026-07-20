@@ -22,21 +22,25 @@ See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -
 
 ## 1. Local tooling
 
-> 💡 **Docker (or the whole machine) not workable locally? Three build paths, one decision rule:**
+> 💡 **Docker not workable locally? Two build paths, one decision rule:**
 > 1. **Local Docker (default)** — `docker info` succeeds → CDK `fromAsset()` builds the image at
 >    `cdk deploy` time. Use this whenever Docker runs locally; nothing extra to deploy.
 > 2. **CodeBuild image build** — Docker **cannot** run locally (real case: a managed Windows laptop
 >    where Docker Desktop needs WSL2/Hyper-V and the required admin install + reboot was forbidden)
->    but Node/CDK/AWS CLI/the AI tool are fine → keep everything local **except the image build**: a
->    conditional `ImageBuildStack` builds it on **native ARM** in CodeBuild. Set
->    `litellm.imageBuild.mode='codebuild'` and follow the **3-step deploy order** — see
->    `shared/patterns/cdk-stacks.md` §4-1.
-> 3. **EC2 deploy host** — the machine is unsuitable beyond Docker (x86-only *and* locked down,
->    unstable network, can't install Node/CDK either) → run the whole skill from a Graviton instance
->    (native ARM64 build, instance-profile credentials, SSM-only access). See
->    `shared/reference/ec2-deploy-host.md` + `scripts/ec2-deploy-host/`.
+>    → keep everything local **except the image build**: a conditional `ImageBuildStack` builds it on
+>    **native ARM** in CodeBuild. Set `litellm.imageBuild.mode='codebuild'` and follow the **3-step
+>    deploy order** — see `shared/patterns/cdk-stacks.md` §4-1.
 >
-> Sections §2–§5 below apply on every path.
+> Docker is the **only** waivable row — the rest of this section is a hard prerequisite on the
+> operator's own machine. There is deliberately **no "run the whole skill from an EC2/remote host"
+> path** (an earlier revision had one; it was removed): the deploy must stay operator-local because
+> (a) the `albIngressCidrs` Discovery answer is the **operator's real egress IP**, which a remote host
+> cannot know, and (b) the generated onboarding bundle — including the secret-bearing
+> `admin-onboarding.html` — lands on the machine that ran the deploy, so a remote host forces yet
+> another file-transfer channel (another port/tunnel) just to hand it to the operator and developers.
+> CodeBuild already replaces the only piece that can't run locally.
+>
+> Sections §2–§5 below apply on both paths.
 
 | Tool | Minimum version | Why | Verify |
 |---|---|---|---|

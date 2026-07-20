@@ -1219,12 +1219,13 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
 **Decision rule (Discovery / prerequisites): if `docker info` succeeds on the deploy machine, use the
 default `fromAsset()` local build (§4) — do NOT deploy this stack. Only when Docker cannot run locally
 at all** (real case: a corporate Windows laptop where Docker Desktop needs WSL2/Hyper-V, both of which
-need an admin install **and a reboot** that policy forbade) **and the operator still wants to keep
-CDK + the AI tool local** (i.e. the full `ec2-deploy-host.md` move is heavier than the problem),
+need an admin install **and a reboot** that policy forbade),
 delegate ONLY the image build to CodeBuild: a conditional `ImageBuildStack` (ECR repository + CodeBuild
 project on **native ARM** — no QEMU, no cross-build) builds and pushes the image, and `LiteLLMStack`
 consumes it via `fromEcrRepository()` instead of `fromAsset()`. Everything else about the deploy is
-unchanged. (If more than Docker is unsuitable on the machine, prefer the EC2 deploy host instead.)
+unchanged — CDK, the AI tool, and the rest of the toolchain stay on the operator's machine (a hard
+prerequisite; there is deliberately no remote/EC2 deploy-host path — see `prerequisites.md` §1 for why
+the deploy must stay operator-local).
 
 Config: `config.litellm.imageBuild?.mode: 'local-docker' | 'codebuild'` (absent = `'local-docker'`,
 the §4 default). Add to `LiteLLMConfig` in `lib/config/schema.ts`:
@@ -1454,9 +1455,11 @@ the task definition's image tag changed* — which is exactly WHY the tag is the
 - **cdk-nag CB3/CB4** — privileged mode (required for docker-in-docker builds) and no customer-managed
   KMS key on the build artifacts both fire on every deploy of this stack; the suppressions ship inline
   with written reasons per the skill-wide rule.
-- **Scope guard** — this stack exists for "local Docker impossible, everything else fine". If Node/CDK/
-  credentials/network are *also* unsuitable, use the EC2 deploy host (`ec2-deploy-host.md`) instead of
-  stretching this pattern.
+- **Scope guard** — this stack exists for "local Docker impossible, everything else fine", and Docker is
+  the ONLY prerequisite this pattern may waive. Node/CDK/AWS CLI/credentials/network on the operator's
+  machine are hard prerequisites (`prerequisites.md` §1) — do not stretch this pattern, and do not offer
+  a remote/EC2 deploy host as the escape hatch (removed by design: it breaks operator-locality — the
+  `albIngressCidrs` answer and the generated onboarding bundle both belong on the operator's machine).
 
 ---
 
