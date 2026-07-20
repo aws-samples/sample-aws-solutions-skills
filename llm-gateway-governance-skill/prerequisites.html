@@ -179,7 +179,7 @@
 
   <!-- ===================== TAB 2: 로컬 툴체인 ===================== -->
   <section class="panel" id="t2">
-    <div class="callout"><b>Docker</b>가 첫 배포의 가장 흔한 걸림돌입니다 — <code>cdk deploy</code>(Phase 5)가 LiteLLM 프록시 이미지를 CDK <code>fromAsset</code>로 빌드하므로 <b>데몬이 반드시 실행 중</b>이어야 합니다. 실패는 synth 성공 <b>이후</b> 늦게 발생하니, 배포 전에 미리 켜 두세요.</div>
+    <div class="callout"><b>Docker</b>가 첫 배포의 가장 흔한 걸림돌입니다 — <code>cdk deploy</code>(Phase 5)가 LiteLLM 프록시 이미지를 CDK <code>fromAsset</code>로 빌드하므로 <b>데몬이 반드시 실행 중</b>이어야 합니다. 실패는 synth 성공 <b>이후</b> 늦게 발생하니, 배포 전에 미리 켜 두세요. <b>Docker를 아예 설치할 수 없는 머신이라면</b>(예: WSL2/Hyper-V 설치가 금지된 관리형 Windows) 유일하게 면제 가능한 항목입니다 — <code>litellm.imageBuild.mode='codebuild'</code>로 이미지를 <b>CodeBuild(네이티브 ARM)</b>에서 빌드하는 경로로 전환하세요(스킬 문서 <code>cdk-stacks.md</code> §4-1, 3단계 배포).</div>
 
     <section class="card">
       <h2><span class="num">2</span> 필수 로컬 도구 <span class="badge b-req right">필수</span></h2>
@@ -230,6 +230,7 @@ npm install -g aws-cdk           # cdk deploy를 실행할 셸(WSL 또는 PowerS
 winget install Amazon.AWSCLI
 winget install jqlang.jq</code></pre>
       <div class="callout">⚠️ <b>WSL과 PowerShell을 섞지 마세요.</b> <code>npm install -g</code>는 실행한 셸에만 <code>cdk</code>를 노출합니다 — <code>cdk deploy</code>를 실행할 <b>한쪽 셸</b>에 설치. Docker Desktop만 WSL 통합으로 양쪽 공유됩니다.</div>
+      <div class="callout"><b>WSL2/Hyper-V를 설치할 수 없다면?</b> Docker Desktop은 둘 중 하나가 필요하고, 둘 다 관리자 설치 + <b>재부팅</b>이 필요합니다 — 관리형 사내 노트북에서 불가한 경우(실제 보고 사례) Docker와 싸우지 말고 <b>CodeBuild 이미지 빌드 경로</b>(<code>litellm.imageBuild.mode='codebuild'</code>)로 전환하세요. 이 표의 나머지 도구는 모두 PowerShell에서 네이티브로 동작하며, 이미지는 CodeBuild(네이티브 ARM)에서 빌드됩니다.</div>
     </section>
 
     <section class="card">
