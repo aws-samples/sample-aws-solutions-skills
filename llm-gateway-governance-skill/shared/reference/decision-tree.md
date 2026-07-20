@@ -41,7 +41,7 @@ The ALB is **always the edge, always internet-facing, always SG CIDR-restricted*
 | User answer | `enableLangfuse` | Effect |
 |---|---|---|
 | "I want prompt/trace-level observability" | `true` | LangfuseStack deploys (extra Fargate service + db-init). |
-| "CloudWatch is enough / minimize cost & surface" | `false` (or `-c enableLangfuse=false`) | LangfuseStack skipped; LiteLLM tracing env still present but inert. |
+| "CloudWatch is enough / minimize cost & surface" | `false` (or `-c enableLangfuse=false`) | LangfuseStack skipped; config.yaml omits `success_callback`/`failure_callback`/`langfuse_default_tags` **and `user_trace`** (Langfuse-only user attribution) — `cloudwatch_usage` + `mantle_token_refresh` stay, and `user_trace.py` stays bundled in the image (`litellm-gateway.md` §5). |
 
 > ⚠️ **Langfuse UI requires `certMode='acm'`** — it needs a real domain + ACM cert (its own internet-facing ALB). `enableLangfuse=true` with `certMode='http'` is a **schema fail-fast**; those deploys are CloudWatch-only. When `certMode='acm'`, whether to deploy Langfuse is the same free `enableLangfuse` choice as before.
 
@@ -100,3 +100,15 @@ If any `bedrock_mantle/` model is offered, deploy `MantleNetworkStack` (us-east-
 ## 9. Bootstrap qualifier (operational)
 
 If the target account/region has broken or conflicting CDK bootstrap leftovers, bootstrap with a **custom qualifier** and set `@aws-cdk/core:bootstrapQualifier` in `cdk.json` — this avoids importing/colliding with existing `hnb659fds` resources. See `constraints.md`.
+
+## 10. Where does the LiteLLM image build? → `litellm.imageBuild.mode`
+
+One question decides it: **does `docker info` succeed on the deploy machine?**
+
+| Situation | `imageBuild.mode` | Effect |
+|---|---|---|
+| `docker info` succeeds (Docker Desktop/Engine/Podman-compat running) | omit the field / `'local-docker'` | Default: `ContainerImage.fromAsset()` builds at `cdk deploy` time (ARM64-pinned; x86 hosts need QEMU — `prerequisites.md` §1). No extra stack. |
+| Docker **cannot run** on this machine (e.g. managed Windows laptop: WSL2/Hyper-V install needs admin + a reboot that policy forbids) but Node/CDK/AWS CLI work | `'codebuild'` | Conditional `ImageBuildStack` (ECR + CodeBuild on **native ARM**, no QEMU) builds/pushes; LiteLLMStack switches to `fromEcrRepository()`. ⚠️ Requires the **3-step deploy order** (deploy ImageBuildStack → `start-build` + poll + verify image in ECR → deploy the rest) — `cdk deploy --all` alone ships no image. See `cdk-stacks.md` §4-1. |
+| The machine is unsuitable beyond Docker (can't install Node/CDK, unstable network) | — (not an `imageBuild` question) | Move the whole deploy to the **EC2 deploy host** (`ec2-deploy-host.md`) — don't stretch the CodeBuild path. |
+
+> Do not offer remote-Docker variants (e.g. `DOCKER_HOST` over an SSM tunnel to a helper instance) — this skill supports exactly the three paths above.

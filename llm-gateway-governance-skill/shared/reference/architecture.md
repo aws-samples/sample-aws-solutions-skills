@@ -26,6 +26,8 @@ graph LR
 
 > **CloudFront/CdnStack removed** (was the former 11th stack). The ALB is now the public edge — TLS is chosen by `config.litellm.certMode` (`acm` / `http`) inside `LiteLLMStack`; the public ALB is always internet-facing with SG ingress restricted to `litellm.albIngressCidrs`, and Langfuse (acm only) gets its own public ALB. There is no separate us-east-1 CDN stack, no `*.cloudfront.net`, no us-east-1 CloudFront viewer cert, and no Location-rewrite CloudFront Function.
 
+> **Conditional build-helper stack — ImageBuildStack** (`litellm.imageBuild.mode='codebuild'` only, not counted in the 10): ECR repository + a **native-ARM CodeBuild** project that builds/pushes the LiteLLM image when Docker cannot run on the deploy machine (e.g. a managed Windows laptop where WSL2/Hyper-V can't be installed); `LiteLLMStack` then consumes `fromEcrRepository()` instead of building via `fromAsset()`. Build-time helper only — no runtime request touches it. Pattern + mandatory 3-step deploy order: `shared/patterns/cdk-stacks.md` §4-1.
+
 | Stack | Responsibility | WHY it exists |
 |-------|----------------|---------------|
 | **NetworkStack** | VPC (configurable AZs/NAT, region = `config.awsRegion`), 3 subnet tiers (public / private-egress / isolated), full security-group chain, Gateway endpoints (S3, DynamoDB) + Interface endpoints (bedrock-runtime, secrets, ssm, ecr, ecr-docker, logs, bedrock-agentcore) | Keep Bedrock/AgentCore/AWS API traffic inside the VPC; least-privilege SG chain so each tier only reaches what it must. |

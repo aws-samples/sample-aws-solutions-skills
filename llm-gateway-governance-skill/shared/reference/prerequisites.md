@@ -22,14 +22,25 @@ See the repo `README.md` → **Quickstart** section for the exact `ln -sf`/`cp -
 
 ## 1. Local tooling
 
-> 💡 **No suitable local machine?** This whole section can run on an **EC2 deploy host** instead —
-> a Graviton instance builds the ARM64 image natively (no QEMU), the instance profile replaces local
-> AWS credentials, and access is SSM-only. See `shared/reference/ec2-deploy-host.md` for the manual
-> plus launch/bootstrap scripts (`scripts/ec2-deploy-host/`). Sections §2-§5 below apply either way.
+> 💡 **Docker (or the whole machine) not workable locally? Three build paths, one decision rule:**
+> 1. **Local Docker (default)** — `docker info` succeeds → CDK `fromAsset()` builds the image at
+>    `cdk deploy` time. Use this whenever Docker runs locally; nothing extra to deploy.
+> 2. **CodeBuild image build** — Docker **cannot** run locally (real case: a managed Windows laptop
+>    where Docker Desktop needs WSL2/Hyper-V and the required admin install + reboot was forbidden)
+>    but Node/CDK/AWS CLI/the AI tool are fine → keep everything local **except the image build**: a
+>    conditional `ImageBuildStack` builds it on **native ARM** in CodeBuild. Set
+>    `litellm.imageBuild.mode='codebuild'` and follow the **3-step deploy order** — see
+>    `shared/patterns/cdk-stacks.md` §4-1.
+> 3. **EC2 deploy host** — the machine is unsuitable beyond Docker (x86-only *and* locked down,
+>    unstable network, can't install Node/CDK either) → run the whole skill from a Graviton instance
+>    (native ARM64 build, instance-profile credentials, SSM-only access). See
+>    `shared/reference/ec2-deploy-host.md` + `scripts/ec2-deploy-host/`.
+>
+> Sections §2–§5 below apply on every path.
 
 | Tool | Minimum version | Why | Verify |
 |---|---|---|---|
-| **Docker** (or Docker Desktop / Podman with Docker socket compat) | Any recent version, **daemon running**, cross-arch build support (see note below) | `LiteLLMStack` builds the proxy image via CDK `fromAsset` (`services/litellm/Dockerfile`) at `cdk deploy` time — no daemon, no deploy | `docker info` succeeds |
+| **Docker** (or Docker Desktop / Podman with Docker socket compat) | Any recent version, **daemon running**, cross-arch build support (see note below) | `LiteLLMStack` builds the proxy image via CDK `fromAsset` (`services/litellm/Dockerfile`) at `cdk deploy` time — no daemon, no deploy. **The one waivable row**: if Docker can't run on this machine at all, use build path 2 (CodeBuild, note above) and skip it | `docker info` succeeds |
 | **Node.js** | 18.x or 20.x LTS | CDK app + `npm`/`npx` toolchain | `node -v` |
 | **AWS CDK CLI** | v2 (`aws-cdk` npm package), matching the `aws-cdk-lib` pinned in `package.json` | `cdk synth`/`cdk deploy`/`cdk bootstrap` | `cdk --version` |
 | **AWS CLI** | v2 | SSO login, CLI verification calls (`sso-admin`, `identitystore`, `ec2 describe-vpc-endpoint-services`, `rds describe-db-engine-versions`) used throughout Phase 1–5 | `aws --version` |
@@ -97,6 +108,12 @@ Pick your OS below. Run the **verify** command after install — all five must s
 > deploy` from** (WSL *or* PowerShell) — `npm install -g` in WSL does not make `cdk` visible in PowerShell,
 > and vice versa. Docker Desktop is the one exception that's shared across both once WSL integration is
 > enabled.
+
+> **Can't install WSL2 or Hyper-V at all?** Docker Desktop on Windows requires one of them, and both need
+> an admin install **and a reboot** — on a managed corporate laptop that can be a hard no (a real reported
+> case). Don't fight it: switch to **build path 2 (CodeBuild image build)** from the note at the top of
+> this section — every other row in this table runs natively in PowerShell, and the image is built on
+> native ARM in CodeBuild instead (`shared/patterns/cdk-stacks.md` §4-1).
 
 ### 1.2 One-shot verify (copy-paste, all OSes)
 
@@ -174,7 +191,7 @@ Only relevant if you plan to answer "yes" to the Phase 1 Observability question.
 ## Quick checklist (copy into your own notes)
 
 - [ ] One of **Kiro / Claude Code / Codex** is installed and this skill is linked into its documented skills directory
-- [ ] `docker info` succeeds (daemon running)
+- [ ] `docker info` succeeds (daemon running) — **or** the deploy uses `litellm.imageBuild.mode='codebuild'` (build path 2: no local Docker needed; 3-step deploy order per `cdk-stacks.md` §4-1)
 - [ ] `node -v` → 18.x/20.x, `cdk --version` → v2, `aws --version` → v2
 - [ ] `aws sts get-caller-identity` resolves to the intended target account
 - [ ] Deploy credentials can create VPC/ECS/RDS/Lambda/APIGW/ALB/ACM/IAM resources

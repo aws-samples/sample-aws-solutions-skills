@@ -763,20 +763,42 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" token "$@"
 ```powershell
 # scripts/get-gateway-token.ps1 (Windows). Contract: stdout = token only,
 # NON-ZERO EXIT on failure — Claude Code/Codex read the exit code.
-# ⚠️ Two Windows-specific rules (both real gotchas):
+# ⚠️ Three Windows-specific rules (all real gotchas):
 #   1. $ErrorActionPreference='Stop' does NOT propagate a native command's
 #      non-zero exit in Windows PowerShell 5.1 — without `exit $LASTEXITCODE`
 #      a failed python still exits 0 and the client uses empty stdout as the
 #      key (unexplained 401s). ALWAYS end with `exit $LASTEXITCODE`.
 #   2. Bare `python` may resolve to the Microsoft Store alias stub (prints
 #      nothing, exit 9009) — prefer the `py -3` launcher when present.
+#   3. PREFLIGHT for "no real Python at all" (real onboarding incident): on a
+#      clean developer box `py` can be entirely absent AND `python` = the Store
+#      stub. A plain `if (Get-Command py) {...} else { & python ... }` fallback
+#      then runs the stub — no output, exit 9009, and the script looks like it
+#      "did nothing" (worst failure mode on the exact machine onboarding exists
+#      for). Probe each candidate with `--version` and demand a real
+#      `Python 3.x` banner + exit 0 (the stub fails both checks); if none
+#      qualifies, fail LOUDLY on stderr — NEVER on stdout, which is reserved
+#      for the token — with the install command.
 $gw = Join-Path $PSScriptRoot "gateway_auth.py"   # $PSScriptRoot: robust from any cwd (PS3+)
-if (Get-Command py -ErrorAction SilentlyContinue) { & py -3 $gw token @args }
-else { & python $gw token @args }
+$pyExe = $null; $pyArgs = @()
+if (Get-Command py -ErrorAction SilentlyContinue) {
+  $v = (& py -3 --version 2>&1) -join ' '
+  if ($LASTEXITCODE -eq 0 -and $v -match 'Python 3') { $pyExe = 'py'; $pyArgs = @('-3') }
+}
+if (-not $pyExe -and (Get-Command python -ErrorAction SilentlyContinue)) {
+  $v = (& python --version 2>&1) -join ' '
+  if ($LASTEXITCODE -eq 0 -and $v -match 'Python 3') { $pyExe = 'python' }
+}
+if (-not $pyExe) {
+  [Console]::Error.WriteLine("ERROR: no working Python 3 found ('py' is missing/broken and 'python' is absent or the Microsoft Store alias stub).")
+  [Console]::Error.WriteLine("Install Python 3 and re-run:  winget install Python.Python.3.12")
+  exit 1
+}
+& $pyExe @pyArgs $gw token @args
 exit $LASTEXITCODE
 ```
 
-Generate `llmgw-login.ps1`, `setup-developer.ps1`, and `healthcheck.ps1` **identically**, replacing the `token` subcommand with `login` / `setup` / `healthcheck` — every `.ps1` launcher is this same 4-line pattern (py-launcher preference + `exit $LASTEXITCODE`), never more.
+Generate `llmgw-login.ps1`, `setup-developer.ps1`, and `healthcheck.ps1` **identically**, replacing the `token` subcommand with `login` / `setup` / `healthcheck` — every `.ps1` launcher is this same fixed pattern (`$PSScriptRoot` resolve → **Python-3 preflight** → invoke → `exit $LASTEXITCODE`), and **nothing more**: the interpreter preflight is the ONLY logic a launcher may contain; all onboarding/derivation/merge logic stays in `gateway_auth.py` (§1A). (This rule used to read "the same 4-line pattern, never more" — the preflight amendment exists because the 4-line form silently ran the Store stub on machines with **no** real Python, the reported "script does nothing" incident above. Do not regress to the 4-line form, and do not grow the launcher beyond this pattern either.)
 
 Claude Code / Codex Windows helper when PowerShell execution policy is restrictive — `setup` writes exactly this form automatically (using `sys.executable` + the `~/.llm-gateway` copy it installs, so the path really exists and survives repo moves):
 
@@ -828,10 +850,11 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" setup "$@"
 
 ```powershell
 # setup-developer.ps1 — one-shot developer onboarding (Windows thin launcher).
-$gw = Join-Path $PSScriptRoot "gateway_auth.py"
-if (Get-Command py -ErrorAction SilentlyContinue) { & py -3 $gw setup @args }
-else { & python $gw setup @args }
-exit $LASTEXITCODE
+# EXACTLY the §1A golden .ps1 launcher ($PSScriptRoot resolve → Python-3
+# preflight → invoke → exit $LASTEXITCODE) with the `setup` subcommand
+# substituted. Regenerate it from that block — never hand-roll a variant here,
+# or the preflight drifts out of one launcher and the "script does nothing"
+# stub incident comes back on the one script every new developer runs first.
 ```
 
 What `setup` performs (implemented once, in Python — §1A):
@@ -875,7 +898,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 exec python3 "$SCRIPT_DIR/gateway_auth.py" healthcheck "$@"
 ```
 
-(`healthcheck.ps1` is the standard 4-line PowerShell launcher from §1A with the `healthcheck` subcommand — py-launcher preference + `exit $LASTEXITCODE`.)
+(`healthcheck.ps1` is the standard §1A PowerShell launcher with the `healthcheck` subcommand — Python-3 preflight + `exit $LASTEXITCODE`. The preflight matters here too: a healthcheck that silently does nothing on a Python-less box would defeat its purpose.)
 
 > **WHY print only the key length (`got key (N chars)`)?** The virtual key (`sk-...`) is a secret, so its value is never written to logs.
 > Showing only the length proves "issued successfully." The health probe hits `/health/liveliness` (LiteLLM's default endpoint).

@@ -89,6 +89,7 @@ GPT-5.x (Mantle) is **us-east-1 only**; reach it privately via cross-region VPC 
 
 - Mantle models are **AWS Marketplace** offerings. The LiteLLM Task Role needs `aws-marketplace:Subscribe` (+ `ViewSubscriptions`/`Unsubscribe`) — without it the first GPT-5.x call returns `access_denied ... aws-marketplace:Subscribe`.
 - The **first** call auto-subscribes (~1 min). Steady-state is sub-second. Recommend a one-time per-model warm-up after a fresh-account deploy.
+- **Warm-up calls must use `max_tokens` ≥ 16** — the Mantle (OpenAI Responses) route rejects smaller values with `integer_below_min_value ... Expected a value >= 16` (a tiny probe like `max_tokens: 10` fails; use e.g. `max_tokens: 32`). Claude routes don't have this floor, so a warm-up loop that reuses one payload across all models must satisfy the strictest one.
 - **Long completions are governed by the ALB `idleTimeout`, not any CloudFront ceiling.** CloudFront is removed, so the old **hard 120s VPC-Origin read-timeout ceiling is gone** — it used to 504 Opus/Fable extended-thinking responses **with no matching LiteLLM access-log line** (CloudFront severed the origin connection before uvicorn logged). Now set `config.litellm.albIdleTimeoutSeconds` (default 900s, max 4000s) high enough for your longest completion (measured: a Fable 5 extended-thinking 500-word essay took ~24s — there is now ample headroom above that). The same idle timeout absorbs the Marketplace cold-start on the first Mantle call. Diagnostic hint: if a client still sees a 504/timeout, check the ALB `idleTimeout` and the ECS target health first, then query CloudWatch Logs Insights at the failure timestamp to confirm whether the request reached the origin.
 
 ## Region selection (config.awsRegion is authoritative)
@@ -187,6 +188,29 @@ time — `docker build` succeeds, `cdk deploy` succeeds, the CloudFormation stac
   deploy host — but this gives up the Graviton cost/perf advantage documented elsewhere in this skill, so
   prefer fixing the build `platform` instead unless there is a specific reason to standardize on x86_64.
 
+## CodeBuild image-build path (no local Docker) — API traps (real-deploy incidents)
+
+When Docker can't run on the deploy machine at all (managed Windows laptop, WSL2/Hyper-V install forbidden),
+the image builds in CodeBuild instead — `litellm.imageBuild.mode='codebuild'`, full pattern in
+`cdk-stacks.md` §4-1. Three traps, all hit on the real deploy that produced the pattern:
+
+- **`codebuild.ComputeType.ARM_CONTAINER` does not exist in aws-cdk-lib** — doc snippets/autocomplete
+  suggest it, but `tsc` fails (property does not exist). ARM is selected by the **build image**
+  (`codebuild.LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_3_0`) with `ComputeType.SMALL` +
+  `privileged: true` (docker-in-docker). Do not emit `ARM_CONTAINER`.
+- **`StartBuild` is not a CloudFormation resource** — `cdk deploy` of the build stack creates a project
+  that has never run, and `cdk deploy --all` will NOT wait for (or trigger) an image build. The deploy is
+  therefore an explicit **3-step order**: deploy `ImageBuildStack` → `aws codebuild start-build` + poll to
+  `SUCCEEDED` + `aws ecr describe-images` to confirm the tag exists → deploy the remaining stacks.
+  Skipping step 2 fails **late**: synth and deploy succeed, then ECS tasks die with
+  `CannotPullContainerError` (same late-failure shape as the x86 architecture mismatch above).
+- **Never tag the image `:latest` on this path** — `fromEcrRepository(repo, tag)` pins the tag into the
+  task definition at synth; a rebuilt `:latest` produces no CloudFormation diff, so the service silently
+  keeps running the stale image. Tag with the **content hash of `services/litellm/`** (the CDK source
+  asset's `assetHash`) so a source change rolls the service by itself.
+- cdk-nag fires **CB3** (privileged mode — required for `docker build`) and **CB4** (no customer-managed
+  KMS key) on the project; both are suppressed inline in the stack with written reasons (§4-1).
+
 ## Data
 
 - `removalPolicy: DESTROY` + deletion protection off is intentional for a tear-downable dev sample. **Production: `RETAIN` + backups + deletion protection.**
@@ -210,7 +234,10 @@ time — `docker build` succeeds, `cdk deploy` succeeds, the CloudFormation stac
 
 - Claude Fable 5 and Claude Mythos 5 are restricted to `allowed_modes: ["provider_data_share"]` (per their model cards + `bedrock/latest/userguide/data-retention.html`). If the account (or project) data-retention mode is `default` or `none`, the call is **blocked outright**.
 - `provider_data_share` permits prompts/responses to be **retained by Anthropic for 30 days and subject to human safety review** — a policy decision that **must be surfaced at GATE 1 and explicitly approved by the account owner**, never assumed.
-- No console UI — set it via the Bedrock control-plane REST API. **⚠️ Your installed AWS CLI/boto3 may not have this API yet** (real deploy: CLI 2.27.x and boto3 1.42.x both lacked `put-account-data-retention`). Bypass with a raw SigV4-signed request — and note the path is **`/data-retention`**, NOT `/account-data-retention` (guessing the path from the API name `PutAccountDataRetention` returns `404 UnknownOperationException`; confirm the path in the official docs first):
+- No console UI — read/set it via the Bedrock control plane, **in this order** (do NOT jump straight to the SigV4 bypass below — on a later real deploy the plain CLI just worked, and the account was already opted in, so steps 1–2 were the whole job):
+  1. **Read current mode first**: `aws bedrock get-account-data-retention --region <region>`. If it already reports `provider_data_share`, there is nothing to set in that region — stop here.
+  2. **Set via the plain CLI**: `aws bedrock put-account-data-retention --data-retention-config '{"mode":"provider_data_share"}' --region <region>` (only after the GATE-1 approval above; verify the exact parameter shape with `aws bedrock put-account-data-retention help` — don't guess).
+  3. **Only if the CLI lacks the subcommand** (`Invalid choice` — seen on older toolchains: CLI 2.27.x / boto3 1.42.x; newer CLIs have it) fall back to a raw SigV4-signed request — and note the path is **`/data-retention`**, NOT `/account-data-retention` (guessing the path from the API name `PutAccountDataRetention` returns `404 UnknownOperationException`; confirm the path in the official docs first):
   ```python
   # botocore SigV4-signed PUT (works even when the CLI/boto3 service model lacks the API)
   from botocore.auth import SigV4Auth
@@ -294,6 +321,12 @@ Three distinct request paths must each be verified — passing one does NOT prov
 3. **Full SSO path**: `aws sso login` → key helper → API Gateway (IAM) → Token Lambda → virtual key.
    Proves the SSO permission set + inline policy + assignment.
 
+**Endpoint-prefix trap (real verification stumble)**: LiteLLM **management** endpoints live at the
+**root** — `POST <gateway-url>/key/generate`, `/team/new`, `/user/info`, `/key/delete` — with **no
+`/v1`**. `POST /v1/key/generate` returns **404**. Only the OpenAI-compatible **inference** surface
+(`/v1/chat/completions`, `/v1/responses`, `/v1/models`) is under `/v1`. When a verification step
+mixes both (mint a key, then call the model with it), the prefix changes between the two calls.
+
 A common failure: paths 1 and 2 pass but path 3 fails (clients silently get nothing) because of an
 **SSO inline-policy region mismatch** (next gotcha). Always test path 3 with a real SSO user — do not
 declare success from a master-key test alone.
@@ -338,7 +371,7 @@ declare success from a master-key test alone.
 - Generate a shared Python core (`gateway_auth.py`, subcommands `setup`/`login`/`token`/`healthcheck`/`mcp-headers`, **covering BOTH auth modes** — org-sso `token` is boto3 SigV4, imported lazily) and thin launchers (`llmgw-login.sh` / `.ps1`, `get-gateway-token.sh` / `.ps1`, `setup-developer.sh` / `.ps1`, `healthcheck.sh` / `.ps1`). **All onboarding merge/derivation logic lives in `gateway_auth.py setup` once** — never re-implement the settings.json/config.toml merge in shell or PowerShell; a second implementation is how the merge rules drift and the overwrite incident recurs on the OS nobody tested.
 - **`org-sso` on Windows has no bash**: the §1 bash+here-doc helper is POSIX-only legacy. A Windows developer in an org-sso deployment uses `get-gateway-token.ps1` → `gateway_auth.py token` (built-in SigV4). Never present a `.sh` as the Windows path in either auth mode.
 - **PowerShell launchers MUST end with `exit $LASTEXITCODE` (exit-code contract).** In Windows PowerShell 5.1, `$ErrorActionPreference='Stop'` does **not** propagate a native command's non-zero exit — without the explicit `exit`, a failed `python` still exits 0, Claude Code/Codex treat empty stdout as the key, and the developer sees unexplained 401s instead of the helper's stderr diagnostic.
-- **Bare `python` is unreliable on Windows**: on a stock machine it resolves to the Microsoft Store *app-execution alias* stub (prints nothing, exit 9009). Launchers prefer the `py -3` launcher when present (`Get-Command py`); config values written by `setup` use the absolute `sys.executable` path instead of `python`.
+- **Bare `python` is unreliable on Windows**: on a stock machine it resolves to the Microsoft Store *app-execution alias* stub (prints nothing, exit 9009). Launchers prefer the `py -3` launcher when present (`Get-Command py`); config values written by `setup` use the absolute `sys.executable` path instead of `python`. **Preferring `py -3` is necessary but NOT sufficient (real onboarding incident)**: on a clean developer box `py` can be entirely absent AND `python` the stub — a plain `if (Get-Command py) {...} else { & python ... }` fallback then runs the stub and the launcher "does nothing" (blank output, exit 9009), which reads as a broken script. Every `.ps1` launcher therefore runs a **Python-3 preflight**: probe `py -3` then `python` with `--version`, accept only exit 0 + a `Python 3.x` banner, else print an actionable install hint (`winget install Python.Python.3.12`) to **stderr** (stdout stays reserved for the token) and `exit 1`. Golden block: `developer-onboarding.md` §1A.
 - **Launchers must resolve their own real path** so they run from any cwd (including a `~/.local/bin` symlink): bash uses a `readlink` loop over `$BASH_SOURCE` (`dirname "$0"` alone returns the symlink's dir, not the target); PowerShell uses `$PSScriptRoot` (more robust than `$MyInvocation.MyCommand.Path`; PS3+). Do not write launchers that assume the repo cwd (`REPO="$(cd "$(dirname "$0")/.." && pwd)"` breaks once symlinked).
 - Avoid bash-only behavior: no required `sed`, `chmod`, POSIX paths, or here-docs in the Windows path. Prefer `pathlib`, `webbrowser`, `http.server`, and `urllib` in Python.
 - **`os.chmod(0o600)` is a NO-OP on Windows** (it only maps to the read-only flag). Any "written 0600" guarantee (token caches, `admin-onboarding.html`) must be backed on Windows by `icacls <file> /inheritance:r /grant:r <user>:F` — `gateway_auth.py` does this best-effort in `_restrict_perms`, and `gen-onboarding.py` must do the same for the admin doc.

@@ -125,16 +125,18 @@ litellm_settings:
   modify_params: true
   # ⚠️ each callback value MUST be a litellm CustomLogger SUBCLASS INSTANCE, not a
   #    bare function. All callbacks below are instances (see callbacks/*.py).
-  #    - user_trace: injects the SSO/Cognito user identity into traces.
+  #    - user_trace: injects the SSO/Cognito user identity into traces so the
+  #      Langfuse Users view aggregates per human (source: Section 5).
   #    - mantle_token_refresh: mints/refreshes BEDROCK_MANTLE_API_KEY in-process.
   #    - cloudwatch_usage: emits one CloudWatch EMF record per request (tokens/
   #      spend/latency by Model+Team; caller identity as a log property) — feeds
   #      the ObservabilityStack dashboard. ALWAYS keep it (works with or without
   #      Langfuse; no IAM, no network — just a stdout line).
   #    When enableLangfuse=false, OMIT success_callback/failure_callback/
-  #    langfuse_default_tags (and user_trace if desired) — but KEEP
-  #    mantle_token_refresh whenever any GPT/Mantle model is offered, and KEEP
-  #    cloudwatch_usage always.
+  #    langfuse_default_tags AND user_trace (it exists solely for Langfuse user
+  #    attribution) — the user_trace.py FILE stays bundled in the image either
+  #    way (Section 5). KEEP mantle_token_refresh whenever any GPT/Mantle model
+  #    is offered, and KEEP cloudwatch_usage always.
   callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback", "cloudwatch_usage.cloudwatch_usage_callback"]
   success_callback: ["langfuse"]
   failure_callback: ["langfuse"]
@@ -216,7 +218,8 @@ before adding, don't assume GPT-5.x behavior generalizes.
 - `drop_params` / `drop_params_if_unset` / `modify_params: true` — **WHY**: Claude and GPT accept different parameter
   specs; dropping incompatible params lets one client call target either model.
 - `callbacks: ["user_trace.user_trace_callback", "mantle_token_refresh.mantle_token_refresh_callback", "cloudwatch_usage.cloudwatch_usage_callback"]` — three custom
-  `CustomLogger` instances bundled in the image: `user_trace` injects the caller identity into traces;
+  `CustomLogger` instances bundled in the image: `user_trace` injects the caller identity into traces (Section 5 —
+  Langfuse-only; drop it from this list when `enableLangfuse=false`);
   `mantle_token_refresh` mints/refreshes `BEDROCK_MANTLE_API_KEY` (Section 3); `cloudwatch_usage` emits per-request
   EMF usage records for the CloudWatch dashboard (Section 4). All must be **instances**, not bare functions.
 - `success_callback` / `failure_callback: ["langfuse"]` + `langfuse_default_tags` — observe every request via Langfuse;
@@ -305,7 +308,12 @@ ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
   the real `transformation.py` from the new tag, not from release notes.
 - **`COPY --from=ghcr.io/astral-sh/uv` + `uv pip install`** — the base image has no `pip` (`No module named pip`), so
   packages are added with `uv` into `/app/.venv`. This is the only supported way to add `aws-bedrock-token-generator`.
-- **Bundled files** — `user_trace.py`, `mantle_token_refresh.py` (Section 3), `cloudwatch_usage.py` (Section 4), `config.yaml` (Section 1), `entrypoint.sh`.
+- **Bundled files** — `user_trace.py` (Section 5), `mantle_token_refresh.py` (Section 3), `cloudwatch_usage.py` (Section 4), `config.yaml` (Section 1), `entrypoint.sh`.
+  **Consistency rule**: every module named in `config.yaml`'s `callbacks` list must have its `.py` COPYed here, and every
+  COPY source file must actually be generated — a missing source file fails `docker build` at the COPY step, and a
+  `callbacks` entry whose module isn't in the image kills the container at boot with an ImportError (circuit-breaker
+  rollback). `user_trace.py` is bundled **even when `enableLangfuse=false`** (only the `callbacks` list changes — the
+  image stays identical across environments, per the env-driven design principle).
 - **`EXPOSE 4000`** — the LiteLLM Proxy port; must match the ALB target port.
 
 ### 2.2 entrypoint.sh
@@ -657,6 +665,109 @@ cloudwatch_usage_callback = CloudWatchUsage()
 - **Single line, `flush=True`** — EMF requires the full JSON in one log event; a pretty-printed record is split across events and extracts nothing. Flush because uvicorn workers buffer stdout.
 - **Never raises** — a metrics bug must not turn into a 500 on the inference path; failures degrade to a warning line.
 - **Verify after deploy** (same discipline as the other callbacks): make one test call, then check (1) the log group for a `"llmgw": "usage"` line, (2) `aws cloudwatch list-metrics --namespace <METRICS.NAMESPACE>` shows `TotalTokens` etc. within ~2 minutes. If the metric list stays empty but the log line exists, the record is malformed EMF (multi-line, or an empty dimension value).
+
+---
+
+## Section 5: callbacks/user_trace.py — caller identity in traces (Langfuse user attribution)
+
+> **Why this section exists**: an earlier revision of this document *referenced*
+> `user_trace.user_trace_callback` in three places (config `callbacks`, Dockerfile `COPY`, bundled-files
+> list) but never shipped the source — following the document verbatim then either broke `docker build`
+> (`COPY callbacks/user_trace.py` with no file) or crash-looped the container at boot (`callbacks` entry
+> with no module → ImportError). A real deployment hit exactly this and had to strip the callback by hand.
+> The source below closes that gap. **Generate this file whenever the other callbacks are generated.**
+
+Purpose: LiteLLM's Langfuse integration tags traces with the virtual key's ids
+(`langfuse_default_tags: ["user_api_key_user_id", "user_api_key_alias"]` — Section 1), but **tags alone
+don't populate Langfuse's trace-level user field**, so the Users view can't aggregate per human. This
+callback copies the identity the proxy already resolved from the virtual key (minted by the Token
+Service after SSO/Cognito auth) into `metadata.trace_user_id`, which the Langfuse logger reads from
+request metadata.
+
+**Conditionality (explicit)**: `user_trace` is only *meaningful* with Langfuse enabled.
+When `enableLangfuse=false`, **omit it from `litellm_settings.callbacks`** (alongside
+`success_callback`/`failure_callback`/`langfuse_default_tags`) — but **still generate and `COPY` the
+file** (Section 2.1 consistency rule): the image is env-driven and identical across environments; the
+Langfuse toggle changes only the config, never the image contents.
+
+The full `services/litellm/callbacks/user_trace.py`:
+
+```python
+"""user_trace.py — inject the SSO/Cognito caller identity into traces.
+
+The proxy resolves the virtual key BEFORE pre-call hooks run and passes the
+resolved identity as `user_api_key_dict` (user_id / user_email / key_alias /
+team_alias). The Langfuse logger reads trace attributes from the request's
+metadata dict -- so this hook only copies identity fields across:
+
+  metadata.trace_user_id  <- user_id (Token Service sets it to the SSO/Cognito
+                             identity) -> Langfuse trace-level user field,
+                             which is what the Users view aggregates on.
+                             (langfuse_default_tags only adds TAGS -- tags do
+                             not populate the user field.)
+
+CONDITIONAL callback: registered in config.yaml litellm_settings.callbacks as
+`user_trace.user_trace_callback` ONLY when Langfuse is enabled. The file is
+bundled in the image either way (Section 2.1 consistency rule: every callbacks
+entry needs its module in the image, or the container ImportErrors at boot).
+
+Never raises: trace decoration must not turn into a 500 on the inference path.
+"""
+
+import logging
+import sys
+
+from litellm.integrations.custom_logger import CustomLogger
+
+logger = logging.getLogger("user_trace")
+if not logger.handlers:
+    # Same rationale as the other callbacks: this LiteLLM build does not
+    # propagate third-party module loggers to stdout without an explicit handler.
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(asctime)s user_trace %(levelname)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+
+
+class UserTrace(CustomLogger):
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        try:
+            user = (
+                getattr(user_api_key_dict, "user_id", None)
+                or getattr(user_api_key_dict, "user_email", None)
+                or getattr(user_api_key_dict, "key_alias", None)
+            )
+            if user:
+                metadata = data.setdefault("metadata", {})
+                # Don't clobber an explicit client-supplied trace_user_id.
+                metadata.setdefault("trace_user_id", str(user))
+                team = getattr(user_api_key_dict, "team_alias", None)
+                if team:
+                    metadata.setdefault("trace_metadata", {}).setdefault("team", str(team))
+        except Exception:  # noqa: BLE001 - never break a request over trace decoration
+            logger.warning("failed to inject caller identity into trace metadata", exc_info=True)
+        return data
+
+
+user_trace_callback = UserTrace()
+```
+
+**WHY, item by item**:
+
+- **`async_pre_call_hook`, mutate-and-return `data`** — same hook contract as `mantle_token_refresh`
+  (Section 3): the proxy has already authenticated the virtual key, so the resolved identity is available
+  here, before the model call and before the Langfuse logger snapshots metadata.
+- **`setdefault`, never assign** — a client that explicitly sets `trace_user_id` (or a team that layers
+  its own metadata) wins; the callback only fills gaps. This keeps it safe to run on every request.
+- **Identity priority `user_id` → `user_email` → `key_alias`** — the Token Service mints keys with
+  `user_id` = the SSO/Cognito identity (see `lambda/token-service/`), so that field is the stable,
+  human-meaningful one; the others are fallbacks for keys minted outside the Token Service (e.g. a
+  master-key admin test).
+- **Never raises + WARNING-level logger** — identical discipline to `cloudwatch_usage` (Section 4): a
+  trace-decoration bug must degrade to a log line, not a 500. The explicit stdout handler exists for the
+  same reason as in Section 3 (this build swallows module logs otherwise).
+- **No network, no IAM** — pure dict mutation in-process; nothing extra to deploy or permit.
 
 ---
 

@@ -968,6 +968,8 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
       // `exec format error` in CloudWatch Logs — see constraints.md "Docker build architecture
       // mismatch on x86 hosts". Pin `platform` explicitly so the build always matches
       // `runtimePlatform.cpuArchitecture`, regardless of the deploy host's own architecture.
+      // (No local Docker AT ALL — daemon can't even be installed? See §4-1: imageBuild.mode
+      // = 'codebuild' swaps this fromAsset() for fromEcrRepository() + a native-ARM CodeBuild.)
       image: ecs.ContainerImage.fromAsset(path.join(__dirname, '..', 'services', 'litellm'), {
         platform: ecrAssets.Platform.LINUX_ARM64,
       }),
@@ -1209,6 +1211,252 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
 - **SSM publishing (runtime wiring):** writes `http://{albDns}:4000` to `SSM.LITELLM_INTERNAL_URL`. The Auth Lambda looks it up at runtime by this name → avoids a LiteLLM↔Auth deploy-time cross-ref (connected to the `internalUrlSsmParameterName` design in interface §0-1).
 - **ARM64 (Graviton) + circuitBreaker (rollback) + health-check grace 90s** — cost/stability. LiteLLM boots slowly, hence `startPeriod: 90s`.
 - **Cross-layer mapping**: `masterKeySecret` (→Auth grantRead), `loadBalancer` (= the public edge ALB), `publicHttpsUrl`/`internalUrlSsmParameterName` (→Auth/Observability) flow as `LiteLLMExports`.
+
+---
+
+## 4-1. ImageBuildStack (conditional) — build the LiteLLM image in CodeBuild when local Docker is unavailable
+
+**Decision rule (Discovery / prerequisites): if `docker info` succeeds on the deploy machine, use the
+default `fromAsset()` local build (§4) — do NOT deploy this stack. Only when Docker cannot run locally
+at all** (real case: a corporate Windows laptop where Docker Desktop needs WSL2/Hyper-V, both of which
+need an admin install **and a reboot** that policy forbade) **and the operator still wants to keep
+CDK + the AI tool local** (i.e. the full `ec2-deploy-host.md` move is heavier than the problem),
+delegate ONLY the image build to CodeBuild: a conditional `ImageBuildStack` (ECR repository + CodeBuild
+project on **native ARM** — no QEMU, no cross-build) builds and pushes the image, and `LiteLLMStack`
+consumes it via `fromEcrRepository()` instead of `fromAsset()`. Everything else about the deploy is
+unchanged. (If more than Docker is unsuitable on the machine, prefer the EC2 deploy host instead.)
+
+Config: `config.litellm.imageBuild?.mode: 'local-docker' | 'codebuild'` (absent = `'local-docker'`,
+the §4 default). Add to `LiteLLMConfig` in `lib/config/schema.ts`:
+
+```typescript
+  /**
+   * Where the LiteLLM proxy image is built:
+   *  - 'local-docker' (default; field may be omitted): CDK fromAsset() runs `docker build`
+   *    on the deploy machine — daemon required, QEMU on x86 hosts (§4).
+   *  - 'codebuild'   : no local Docker anywhere in the deploy — the conditional
+   *    ImageBuildStack (ECR + CodeBuild, native ARM) builds/pushes the image and
+   *    LiteLLMStack consumes it via fromEcrRepository(). Requires the 3-step deploy
+   *    order documented in cdk-stacks.md §4-1.
+   */
+  readonly imageBuild?: { readonly mode: 'local-docker' | 'codebuild' };
+```
+
+Append to `lib/interfaces.ts` (the §0-1 append-only contract):
+
+```typescript
+/** ImageBuildStack (conditional — litellm.imageBuild.mode === 'codebuild' only). */
+export interface ImageBuildExports {
+  readonly repository: ecr.IRepository;
+  /** Deterministic image tag = content hash of services/litellm/ (NEVER ':latest' — see §4-1 WHY). */
+  readonly imageTag: string;
+}
+```
+
+The full `lib/image-build-stack.ts`:
+
+```typescript
+import * as path from 'path';
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as codebuild from 'aws-cdk-lib/aws-codebuild';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
+import { NagSuppressions } from 'cdk-nag';
+import { ImageBuildExports } from './interfaces';
+import { ns } from './config/constants';
+
+/**
+ * Builds the LiteLLM proxy image in CodeBuild on NATIVE ARM when the deploy
+ * machine has no usable Docker (imageBuild.mode === 'codebuild').
+ *
+ * ⚠️ Deploy-order contract: `cdk deploy` of this stack creates the project but
+ * does NOT run it (StartBuild is an API call, not a CloudFormation resource).
+ * The image must exist in ECR BEFORE LiteLLMStack deploys — see the 3-step
+ * procedure below this stack.
+ */
+export class ImageBuildStack extends cdk.Stack implements ImageBuildExports {
+  public readonly repository: ecr.IRepository;
+  public readonly imageTag: string;
+
+  constructor(scope: Construct, id: string, props: cdk.StackProps) {
+    super(scope, id, props);
+
+    // Replaces the CDK-managed asset repository that fromAsset() would have used.
+    const repo = new ecr.Repository(this, 'LitellmRepo', {
+      repositoryName: ns('litellm'),
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // dev sample: tear-downable
+      emptyOnDelete: true,
+    });
+
+    // The build context (services/litellm/) travels as a CDK S3 asset:
+    // `cdk deploy` re-uploads it whenever its content changes, and the asset's
+    // content hash doubles as the image tag — one hash names both the source
+    // zip and the image built from it.
+    const source = new s3assets.Asset(this, 'LitellmBuildContext', {
+      path: path.join(__dirname, '..', 'services', 'litellm'),
+    });
+    this.imageTag = source.assetHash;
+
+    const project = new codebuild.Project(this, 'LitellmImageBuild', {
+      projectName: ns('litellm-image-build'),
+      description: 'Builds the LiteLLM proxy image natively on ARM (no local Docker, no QEMU)',
+      source: codebuild.Source.s3({ bucket: source.bucket, path: source.s3ObjectKey }),
+      environment: {
+        // ⚠️ API trap (cost a real deploy an edit-fail-retry loop): there is NO
+        // `codebuild.ComputeType.ARM_CONTAINER` in aws-cdk-lib, even though docs
+        // snippets/autocomplete suggest it. ARM is selected by the BUILD IMAGE
+        // (LinuxArmBuildImage.*); computeType stays SMALL/MEDIUM/LARGE.
+        buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_3_0,
+        computeType: codebuild.ComputeType.SMALL,
+        privileged: true, // `docker build` inside CodeBuild needs privileged mode (nag CB3 below)
+      },
+      environmentVariables: {
+        REPO_URI: { value: repo.repositoryUri },
+        IMAGE_TAG: { value: this.imageTag },
+      },
+      buildSpec: codebuild.BuildSpec.fromObject({
+        version: '0.2',
+        phases: {
+          pre_build: {
+            commands: [
+              // ${REPO_URI%%/*} = the registry host (docker login wants the host, not the repo path).
+              'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin "${REPO_URI%%/*}"',
+            ],
+          },
+          build: {
+            commands: [
+              // Native arm64 host: no --platform flag, no binfmt/QEMU setup. The x86
+              // cross-build guidance in prerequisites.md does not apply on this path.
+              'docker build -t "$REPO_URI:$IMAGE_TAG" .',
+            ],
+          },
+          post_build: { commands: ['docker push "$REPO_URI:$IMAGE_TAG"'] },
+        },
+      }),
+    });
+    repo.grantPullPush(project);
+    // Explicit, version-independent grant: `docker login` needs GetAuthorizationToken,
+    // which is account-scoped ('*' is the only valid resource for this action).
+    project.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken'], resources: ['*'] }),
+    );
+
+    this.repository = repo;
+
+    new cdk.CfnOutput(this, 'ImageBuildProjectName', { value: project.projectName });
+    new cdk.CfnOutput(this, 'LitellmImageUri', { value: `${repo.repositoryUri}:${this.imageTag}` });
+
+    // cdk-nag — both fired unsuppressed in the real deploy that produced this pattern
+    // (suppressed inline so the conditional stack stays self-contained; see §9 note):
+    NagSuppressions.addResourceSuppressions(project, [
+      {
+        id: 'AwsSolutions-CB3',
+        reason:
+          'Privileged mode is required to run `docker build` inside CodeBuild; the project builds exactly one container image and runs no other workload.',
+      },
+      {
+        id: 'AwsSolutions-CB4',
+        reason:
+          'Build artifacts/cache use AWS-managed encryption; a customer-managed KMS key is out of scope for the dev sample. PROD TODO: pass encryptionKey.',
+      },
+    ]);
+  }
+}
+```
+
+Wiring in `bin/app.ts` (between Guardrail and LiteLLM; the fixed stack order gains one conditional member):
+
+```typescript
+// ---- 2.7 ImageBuild (conditional: only when litellm.imageBuild.mode === 'codebuild') --
+const imageBuild =
+  config.litellm.imageBuild?.mode === 'codebuild'
+    ? new ImageBuildStack(app, 'ImageBuildStack', stackProps('image-build'))
+    : undefined;
+
+// ---- 3. LiteLLM (unchanged except the extra prop) ----------------------------
+const litellm = new LiteLLMStack(app, 'LiteLLMStack', {
+  /* ...exactly the §0 props... */
+  imageBuild, // undefined → default local fromAsset() build
+});
+```
+
+Image selection inside `LiteLLMStack` (replaces the bare `fromAsset()` call in §4's `addContainer`;
+`imageBuild?: ImageBuildExports` is added to `LiteLLMStackProps`):
+
+```typescript
+    // Local Docker (default): build at deploy time, ARM64-pinned (§4 WHY comment).
+    // CodeBuild path: the image was ALREADY built+pushed by ImageBuildStack —
+    // fromEcrRepository() has no build step, so nothing here touches Docker.
+    const containerImage = props.imageBuild
+      ? ecs.ContainerImage.fromEcrRepository(props.imageBuild.repository, props.imageBuild.imageTag)
+      : ecs.ContainerImage.fromAsset(path.join(__dirname, '..', 'services', 'litellm'), {
+          platform: ecrAssets.Platform.LINUX_ARM64,
+        });
+
+    taskDef.addContainer('litellm', {
+      image: containerImage,
+      /* ...rest identical to §4... */
+    });
+```
+
+**The 3-step deploy order (MANDATORY on this path — `cdk deploy --all` alone ships no image):**
+
+```bash
+# 1) Deploy ONLY the image-build stack (creates ECR + the CodeBuild project, and
+#    uploads services/litellm/ as the S3 source asset):
+cdk deploy <prefix>-image-build --outputs-file image-build-outputs.json
+
+# 2) Run the build and WAIT for it — cdk deploy does NOT do this (StartBuild is an
+#    API call, not a CloudFormation resource):
+BUILD_ID=$(aws codebuild start-build --project-name <prefix>-litellm-image-build \
+  --query 'build.id' --output text)
+aws codebuild batch-get-builds --ids "$BUILD_ID" \
+  --query 'builds[0].{status:buildStatus,phase:currentPhase}'   # poll until SUCCEEDED (~3–6 min)
+# Then verify the image actually landed — LiteLLMStack task launch would otherwise
+# fail with CannotPullContainerError:
+aws ecr describe-images --repository-name <prefix>-litellm \
+  --image-ids imageTag=<IMAGE_TAG from LitellmImageUri output>
+
+# 3) Deploy everything else as usual:
+cdk deploy --all --outputs-file outputs.json
+```
+
+**Rebuild on change**: any edit under `services/litellm/` changes the asset hash → repeat 1→2→3.
+Step 1 re-uploads the context and stamps the new `IMAGE_TAG`; step 3 rolls the ECS service *because
+the task definition's image tag changed* — which is exactly WHY the tag is the content hash.
+
+**WHY, item by item**:
+
+- **Native ARM build image, not QEMU** — `LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_3_0` runs on
+  Graviton, so the ARM64 image that `runtimePlatform.cpuArchitecture: ARM64` expects is built natively.
+  The entire "x86 host cross-build / binfmt / exec format error" constraint class (constraints.md)
+  does not exist on this path.
+- **`ComputeType.ARM_CONTAINER` does not exist** — the single most likely generation error here.
+  The CDK API selects ARM via the build image; if you emit `ComputeType.ARM_CONTAINER`, `tsc` fails
+  (property does not exist). Real-deploy verified: `LinuxArmBuildImage` + `ComputeType.SMALL` +
+  `privileged: true` is the working combination.
+- **`StartBuild` is not a CloudFormation resource** — deploying the stack creates a project that has
+  *never run*. `cdk deploy` returns long before any image exists, so the deploy is split into the
+  explicit 3 steps above. A Custom Resource (Lambda that runs `StartBuild` + polls, so `cdk deploy
+  --all` becomes one-shot) is a legitimate *enhancement*, but the explicit 3-step is this skill's
+  default: fewer generated moving parts, and the failure surface (a red build) is directly visible
+  in the CodeBuild console instead of buried in a CR Lambda's logs.
+- **Tag = asset hash, never `:latest`** — with a static tag, a rebuilt image changes nothing in the
+  task definition → CloudFormation sees no diff → ECS keeps running the stale image (and
+  `fromEcrRepository` pins by tag at synth). The content hash makes "source changed" and "service
+  rolls" the same event, and step 2 provably built the exact context step 1 uploaded.
+- **`fromEcrRepository()` has no build step** — it only *references* `repo:tag`. If step 2 is skipped
+  (or the tag doesn't exist), synth and `cdk deploy` still succeed and the failure appears only at
+  task launch as `CannotPullContainerError` — same late-failure shape as the §4 architecture-mismatch
+  trap, hence the explicit `describe-images` verification in step 2.
+- **cdk-nag CB3/CB4** — privileged mode (required for docker-in-docker builds) and no customer-managed
+  KMS key on the build artifacts both fire on every deploy of this stack; the suppressions ship inline
+  with written reasons per the skill-wide rule.
+- **Scope guard** — this stack exists for "local Docker impossible, everything else fine". If Node/CDK/
+  credentials/network are *also* unsuitable, use the EC2 deploy host (`ec2-deploy-host.md`) instead of
+  stretching this pattern.
 
 ---
 
@@ -1895,6 +2143,9 @@ export function applyDevSuppressions(stacks: cdk.Stack[]): void {
       // CloudFront suppressions (CFR2/CFR3/CFR4/CFR5) removed — CloudFront is gone, so cdk-nag no
       // longer emits CFR* (there is no distribution). PROD TODO instead: tighten albIngressCidrs
       // and enable ALB access logs (see per-resource ELB2/EC23 below). No AWS WAF is deployed.
+      // NOTE: the conditional ImageBuildStack (§4-1, imageBuild.mode='codebuild' only) carries its
+      // CB3 (privileged docker-in-docker build) / CB4 (AWS-managed encryption) suppressions INLINE
+      // in the stack — do not add them here, where they'd apply (as dead weight) to every stack.
     ]);
   }
 }

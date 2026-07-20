@@ -69,6 +69,7 @@
 
   <h2><span class="n">1</span> 원클릭 설정 — <code>setup-developer</code> 실행</h2>
   <p>관리자에게 받은 온보딩 번들(게이트웨이 리포의 <code>scripts/</code> + <code>outputs.json</code>)에서 아래 한 줄을 실행합니다. <b>편집할 파일은 없습니다.</b></p>
+  <div class="note"><b>Windows 사전 준비 — Python 3 필요:</b> 실행 전에 <code>py -3 --version</code> 이 <code>Python 3.x</code> 를 출력하는지 확인하세요. 미설치라면 <code>winget install Python.Python.3.12</code> 로 설치합니다. 새 PC의 <code>python</code> 명령은 Microsoft Store 안내용 스텁(아무 출력 없이 종료)일 수 있습니다 — 이 경우에도 스크립트가 조용히 실패하지 않고 설치 안내 메시지를 출력합니다.</div>
   <pre>./scripts/setup-developer.sh          <span class="c"># Windows: .\scripts\setup-developer.ps1</span></pre>
   <p>스크립트가 자동으로 수행하는 일:</p>
   <table>
