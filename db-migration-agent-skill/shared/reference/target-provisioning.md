@@ -67,6 +67,27 @@ aws rds register-db-proxy-targets \
 
 Then point clients at the **proxy endpoint** (`your-app-proxy.proxy-xxxx.<region>.rds.amazonaws.com`) in Phase 7.5/8, not the cluster endpoint. PostgreSQL: use `--engine-family POSTGRESQL`. (RDS Proxy requires the target to be RDS/Aurora — it's a target-side construct, so it works for EC2→RDS even though the *source* can't be proxied.)
 
+### Parameter Mapping (source snapshot → target parameter groups)
+
+Take the full parameter capture from [source-assessment.md](source-assessment.md) and
+give **every non-default parameter** one of four dispositions, recorded as a table in
+`migration-plan.md`:
+
+| Disposition | Meaning | Examples |
+|-------------|---------|----------|
+| **Carry** | Set the same value in the target parameter group | `time_zone`, `character_set_server`, `sql_mode`, `lower_case_table_names` (create-time on Aurora!), `max_connections`, `group_concat_max_len` |
+| **Translate** | Same intent, different mechanism on RDS/Aurora | `innodb_buffer_pool_size` → instance-class sizing (Aurora manages it); `log_bin`/`server_id` → cluster PG + Aurora replication settings; `ssl` → `require_secure_transport`/`rds.force_ssl` |
+| **Managed** | RDS/Aurora owns it — not settable, verify the managed behavior is acceptable | data-dir paths, `innodb_flush_method`, most file/OS-level knobs |
+| **Drop (deliberate)** | Obsolete or import-only — record WHY it's not carried | old workaround values, tuning for hardware that no longer exists |
+
+Rules: (1) an untriaged non-default parameter is an open risk-log item, not a silent
+default; (2) parameters that are **create-time immutable on the target**
+(`lower_case_table_names` on Aurora MySQL, Oracle charset/`DB_BLOCK_SIZE`, SQL Server
+collation) must be dispositioned BEFORE the cluster is created — cross-check against the
+immutables table above; (3) the production parameter group in
+[../patterns/cdk-stacks.md](../patterns/cdk-stacks.md) is generated FROM this worksheet,
+so the mapping is the source of truth, not the CDK defaults.
+
 ### TLS-Enforcement Gate (check the target parameter group BEFORE loading or cutover)
 
 Compliance baselines (K-ISMS, PCI, internal hardening) commonly set **`require_secure_transport=ON`** (MySQL/MariaDB) or **`rds.force_ssl=1`** (PostgreSQL) on the target parameter group. When enforced, **every** connection must use TLS — and that breaks two things if you don't plan for it:

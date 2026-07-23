@@ -259,6 +259,27 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
 > treat any mismatch as "inventory incomplete", never "no objects"; (3) PostgreSQL:
 > `pg_proc` visibility is schema/ACL-dependent — inventory as a superuser or table owner.
 
+### Full Parameter Capture (do this once, at assessment)
+
+Don't rely only on the curated per-parameter checks above — **capture the complete
+source configuration** so target parameter groups are reconciled deliberately, not by
+default:
+
+```sql
+-- MySQL/MariaDB: full server config snapshot → attach to migration-plan.md
+SHOW GLOBAL VARIABLES;
+-- PostgreSQL: non-default settings (the ones someone chose on purpose)
+SELECT name, setting, unit, source FROM pg_settings WHERE source NOT IN ('default','override');
+-- SQL Server:
+SELECT name, value_in_use FROM sys.configurations WHERE value_in_use <> 0;
+-- Oracle:
+SELECT name, value FROM v$parameter WHERE isdefault = 'FALSE';
+```
+
+Feed this into the **parameter mapping worksheet** in
+[target-provisioning.md](target-provisioning.md) §Parameter Mapping — every non-default
+source parameter gets one of four dispositions there.
+
 ### Sizing Queries
 
 **MySQL/MariaDB:**
