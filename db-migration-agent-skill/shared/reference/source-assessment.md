@@ -214,6 +214,22 @@ The source DB is almost always in a **private subnet**, and your execution envir
 | **SSM Port Forwarding** | DB host (or a host in-VPC) is an SSM-managed instance; you have a local client | `aws ssm start-session --target <instance-id> --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"host":["<db-endpoint>"],"portNumber":["3306"],"localPortNumber":["13306"]}'` then connect to `127.0.0.1:13306` |
 | **SSM Send-Command** | **No local client / cross-VPC** — run the query *on the DB host itself* (or another in-VPC SSM-managed host that has a client) | `aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript --parameters 'commands=["mysql -h 127.0.0.1 -e \"…\""]'` |
 
+**On-premises / other-cloud sources** — the same table applies with these substitutions:
+
+| Option | On-prem equivalent |
+|--------|--------------------|
+| SSM paths | Register the on-prem DB host as an **SSM managed instance via hybrid activation** (`aws ssm create-activation` → install the agent → the host gets an `mi-*` id and every SSM command in this skill works unchanged). This is the recommended path: no inbound firewall holes, full command audit trail. |
+| Bastion | The customer's existing jump host / VPN into the datacenter — coordinate with their network team; commands are handed over as copy-paste blocks and outputs returned (the skill's execution-model exception). |
+| Direct | Only if a DX/VPN route already exists from the execution environment to the DB network. |
+
+Network path for the DATA (separate question from command access): Direct Connect or
+Site-to-Site VPN carries dump/CDC traffic; the Phase 2 throughput math below decides
+whether the wire suffices or the Snow/DataSync offline-seed branch applies. Also note:
+DMS reaches on-prem sources fine (the replication instance lives in the VPC and connects
+out over DX/VPN), and reverse replication for rollback works the same way in the other
+direction — but confirm the customer's firewall allows the DB port inbound from the VPC
+CIDR for that reverse path.
+
 > **Default recommendation for an isolated/private-subnet source: SSM.** Port forwarding when you have a local client; **Send-Command when you don't** (run the client that already exists on the DB host). This avoids opening the DB to new networks just to migrate it. The same path is reused for the `mysqldump`/`pg_dump` export (execution-runbooks.md) and the processlist cross-checks (cutover-procedures.md).
 
 ### Credential Handling — Never Put Passwords in `argv`
