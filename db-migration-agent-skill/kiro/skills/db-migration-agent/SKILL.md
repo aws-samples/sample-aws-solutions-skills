@@ -57,11 +57,14 @@ not a brochure — the deliverable is a migrated database, not advice.
 8. **Destructive actions** (decommission source, delete DMS resources, teardown) require
    explicit confirmation listing exactly what will be deleted, and never before the
    rollback window closes.
-9. **The engagement mode and criticality tier govern the ceremony** (see
-   `shared/reference/engagement-safety.md`): assessment-only sessions are physically
-   read-only; production cutover requires the tier's requirements satisfied (rehearsal,
-   soak green-days) **or a recorded waiver** — and approvals of record live in
-   `authorizations.md` (named person + date), not in chat scrollback.
+9. **The engagement mode governs what you may execute** (see
+   `shared/reference/engagement-safety.md`). **Mode 1** sessions are physically read-only.
+   **Mode 2 (the default)** stops at the handover: you must NOT freeze the source, repoint
+   any client, or execute the cutover — you prepare, validate, rehearse, and hand over,
+   and the customer runs the cutover. **Mode 3** is the only mode where you execute a
+   production cutover, and only with the A4 authorization signed and the warnings stated.
+   Approvals of record live in `authorizations.md` (named person + date), never in chat
+   scrollback.
 
 ## Execution model
 
@@ -80,7 +83,7 @@ over as a single copy-paste block and ask for the output).
 
 | File | Read when |
 |------|-----------|
-| `shared/reference/engagement-safety.md` | Phase 0 — engagement modes, criticality tiers + ceremony matrix, waiver protocol, IAM guardrails |
+| `shared/reference/engagement-safety.md` | Phase 0 — the three engagement modes, Mode-2 boundary + handover contract, engagement parameters, waiver protocol, IAM guardrails |
 | `shared/reference/preflight-iam-cost.md` | Phase 0 — precondition checks, IAM roles/simulation, cost estimate, monitoring baseline |
 | `shared/reference/source-assessment.md` | Phase 2 — blocker catalog + queries, source access paths (SSM/bastion), credential rules, sizing, throughput/offline-seed |
 | `shared/reference/rds-aurora-limitations.md` | Phase 2 — full per-limitation detail behind the blocker tables |
@@ -105,11 +108,18 @@ over as a single copy-paste block and ask for the output).
 
 ### Phase 0: Preflight
 
-1. Ask the **engagement-mode question first** (`shared/reference/engagement-safety.md`):
-   **assessment-only** (read-only, ends with a report), **staging-rehearsal** (migrate a
-   clone, never production), or **production-migration** (locked unless an assessment
-   report exists). The mode bounds everything the session may do; record it in the plan
-   and `authorizations.md` §1, and generate the mode's IAM guardrail policy.
+1. Ask the **mode question first** (`shared/reference/engagement-safety.md`) and
+   recommend Mode 2:
+   - **Mode 1 — analysis-only**: read-only assessment, ends with a report.
+   - **Mode 2 — migration-ready (recommended default)**: the full migration *except* the
+     cutover — target built, data migrated, validated, parallel-run, cutover runbook
+     rehearsed and handed over; **the customer executes the cutover** with their own tests
+     and window.
+   - **Mode 3 — full-migration**: Mode 2 plus the agent executing the production cutover —
+     ⚠️ the agent would freeze the source and repoint live clients; state the Mode-3
+     warnings and never propose it as the default.
+   The mode bounds everything the session may do; record it in the plan and
+   `authorizations.md` §1, and generate that mode's IAM guardrail policy.
 2. Create `migration-plan.md` and `authorizations.md` from the templates in the working
    directory.
 3. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
@@ -131,13 +141,17 @@ per turn (customers consistently push back on drip-feed questioning; asynchronou
 stakeholders doubly so). Split into a second batch only when an answer genuinely changes
 which questions apply.
 
-Collect the 17 inputs in the plan template §Phase 1 — source engine/location, target,
+Collect the 18 inputs in the plan template §Phase 1 — source engine/location, target,
 size, **downtime tolerance**, **RPO on rollback**, usable bandwidth, schema-object needs,
 app modifiability, **how each app finds the DB today**, downstream CDC consumers,
 compliance mandates, **Korean security appliances and their mode**, multi-DB,
-cross-region/account, KMS key type, **criticality tier** (#16 — use the "if this DB is
-wrong for an hour, what happens?" guidance in engagement-safety.md; customers habitually
-under-tier), **third-party tools on or in front of the DB** (#17 — security, backup,
+cross-region/account, KMS key type, the **engagement parameters** (#16 — rehearsal,
+parallel-run length N, validation depth, rollback strategy, approver names; defaults and
+the "if this DB is wrong for an hour" sizing guidance are in engagement-safety.md
+§Engagement parameters — and in Mode 2 also the **handover depth**: (a) full preparation
+with CDC kept current + clone-rehearsed timings, or (b) light preparation where the
+customer starts replication themselves), **third-party tools on or in front of the DB**
+(#17 — security, backup,
 monitoring, HA, proxy agents; customers usually forget these until asked), and the
 **customer's own test suite** (#18 — regression/UAT/load tests their QA already runs;
 these become acceptance gates executed against the target during rehearsal and soak —
@@ -146,8 +160,8 @@ run in *their* CI/QA systems pointed at the target endpoint, never pasted into c
 already known.
 
 ⛔ **GATE 1** — summarize the inputs in the plan; user confirms before any assessment.
-**Mode + tier are locked here** and signed in `authorizations.md` §3; the tier's ceremony
-matrix (engagement-safety.md) is binding from this point.
+**Mode + engagement parameters are locked here** and signed in `authorizations.md` §3;
+from this point the chosen parameters are binding and any deviation is a recorded waiver.
 
 ### Phase 2: Assess the source (read-only)
 
@@ -208,38 +222,51 @@ they restart from the target's coordinates). Pre-tune connection pools; disable 
 auto-DDL. The inventory table in the plan must be complete — **cutover is blocked until
 every row is ready**.
 
-### Phase 7.7: Parallel-run soak (Tier 2/3 — cutover stays locked until it passes)
+### Phase 7.7: Parallel-run soak (cutover readiness stays locked until it passes)
 
-The target runs live and CDC-current while production stays on the source, for the
-customer-chosen soak length (Tier 2 default: 7 consecutive green days; Tier 3 adds
-performance validation and reconciliation — `shared/reference/engagement-safety.md`).
-Each day: generate a report from `shared/templates/soak-report.md` (lag, spot
-counts/checksums, alarms, drift) and send it to the customer; any RED day resets the
-consecutive-green counter. Client discovery (7.5) runs alongside the soak. Invite the
-customer to point read-only test traffic or load tests at the target during this window.
-Cutover scheduling unlocks only at **N consecutive greens + the signed soak-exit row** in
-`authorizations.md`. Shortening or skipping the soak is a waiver (engagement-safety.md
-§Waiver protocol).
+Applies to Mode 2 handover depth (a) and to Mode 3. The target runs live and CDC-current
+while production stays on the source, for the parallel-run length chosen at GATE 1
+(default 7 consecutive green days; compressed engagements may use hours). Each period:
+generate a report from `shared/templates/soak-report.md` (lag, spot counts/checksums,
+alarms, drift, plus the customer's test-suite result when one exists) and send it to the
+customer; any RED period resets the consecutive-green counter. Client discovery (7.5) runs
+alongside. Invite the customer to point read-only test traffic or load tests at the target
+during this window. Cutover readiness unlocks only at **N consecutive greens + the signed
+soak-exit row** in `authorizations.md`. Shortening or skipping is a waiver
+(engagement-safety.md §Waiver protocol).
 
-### Phase 8: Cut over
+### Phase 8: Cutover — handover (Mode 2) or execution (Mode 3)
 
-Instantiate `shared/templates/cutover-runbook.md` and `rollback-runbook.md` with real
-values (zero placeholders). Reverse replication created and tested **before** the window
-— or the alternative rollback strategy signed (RPO acknowledgment in the plan).
+Both modes first instantiate `shared/templates/cutover-runbook.md` and
+`rollback-runbook.md` with real values (zero placeholders), with the reverse-replication
+task created and connection-tested — or the alternative rollback strategy signed (RPO
+acknowledgment in the plan).
 
-⛔ **GATE 4** — walk the user through the runbook; they approve the window and the
-rollback strategy. Then execute step-by-step with go/no-go confirmation at each group:
-freeze source → drain CDC → stop forward task → spot-validate → reset
-auto-increment/sequences → start reverse replication → repoint → refresh clients →
-**bidirectional verification** (app health UP *and* new DB's processlist shows every
-inventoried client). Watch the abort criteria at T+15m/T+1h/T+24h.
+**Mode 2 (default) — hand over, do not execute.** Assemble the handover package
+(engagement-safety.md §Mode 2 handover contract): runbook with timings marked *measured*
+or *estimated*, rollback runbook, the client-repoint list with exact per-client changes
+and where each config deploys from, validation + soak evidence. Walk the customer through
+the runbook step by step, answer their questions, and get **A4b handover acceptance**
+signed in `authorizations.md`. Then **stop** — do not freeze the source, repoint clients,
+or run the sequence. Offer to observe read-only during their cutover and to run the
+bidirectional verification afterwards. Their reported completion is what triggers Phase 9.
+
+**Mode 3 only — execute.** ⛔ **GATE 4**: walk the user through the runbook; they approve
+the window, the rollback strategy, and the abort criteria, and A4 is signed. Then execute
+step-by-step with go/no-go confirmation at each group: freeze source → drain CDC → stop
+forward task → spot-validate → reset auto-increment/sequences → start reverse replication
+→ repoint → refresh clients → **bidirectional verification** (app health UP *and* new DB's
+processlist shows every inventoried client). Watch the abort criteria at T+15m/T+1h/T+24h
+and stop to ask whenever one trips.
 
 ### Phase 9: Post-migration
 
 Per `shared/reference/post-migration.md`: refresh statistics, swap to the production
 parameter group, scale down, compare against the Phase 2 baseline, keep the source +
-reverse replication through the 7-day window, then decommission (with constraint 8's
-confirmation). Hand over the CDK project + plan as the customer's operational record.
+reverse replication through the rollback window, then decommission (with constraint 8's
+confirmation). Hand over the CDK project + plan as the customer's operational record. In
+Mode 2 this phase starts **after the customer reports their cutover complete** — offer it
+explicitly rather than assuming.
 
 ## When to call MCP
 
@@ -263,13 +290,15 @@ works. Details + install: `shared/reference/mcp-and-tooling.md`.
 By the end of an engagement the working directory contains:
 
 1. **`migration-plan.md`** — complete, every gate signed, evidence embedded.
-2. **`authorizations.md`** — mode/tier sign-offs, action-class authorizations, waivers —
-   the customer's audit record.
+2. **`authorizations.md`** — mode + engagement-parameter sign-offs, action-class
+   authorizations (incl. A4b handover acceptance in Mode 2), waivers — the audit record.
 3. **`{prefix}-migration/`** — the deployed CDK project (`shared/patterns/cdk-stacks.md`
    layout) with README + Mermaid architecture diagram, owned by the customer.
 4. **`cutover-runbook.md` + `rollback-runbook.md`** — as executed, with measured timings
-   — and, for Tier 2/3, the daily **soak reports**.
-(Assessment-only mode delivers items 1–2 plus the assessment report; no infrastructure.)
+   — plus the **soak reports** when a parallel run was performed. In **Mode 2** these are
+   the handover package the customer executes from; in **Mode 3** they are the as-executed
+   record with measured timings.
+(**Mode 1** delivers items 1–2 plus the assessment report; no infrastructure.)
 
 ## Common mistakes (learned the hard way)
 

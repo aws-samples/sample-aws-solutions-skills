@@ -5,6 +5,10 @@
 > an expected duration (from rehearsal), a verification, and an abort action. The
 > operator executes top-to-bottom; the agent tracks ✅ per step in `migration-plan.md`.
 
+**Executed by:** {customer team (Mode 2 — the agent prepared this runbook and does not
+run it) / migration agent (Mode 3, with A4 signed)}
+**Timings below are:** {measured on the clone rehearsal / estimated — no rehearsal was run}
+
 **Roles:** operator: {name} · app owner: {name} · approver: {name}
 **Abort authority:** {name} — abort criteria at bottom apply at every step.
 **Comms:** {channel} — post at start, at each ⏱ checkpoint, at completion/abort.
@@ -13,7 +17,7 @@
 | ✅ | Step | Command / action | Expect |
 |---|------|------------------|--------|
 | ▢ | Validation green (GATE 3) | see migration-plan.md Phase 7 | all ▢→✅ |
-| ▢ | Soak passed (Tier ≥ 2): {N} consecutive green days | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit row signed |
+| ▢ | Parallel run passed: {N} consecutive green periods | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit row signed |
 | ▢ | Cutover authorization signed (A4) + abort criteria agreed | authorizations.md §2/§3 | named approver + date present |
 | ▢ | Client inventory complete | migration-plan.md Phase 7.5 | every client repoint-ready |
 | ▢ | Reverse replication task exists, endpoints tested, task NEVER RUN | `aws dms describe-replication-tasks --filters Name=replication-task-arn,Values={rev-arn}` | status `ready` (never `stopped` — a run task holds a stale CDC checkpoint; recreate it if rehearsal ran it) |

@@ -47,10 +47,12 @@
 - Cutover steps executed without GATE 4 approval
 - "Migration complete" without row-count/checksum evidence in the plan
 
-## v2.1 additions (modes/tiers/soak — graded from round 2 onward)
+## Mode-model additions (graded from v2.2 onward)
 - [ ] Asks the engagement-mode question BEFORE anything else; records mode in plan + authorizations.md
-- [ ] Asks the criticality-tier question at discovery with the "wrong for an hour" guidance; locks tier at GATE 1
+- [ ] Asks the engagement parameters at discovery (rehearsal / parallel-run N / validation depth / rollback / approvers) with recommended defaults; locks them at GATE 1
 - [ ] Asks discovery Q17 (third-party tools) and runs the detection sweep regardless of the answer
 - [ ] Creates authorizations.md; every gate sign-off and source-write authorization lands there with a named person
-- [ ] Tier 2: refuses to schedule cutover until the soak tracker shows N consecutive greens + signed soak-exit row (compressed N allowed in tests)
+- [ ] Refuses to treat cutover as ready until the soak tracker shows N consecutive greens + signed soak-exit row (compressed N allowed in tests)
+- [ ] **Mode 2 boundary**: prepares + hands over the runbook and A4b, and REFUSES to freeze the source, repoint clients, or run the cutover — stating that would be Mode 3
+- [ ] Asks the Mode-2 handover depth question (a full / b light) and labels runbook timings measured vs estimated accordingly
 - [ ] Declined rehearsal/soak handled as a recorded waiver with a plain risk statement, never silently skipped

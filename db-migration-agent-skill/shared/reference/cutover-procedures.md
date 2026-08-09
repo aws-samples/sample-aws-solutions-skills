@@ -4,6 +4,13 @@
 
 The cutover is the highest-risk phase of the migration. This document provides step-by-step procedures for three cutover methods, ranked by recommendation.
 
+**Who executes what** (engagement-safety.md §The three modes): in **Mode 2 — the default —
+everything in this file is prepared, rehearsed on a clone, and handed to the customer to
+execute; the agent must not freeze the source or repoint clients** (see §The Mode 2
+boundary). In **Mode 3** the agent executes these steps itself with a signed A4
+authorization and an approver reachable during the window. The procedures below are written
+for whoever holds the runbook — the mechanics are identical either way.
+
 ---
 
 ## Pre-cutover: Discover DB Clients (MANDATORY — do this first)
@@ -514,6 +521,6 @@ Document the chosen values in `migration-plan.md` as a Phase 7.5 / pre-cutover p
 **2. Coordinated vs. rolling restart — pick deliberately.**
 
 - **Coordinated (all-at-once) restart** — stop every write client, repoint, start them all. **Fastest total pause (~10s)** and there is **no split-brain window** because no client is writing during the swap. Use this when a brief full write-pause is acceptable (the default for minimal-downtime cutovers). This is faster than waiting on Secrets Manager pool TTL (up to ~5 min) — change the config/unit and restart directly.
-- **Rolling restart** (restart instances one at a time behind a load balancer) — keeps *some* capacity serving, so no hard outage, **but** during the roll some instances point at the old DB and some at the new one → **split-brain writes**. Only safe if the source is already frozen read-only (cutover step 3) *before* the roll begins, so stragglers can't write the old DB. Prefer coordinated restart for write workloads; reserve rolling for read-heavy/stateless tiers.
+- **Rolling restart** (restart instances one at a time behind a load balancer) — keeps *some* capacity serving, so no hard outage, **but** during the roll some instances point at the old DB and some at the new one → **split-brain writes**. Only safe if the source is already frozen read-only (cutover step 3) *before* the roll begins, so stragglers can't write the old DB. Prefer coordinated restart for write workloads; reserve rolling for read-heavy/stateless services.
 
 **3. Deploy RDS Proxy on the TARGET before cutover.** The initial EC2 → RDS/Aurora cutover still incurs the brief pause above — **RDS Proxy does not eliminate the *initial* cutover pause** — but standing it up *before* cutover pays off two ways: (a) point the app at the **proxy endpoint** at cutover instead of the cluster endpoint, so all *future* failovers/maintenance are handled by the proxy (it holds the client connections and reconnects to the new writer in **< 1s, no app restart, no pool refresh**); and (b) the proxy multiplexes the reconnect storm at cutover, so the pool refresh doesn't hammer the new DB. After this migration, failovers become effectively zero-downtime even though *this* cutover paused briefly. (Provision it in Phase 4 — see "RDS Proxy on the target".) Note: true Blue/Green sub-second switchover requires the source to **already be on RDS/Aurora** — it's for RDS→Aurora upgrades, not this initial EC2→RDS move.

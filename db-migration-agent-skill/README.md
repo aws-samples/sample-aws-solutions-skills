@@ -16,15 +16,19 @@ You start by telling the agent something like *"we run MySQL on an EC2 instance 
 to move to Aurora — we can tolerate about a minute of downtime and can't lose data."*
 From there:
 
-1. **Two framing questions.** Before anything else, the agent asks what kind of
-   engagement this is — a **report only** (it inspects and recommends, guaranteed
-   read-only), a **practice run** against a clone of your database, or the **real
-   migration** — and **how critical the database is** ("if it's wrong for an hour, what
-   happens?"). Those two answers decide how much ceremony everything else gets: a dev
-   database gets a fast path; an order system gets a required rehearsal and a soak
-   period; a payments ledger gets timed dress rehearsals and daily reconciliation.
+1. **The mode question comes first — how far should the agent go?**
+   - **Mode 1 — analysis only**: it inspects and recommends, guaranteed read-only, and
+     hands you a report.
+   - **Mode 2 — migration-ready (the default, and what we recommend)**: the agent does the
+     entire migration *except the cutover* — builds the new database, moves and validates
+     the data, runs it in parallel with your production database, rehearses the cutover to
+     get real timings, arms the rollback path, and hands you a runbook. **Your team
+     executes the cutover**, in your window, with your tests. The agent will not freeze
+     your source or repoint your applications in this mode.
+   - **Mode 3 — full migration**: Mode 2 plus the agent executing the cutover itself. Only
+     if you explicitly ask for it, with the risks stated and a named approver present.
 
-2. **A short interview.** ~17 questions, one at a time, each with a recommended default —
+2. **A short interview.** ~18 questions, batched with a recommended default each —
    say **"go with recommendations"** and it skips to the end. It asks the things teams
    forget until it's too late: who else reads this database? any backup/monitoring/
    security agents on the host? what happens to you if a rollback loses ten minutes of
@@ -48,26 +52,29 @@ From there:
    your application keeps running on the old database.
 
 6. **It proves the copy is right.** Row counts on every table, checksums on critical
-   ones, your stored procedures executed on the target, and — for business-critical
-   databases — a **soak period**: the new database runs in parallel, kept current in
-   real time, with a daily green/red report. The cutover stays locked until it has been
-   green for N consecutive days (you pick N) and a named person signs off.
+   ones, your stored procedures executed on the target, and a **parallel-run period**: the
+   new database runs alongside production, kept current in real time, with a daily
+   green/red report. Cutover readiness stays locked until it has been green for N
+   consecutive periods (you pick N) and a named person signs off. Your own test suite, if
+   you have one, runs against the new database during this window.
 
-7. **Cutover night runs from a rehearsed script.** You approve the window. The agent
-   freezes the old database, drains the last changes, flips your applications to the new
-   endpoint, and verifies **in both directions** — your app reports healthy *and* the new
-   database shows every expected client connected. Measured pause is reported to you
-   straight, whatever it is. Reverse replication is armed **before** the flip, so for
-   the whole rollback window (default 7 days) the old server stays a live, current
-   standby — one command fails everything back with zero data loss.
+7. **Cutover — handed to you (Mode 2) or executed for you (Mode 3).** Either way you get a
+   runbook rehearsed on a clone with **measured** timings, a rollback runbook, and the
+   exact per-application repoint changes. In **Mode 2** the agent walks you through it,
+   you sign the handover, and *your team* runs the freeze-and-flip in your window — with
+   the agent available to watch read-only and verify afterwards. In **Mode 3** the agent
+   executes it step by step with go/no-go checks and reports the measured pause straight,
+   whatever it is. Reverse replication is armed **before** the flip, so for the whole
+   rollback window the old server stays a live, current standby — failback loses nothing.
 
 8. **Nothing is deleted without written sign-off.** The old server is only decommissioned
    after the rollback window closes and you've signed the exact teardown list.
 
 ## What you'll be asked — and never asked
 
-**You'll be asked** at four gates: to confirm the interview answers, to approve the
-method + cost, to accept the validation evidence, and to green-light the cutover window.
+**You'll be asked** at four gates: to confirm the interview answers (mode + parameters),
+to approve the method + cost, to accept the validation evidence, and — in Mode 2 — to
+accept the cutover handover, or in Mode 3 to green-light the cutover window.
 Every approval is recorded in a generated `authorizations.md` with a name and date — an
 audit record you can hand to your security team. Skipping a safety step (like the
 rehearsal) is possible, but only as a **written waiver** with the risk spelled out.
@@ -84,7 +91,7 @@ every production write is itemized), or to trust "it worked" without evidence.
 | `authorizations.md` | Who approved what, when — including any waivers |
 | `{prefix}-migration/` | A deployable CDK (TypeScript) project for the new database — yours to keep |
 | `cutover-runbook.md` / `rollback-runbook.md` | The scripts as executed, with measured timings |
-| Soak reports | Daily green/red evidence during the parallel-run period (Tier 2+) |
+| Soak reports | Daily green/red evidence from the parallel-run period |
 
 ## What this skill is NOT — read before setting expectations
 
@@ -116,8 +123,11 @@ latency. The skill's rule: quote a cutover window only from a **measured rehears
 and treat rehearsal × 2 as the honest budget. If someone needs a guaranteed sub-minute
 cutover with no rehearsal, this skill will refuse to promise it — that's a feature.
 
-**4. It is not unattended.** A named human approves the mode, tier, method, cost, and
-cutover, and is reachable during the window. The skill is designed to *stop and ask*
+**4. It does not cut over your production database unless you choose Mode 3.** The
+default (Mode 2) stops at a rehearsed handover: your team runs the cutover with your own
+tests and change window. And it is never unattended — a named human approves the mode,
+engagement parameters, method, cost, and (in Mode 3) the cutover window, and is reachable
+during it. The skill is designed to *stop and ask*
 when an abort criterion trips mid-cutover rather than decide on its own — which only
 works if someone is there to answer.
 
@@ -130,7 +140,7 @@ keeps an offline seed lossless. But hard bounds remain that no tool changes: mov
 terabytes takes `N / usable-bandwidth` — the skill computes this in Phase 2 and routes
 to Snow (adding days–weeks of device shipping) rather than pretending; Aurora storage
 caps at 128 TiB; a single S3 dump object at 5 TiB. For any multi-TB engagement treat the
-rehearsal as mandatory regardless of tier, and note that multi-TB + near-zero-downtime +
+rehearsal as mandatory, and note that multi-TB + near-zero-downtime +
 heterogeneous *combined* is a phased program, not one engagement. The skill will give
 you an honest plan and run the data workstream — expect it to tell you things (shipping
 time, multi-week CDC catch-up, phased cutover) that no tool can make disappear.
@@ -173,7 +183,7 @@ db-migration-agent-skill/
 │   │   ├── post-migration.md               Phase 9
 │   │   ├── troubleshooting.md              Symptom → fix
 │   │   ├── mcp-and-tooling.md              AWS MCP Server / Agent Toolkit / companion MCP servers
-│   │   ├── engagement-safety.md            Modes, criticality tiers, waivers, IAM guardrails
+│   │   ├── engagement-safety.md            The three modes, Mode-2 handover contract, parameters, guardrails
 │   │   ├── third-party-db-security.md      Third-party DB security tools (global + Korean deep-dive)
 │   │   └── regulatory-compliance.md        Korean regulatory mandates (PIPA, network separation, ISMS-P)
 │   ├── patterns/
@@ -187,6 +197,7 @@ db-migration-agent-skill/
 ├── evals/                                  Black-box eval scenarios (expected-behavior checklists)
 │   ├── ec2-mysql-to-aurora-scenario.md
 │   └── sqlserver-to-aurora-pg-scenario.md
+└── scripts/sync-skills.sh                  Sync canonical → variants + verify md5 + link check
 ```
 
 ## Install
@@ -228,14 +239,22 @@ Aurora", "SQL Server to Aurora PostgreSQL", "database cutover", "DMS migration",
 **Other languages**: the skill answers in the customer's language (Korean fully
 supported) — trigger it with the equivalent phrases in that language.
 
-## For operators: modes & tiers in one line each
+## For operators: the three modes in one line each
 
-Details in `shared/reference/engagement-safety.md`. Modes: `assessment-only` (physically
-read-only), `staging-rehearsal` (clone only), `production-migration` (requires a prior
-assessment). Tiers: 1 Standard (fast path), 2 Business-critical (default: rehearsal +
-soak required), 3 Mission-critical (timed rehearsals to convergence, reconciliation,
-war-room cutover). An IAM guardrail policy denies source-destructive actions until the
-decommission sign-off.
+Details in `shared/reference/engagement-safety.md`.
+
+- **Mode 1 `analysis-only`** — physically read-only session; deliverable is the report.
+- **Mode 2 `migration-ready`** (default) — everything up to the cutover; the agent is
+  blocked from freezing the source, repointing clients, or running the runbook, by rule
+  *and* by IAM guardrail. Handover depth is a customer choice: (a) CDC kept current +
+  clone-rehearsed timings, or (b) target built and loaded, customer starts replication.
+- **Mode 3 `full-migration`** — the only mode where the agent executes the cutover;
+  requires a prior assessment, stated warnings, and a signed A4 authorization.
+
+How much ceremony an engagement gets is set by explicit per-engagement parameters chosen
+at GATE 1 — rehearsal, parallel-run length, validation depth, rollback strategy, approvers
+— not inferred from a label. An IAM guardrail policy denies source-destructive actions
+until the decommission sign-off.
 
 ## The opinionated choices
 
@@ -250,12 +269,11 @@ decommission sign-off.
 
 ## Contributing / editing
 
-Edit **only** `claude-code/skills/db-migration-agent/SKILL.md` and `shared/`, then sync
-the three copies from the repo root:
+Edit **only** `claude-code/skills/db-migration-agent/SKILL.md` and `shared/`, then:
 
 ```bash
-scripts/sync-skills.sh db-migration-agent-skill
-scripts/sync-skills.sh verify
+./scripts/sync-skills.sh        # copy to kiro/codex
+./scripts/sync-skills.sh verify # md5 identity + reference-link check
 ```
 
 ## License

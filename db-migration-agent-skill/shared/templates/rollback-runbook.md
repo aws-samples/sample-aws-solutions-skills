@@ -1,8 +1,11 @@
 # Rollback Runbook — fail back {target} → {source}
 
 > Generated alongside the cutover runbook with real values. Assumes the rollback strategy
-> approved at GATE 4: **{reverse-replication (lossless) / write-log replay / acknowledged-RPO}**.
+> approved at GATE 2/GATE 4: **{reverse-replication (lossless) / write-log replay / acknowledged-RPO}**.
 > Valid until {cutover + 7 days} — after source decommission this runbook is void.
+
+**Executed by:** {customer team (Mode 2 — handed over with the cutover runbook) /
+migration agent (Mode 3)} — same owner as the cutover runbook.
 
 **Trigger:** one of the abort criteria in cutover-runbook.md, or approver decision.
 **Announce first:** {channel}. Rollback is itself a cutover — same discipline.

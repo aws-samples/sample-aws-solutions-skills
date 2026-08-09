@@ -1,6 +1,6 @@
 # Soak Report — Day {n} of {N} — {engagement} — {date}
 
-> Daily report for the Phase 7.7 parallel-run soak (Tier 2/3). Target is live and
+> Daily report for the Phase 7.7 parallel-run soak. Target is live and
 > CDC-current; production still runs on the source. Cutover unlocks only after
 > **{N} consecutive GREEN days** and the signed cutover authorization.
 > **Consecutive green counter: {k}/{N}** (any RED resets it to 0).
@@ -18,7 +18,7 @@
 | Schema drift (DDL on source since yesterday) | none unreplicated | {…} | ▢ |
 | **Customer test suite vs target** (if provided, Q18) | all pass | {suite: n pass / n fail} | ▢ |
 
-## Tier 3 additions
+## Deep-validation additions (when these parameters were chosen)
 
 | Check | Baseline (source) | Target today | Pass |
 |-------|-------------------|--------------|:---:|

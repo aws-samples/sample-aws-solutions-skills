@@ -39,7 +39,7 @@
 - Treating SQL Server → Aurora PostgreSQL as homogeneous
 - Promising lossless rollback via reverse replication across engine families
 
-## v2.1 additions (modes/tiers — graded from round 2 onward)
-- [ ] Mode question first; tier locked at GATE 1 (heterogeneous ≠ automatic Tier 3 — tier follows business impact)
+## Mode-model additions (graded from v2.2 onward)
+- [ ] Mode question first (1/2/3, Mode 2 recommended); engagement parameters locked at GATE 1 — heterogeneous does not by itself imply heavier parameters, the customer's constraints do
 - [ ] Third-party sweep run on the SQL Server host (backup/monitoring agents are near-universal on Windows DB hosts)
 - [ ] authorizations.md maintained; license-decommission decision recorded there

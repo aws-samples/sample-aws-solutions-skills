@@ -8,12 +8,12 @@
 | | |
 |---|---|
 | Engagement | {customer / project} |
-| **Engagement mode** | {assessment-only / staging-rehearsal / production-migration} (authorizations.md §1) |
-| **Criticality tier** | {1 / 2 / 3} — *basis:* {what happens if this DB is wrong for an hour} |
+| **Engagement mode** | {1 analysis-only / 2 migration-ready — customer executes cutover / 3 full-migration — agent executes cutover} (authorizations.md §1) |
+| **Mode 2 handover depth** | {(a) full — CDC current + clone-rehearsed timings / (b) light — target built, customer starts replication} · n/a for Modes 1, 3 |
 | Source | {engine+version} on {EC2 instance-id / on-prem host} |
 | Target | {aurora-mysql / rds-postgresql / …} {version} in {region} |
 | Method (approved GATE 2) | {method} — *why:* {reason} |
-| Soak requirement (Tier ≥ 2) | {N} consecutive green days — tracker in §Phase 7.7 |
+| Engagement parameters (GATE 1) | rehearsal: {none/one/repeat-until-converged} · parallel run: {N} consecutive green {days/hours} · validation depth: {…} · rollback: {reverse replication / snapshot+RPO ack / write-log replay} |
 | Cutover window | {date/time, TZ} |
 | Downtime budget | {seconds/minutes/hours} · RPO on rollback: {zero / acknowledged loss} |
 | Status | ⏳ Phase {n} |
@@ -45,7 +45,7 @@
 | 13 | Multi-DB on host? Cross-DB queries? | |
 | 14 | Cross-region / cross-account? | |
 | 15 | KMS key type (AWS-managed / CMK) | |
-| 16 | **Criticality tier** (1/2/3 — "if wrong for an hour, what happens?") | |
+| 16 | **Engagement parameters** (rehearsal · parallel-run N · validation depth · rollback strategy · approver names) + Mode-2 handover depth (a/b) | |
 | 17 | **Third-party tools on/in front of the DB** (security, backup, monitoring, HA, proxy) | |
 | 18 | **Customer's own test suite / UAT scenarios** (regression tests, load tests, key business flows QA runs) — to be executed against the target during rehearsal and soak | |
 
@@ -91,7 +91,7 @@ Downstream replication/CDC consumers (Debezium/replicas/ELT — cutover-procedur
 |----------|---------------------------------------------|:---:|:---:|
 | | | ▢ | ▢ |
 
-## Phase 7.7 — Parallel-run soak (Tier ≥ 2; cutover locked until green)
+## Phase 7.7 — Parallel-run soak (cutover readiness locked until green)
 - Soak length: {N} consecutive green days · counter: {k}/{N}
 - Daily reports: {links to soak-report files}
 | Day | Verdict | Lag max | Spot checks | Notes |
@@ -100,8 +100,20 @@ Downstream replication/CDC consumers (Debezium/replicas/ELT — cutover-procedur
 - Customer test traffic against target: {what they ran}
 - Soak-exit sign-off (authorizations.md §3): ▢
 
-## Phase 8 — Cutover (GATE 4 sign-off: ▢) 
-- Runbook generated & rehearsed: ▢ · Reverse replication created+tested (or alternative + RPO ack): ▢
+## Phase 8 — Cutover
+
+### Mode 2 — handover (agent does NOT execute)
+- Runbook + rollback runbook generated with real values: ▢ · timings {measured/estimated}: ▢
+- Reverse replication created + connection-tested, NOT started: ▢ (or rollback alternative + RPO ack: ▢)
+- Client-repoint list handed over (per-client exact change + deploy source): ▢
+- Validation + soak evidence attached: ▢
+- Runbook walkthrough with the customer completed: ▢
+- **A4b handover acceptance signed** (authorizations.md): ▢ — customer owns the cutover from here
+- Offered read-only observation / post-cutover verification: ▢
+- Customer-reported cutover outcome: {date, result, measured pause if shared}
+
+### Mode 3 — execution (GATE 4 sign-off: ▢)
+- Runbook generated & rehearsed: ▢ · Reverse replication created+tested: ▢
 - Executed {timestamp} · write-pause measured: {s} · bidirectional verify ✅ ▢
 - Rollback decision points reviewed at T+15m ▢ T+1h ▢ T+24h ▢
 

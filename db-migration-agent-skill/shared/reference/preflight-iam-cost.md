@@ -36,8 +36,10 @@ Do **not** run a production migration on `AdministratorAccess` out of habit; pro
 split. Verify effective permissions up front with `aws iam simulate-principal-policy`
 rather than failing at step 14 of the cutover. Additionally, apply the **engagement
 guardrail policy** ([engagement-safety.md](engagement-safety.md) §IAM guardrails):
-read-only session for assessment-only mode, and explicit Denies protecting the source
-(no terminate/stop/delete) until the decommission authorization is signed.
+a read-only session in **Mode 1**, the cutover-capable actions denied in **Mode 2**
+(app-secret writes, the app zone's Route 53 records, SSM on application hosts — the
+technical backstop for the Mode 2 boundary), and in every mode explicit Denies protecting
+the source (no terminate/stop/delete) until the decommission authorization is signed.
 
 | Role | Used in | Key actions |
 |------|---------|-------------|
