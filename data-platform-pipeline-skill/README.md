@@ -31,6 +31,9 @@ Plus per-function IAM roles, resource tags on everything, post-run data-quality 
 data-platform-pipeline-skill/
 ├── README.md                                                          (this file)
 ├── LICENSE
+├── evals/                                                             ← black-box scenario checklists
+│   ├── iceberg-erp-scenario.md                                          default path regression guard
+│   └── split-region-quick-scenario.md                                   split-region catalog + query
 ├── claude-code/skills/data-platform-pipeline/SKILL.md                  ★ md5-identical
 │                                            └── reference/*.md         ★
 ├── kiro/skills/data-platform-pipeline/SKILL.md                         ★
@@ -39,7 +42,19 @@ data-platform-pipeline-skill/
                                         └── reference/*.md              ★
 ```
 
-> Note: The `SKILL.md` carries the core workflow; deeper material (CDK gotchas, Glue scripts, Iceberg/Hive paths, VPC connectivity) lives in `reference/*.md` loaded on demand. The `SKILL.md` + `reference/` set is md5-identical across all three tools.
+> Note: The `SKILL.md` carries the core workflow; deeper material (CDK gotchas, Glue scripts, Iceberg/Hive paths, SAP sources, VPC connectivity, split-region catalog + query) lives in `reference/*.md` loaded on demand. The `SKILL.md` + `reference/` set is md5-identical across all three tools.
+
+### SAP sources
+
+Glue has **native SAP connectors** — SAP OData (source + target, with ODP delta extraction) and SAP HANA — so an SAP source is not routed to generic JDBC or assumed to be a CSV export. The skill asks which SAP access already exists, since OData/HANA prerequisites are Basis-team work that can take weeks; if nothing is ready it builds on a representative export and hands over the prerequisite list. See `reference/sap-sources.md`.
+
+### Validation gates
+
+The skill stops at five named checkpoints. Two are **agent-blocking** (the agent verifies and fixes itself, no user wait): preconditions, and post-run reconciliation. Three are **user-blocking** (must present and wait): scope & data residency, data model confirmation, and teardown intent. See `SKILL.md` → Validation Gates.
+
+### Split-region catalog + query (opt-in)
+
+For customers who must keep storage in one region while the catalog + query layers run in another — e.g. data residency in `ap-northeast-2` but a consumer service (BI, agentic AI features, a downstream engine) only available elsewhere. Two mechanisms, **presented to the user rather than chosen for them**: query in place via a Glue resource link, or replicate the mart layer. Off by default (follow-up #8). See `reference/cross-region-query.md`.
 
 ## Installation
 

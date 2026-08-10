@@ -1,8 +1,52 @@
 # On-prem / Private VPC Connectivity (JDBC sources)
 
+> **Self-managed databases (SQL Server / MySQL / PostgreSQL / Oracle on EC2 or on-prem) are fully supported.** AWS documents the supported engines as available "within Amazon RDS **or external to Amazon RDS**" — self-managed is not a second-class path. In Glue Spark jobs the native `connectionType` values include `"sqlserver"`, `"mysql"`, `"postgresql"`, and `"oracle"`, with the JDBC drivers bundled.
+>
+> ⚠️ **Console-UI confusion, worth pre-empting with the user.** In the Glue Studio *visual* editor the JDBC source node is labelled **"Amazon RDS"** — it is not RDS-only; it lists whatever JDBC Glue Connections exist, including self-managed SQL Server on EC2. A user who looks at that list and sees only "Amazon RDS" and "AWS Glue Data Catalog" often concludes their source is unsupported. It is not.
+>
+> **This skill does not use the visual editor.** It generates code-based Glue jobs (`create_dynamic_frame.from_options(connection_type="sqlserver", ...)`) deployed via CDK, so the visual source picker is irrelevant to what the job can reach. Two consequences: (1) the source needs **no crawler and no Data Catalog table** — `from_options` reads the database directly, and only the output Iceberg tables are cataloged; (2) if a user asks why their database "isn't in the list," explain the node label and the code path rather than changing the architecture.
+
 Applies to **both** patterns (Iceberg and Hive) whenever the JDBC source is on-premises or in a private subnet (not a public RDS endpoint). Glue reaches it through **ENIs that Glue creates in a VPC subnet**, and traffic flows out over a Site-to-Site VPN or Direct Connect. Get the network right *before* building the Glue Connection or the ETL job — connectivity failures here are the most common reason an on-prem Data Lab build stalls, and they surface as opaque timeouts deep inside a job run.
 
 For public RDS / a reachable endpoint, you can skip the network prerequisites and create the Glue Connection directly.
+
+---
+
+## 🔴 VPC endpoints — the #1 cause of Glue job failures (verified 2026-08, 4 consecutive failures)
+
+A Glue job whose Connection is in a VPC runs its ENIs **inside that VPC with no public IP**. An internet gateway on the route table does **not** help — the ENIs cannot use it. Every AWS API the job calls therefore needs a VPC endpoint, or the job fails *after* starting, with messages that name a network problem rather than the missing endpoint.
+
+**Create ALL of these before the first job run.** Each row is a failure observed in live testing:
+
+| Endpoint | Type | Symptom if missing |
+|---|---|---|
+| `s3` | **Gateway** | Job fails at submit: `VPC S3 endpoint validation failed for SubnetId … Could not find S3 endpoint or NAT gateway` |
+| `dynamodb` | **Gateway** | `Unable to execute HTTP request: Network is unreachable` (only if a DynamoDB source) |
+| `s3tables` | **Interface** | Reads succeed, then the **write** fails: `Connect to s3tables.{region}.amazonaws.com:443 … Connect timed out` — the most misleading of the set, because the job runs for minutes first |
+| `glue` | **Interface** | Catalog operations hang or time out |
+| `secretsmanager` | **Interface** | JDBC credential fetch fails (any JDBC source using `SECRET_ID`) |
+
+```bash
+VPC={vpc_id}; RT={route_table_ids}; SUBNETS="{subnet_a} {subnet_b}"; SG={glue_sg}
+# Gateway endpoints (route-table attached, no SG, no cost)
+for SVC in s3 dynamodb; do
+  aws ec2 create-vpc-endpoint --vpc-id $VPC --service-name com.amazonaws.{region}.$SVC \
+    --vpc-endpoint-type Gateway --route-table-ids $RT --region {region}
+done
+# Interface endpoints (ENI per subnet, hourly cost, need the Glue SG)
+for SVC in s3tables glue secretsmanager; do
+  aws ec2 create-vpc-endpoint --vpc-id $VPC --service-name com.amazonaws.{region}.$SVC \
+    --vpc-endpoint-type Interface --subnet-ids $SUBNETS --security-group-ids $SG \
+    --private-dns-enabled --region {region}
+done
+# Interface endpoints take 1-3 minutes to become available — WAIT before running the job
+aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=$VPC --region {region} \
+  --query 'VpcEndpoints[].[ServiceName,State]' --output table
+```
+
+> **`s3tables` is the one everyone misses.** It is only needed on the Iceberg path, it is not mentioned in most Glue VPC guides, and its absence looks like a transient network blip 90 seconds into an otherwise healthy job. If a Glue job reads all its sources fine and dies on `writeTo`, check this endpoint first.
+
+> **Interface endpoints cost money** (~$0.011/hr each per AZ + data processing). Three interface endpoints across two AZs is a real line item on a long-lived platform — mention it when you create them. Gateway endpoints (`s3`, `dynamodb`) are free.
 
 ---
 

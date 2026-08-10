@@ -75,6 +75,8 @@ aws quicksight update-spice-capacity-configuration \
 > - **Purchase SPICE capacity in the resource region** — via the console (Manage QuickSight → SPICE Capacity → switch to the resource region first), or `aws quicksight update-spice-capacity-configuration --aws-account-id {account_id} --purchase-mode AUTO_PURCHASE --region {resource_region}`, OR
 > - **Use `DIRECT_QUERY` import mode** for cross-region datasets: set `importMode: 'DIRECT_QUERY'` on `CfnDataSet`. Trades sub-second SPICE rendering for live Athena queries, but avoids the capacity purchase.
 >
+> 🔴 **Exception — do NOT use `DIRECT_QUERY` when the pipeline uses a split-region catalog + query layer.** If `platform.yaml` has `cross_region_mechanism: resource_link` (or `requires_spice: true`), the Athena tables are resource links whose data files live in another region — so **every visual interaction bills a cross-region S3 transfer**, not just every refresh. A 20-user dashboard can scan thousands of times per day. Use **SPICE and purchase the capacity**; it is far cheaper than per-interaction cross-region scans. The advice above is correct only when Athena's source data is in the same region as the workgroup. See the pipeline skill's `reference/cross-region-query.md` §6.
+>
 > Verify before provisioning datasets via the console (Manage QuickSight → SPICE Capacity, with the **resource region** selected) — `describe-account-settings` does not report capacity. A dataset/ingestion failing with an insufficient-SPICE/capacity error in the resource region is the signal to purchase capacity (or enable `AUTO_PURCHASE`) or switch that dataset to `DIRECT_QUERY`.
 
 > **Checking SPICE in preconditions:** `describe-account-settings` does NOT return capacity — it returns edition/namespace/email. The first SPICE dataset creation in a fresh region fails if capacity is 0; the most reliable check is the console (Manage QuickSight → SPICE Capacity, with the resource region selected). If scripted, attempt a small dataset/ingestion and treat a "capacity" / "insufficient SPICE" error as the signal to provision.
@@ -104,13 +106,14 @@ Step 1. Does {aws_region} support Amazon Quick's agentic AI features
 > - Data stays in `{aws_region}` (S3, Glue, Athena unchanged)
 > - Quick Sight queries the home-region Athena workgroup cross-region
 > - Trade-off: full features; dashboard users connect to the supported region's console; cross-region Athena adds latency on direct-query datasets (less of an issue with SPICE)
+> - **Data residency, stated accurately:** the data lake stays in `{aws_region}`, but **aggregated result rows transit and are cached in SPICE** in the BI region, along with query metadata and chat transcripts. This is *not* zero egress. If the customer has a regulatory mandate (not a preference), give them that description and let their counsel decide — and if the mandate is truly zero-egress, choose Option A instead.
 
 ### Step 3 — let the user choose, then adjust the rest of the build
 
 | If user picks | Adjust |
 |---|---|
 | A (dashboards only) | Skip the chat agent setup + Topics (`chat-agent.md`). Skip the chat-agent test step in the post-deploy bootstrap and the chat-agent block in the validation checklist. |
-| B (full stack in supported region) | All deploy commands run with `--region us-east-1` (or chosen region). Add cross-region Athena permissions to `{prefix}-quicksight-role`. Document data-residency: data stays in `{aws_region}`; query metadata and chat transcripts transit the BI region. |
+| B (full stack in supported region) | All deploy commands run with `--region us-east-1` (or chosen region). Add cross-region Athena permissions to `{prefix}-quicksight-role`. Document data-residency: data stays in `{aws_region}`; **aggregated result rows**, query metadata, and chat transcripts transit the BI region. **The query-region Glue catalog + Athena workgroup are built by the pipeline skill**, not here — see its `reference/cross-region-query.md` (follow-up #8). Confirm `platform.yaml` carries `query_region` + `cross_region_mechanism` before building datasets. |
 
 > **Migration note:** If the customer starts on Option B and `{aws_region}` later gains chat support, consolidating to in-region is a CDK redeploy plus a one-time Topic export/import (`describe-topic` → `create-topic` in the new region) and a SPICE dataset re-ingest.
 
@@ -201,8 +204,12 @@ aws s3 mb s3://{prefix}-analytics-us-east-1 --region us-east-1
 **⚠️ S3 Tables (Iceberg) special case:**
 If Seoul data is in managed S3 Tables (not plain S3):
 - Cross-region LOCATION trick does NOT work. S3 Tables aren't queried via an `s3://` LOCATION path — they're accessed through the `s3tablescatalog` Glue catalog / Iceberg REST endpoint, and the integration registers table buckets **per-region**, so the native connector is effectively same-region only.
-- Options: (a) Deploy QS in Seoul, (b) **Lake Formation cross-region resource links**, (c) Replicate data to us-east-1.
+- Options: (a) Deploy QS in Seoul, (b) **Glue/Lake Formation cross-region resource link** (query in place), (c) **Replicate** the mart layer to the BI region.
 
-  **How (b) actually works** (terminology, so the team can implement it): the source database/table stays in Seoul; in us-east-1 you create a **resource link** — a Glue database/table object whose `TargetDatabase`/`TargetTable` points back at the Seoul source (the `TargetDatabase` structure carries a `Region` field). For cross-*account*, the source first shares via **AWS RAM**, accepted in the source region. Then grant Lake Formation `DESCRIBE` on the link + `SELECT` on the underlying resource, and query the link from us-east-1 (works with Athena, EMR, Glue ETL). No data or metadata is copied. For S3 data not registered with Lake Formation, access falls back to IAM S3/Glue permissions rather than LF grants.
+  **(b) and (c) are both built by the pipeline skill — do not implement them here.** See its **`reference/cross-region-query.md`** (follow-up #8) for the complete path: the mechanism choice (which is presented to the user, since it turns on whether residency is a *mandate* or a *preference*), the `create-database` resource-link call with `TargetDatabase.Region`, the identity-only IAM policy, Lake Formation handling, the cost model, and teardown order.
+
+  In brief, so the terminology is clear: under (b) the source database/table stays in Seoul and the BI region holds a **resource link** — a Glue database object whose `TargetDatabase` points back at the Seoul source and carries a `Region` field. No data or metadata is copied; only query result rows cross. Same-account needs identity-based IAM only. For cross-*account*, the source shares via **AWS RAM** first, accepted in the source region, then LF `DESCRIBE` on the link + `SELECT` on the underlying resource. Under (c), S3 Tables cross-region replication puts a read-only replica in the BI region, which then queries a local catalog — no link, and no cross-region scan per refresh.
+
+  **Reference form matters:** query a resource link as `"AwsDataCatalog"."{prefix}_db_link"."{table}"` — the *local* catalog plus the link name. The federated `"s3tablescatalog/..."` form does not exist in the BI region.
 
 **Simplest recommendation:** If chat agent isn't needed, deploy Quick Sight in ap-northeast-2 (same region as data) — avoids all cross-region complexity.

@@ -14,6 +14,8 @@ This skill builds the **ingestion → storage → catalog → query** layers of 
 
 The skill is opinionated: best practices are baked in, not presented as options. If a choice has a clear winner for serverless analytics on AWS, the skill picks it.
 
+> **One deliberate exception.** If the catalog + query layers must live in a different region from storage (follow-up #8), the choice between the two mechanisms is **presented to the user, not decided** — it turns on a legal question (is data residency a mandate or a preference?) and a cost question that depends on customer-specific volume. See `reference/cross-region-query.md` §2.
+
 ---
 
 ## 🔴 CRITICAL RULES (never violate)
@@ -51,6 +53,25 @@ The skill is opinionated: best practices are baked in, not presented as options.
 
 ---
 
+## Validation Gates
+
+Five checkpoints where the build MUST stop. Two kinds, and the difference matters — see the Execution Model above:
+
+- **⛔ AGENT-BLOCKING** — the agent verifies, fixes, and re-verifies **itself**. Do NOT ask the user for permission to proceed; ask only if a fix fails after retries. Never skip the check and never continue on a failure.
+- **🛑 USER-BLOCKING** — the agent MUST present, stop, and **wait for an explicit answer**. These are business/legal/irreversible decisions the agent cannot make.
+
+| Gate | Kind | When | Passes when | Detail |
+|---|---|---|---|---|
+| **GATE 1 — Scope & residency** | 🛑 USER | After §1 inputs + follow-ups, before ANY build | Storage pattern confirmed; `aws_region` set; **if #8 = yes**, `query_region` set AND the residency question answered *mandate* or *preference* AND the cross-boundary data-flow acknowledged | §1, `reference/cross-region-query.md` §2 |
+| **GATE 2 — Preconditions** | ⛔ AGENT | Before `cdk synth` | All 5 precondition checks pass; LF not in strict mode (or user chose a path); IAM simulate shows no denies; tooling versions meet minimums | §1 ⚠️ MANDATORY block |
+| **GATE 3 — Data model** | 🛑 USER | Before generating CDK/scripts | User has confirmed the base/mart table list, grains, and join keys | §1 Interactive data model design |
+| **GATE 4 — Reconciliation** | ⛔ AGENT | After every pipeline run, before declaring success | Row counts + key SUMs reconcile against source within ~1%; every mart's declared grain matches its SQL; split-region: `query_region` COUNT == `aws_region` COUNT | §8 |
+| **GATE 5 — Teardown intent** | 🛑 USER | Before any destructive command | User has explicitly confirmed data deletion, having been told what is deleted | §11 |
+
+> **Gate discipline.** Never announce a gate as passed without running its check. If a gate fails, report *which* gate, *why*, and the fix — do not proceed to the next phase with a known failure and a note to fix it later. A skipped GATE 2 surfaces as an opaque deploy failure; a skipped GATE 4 ships wrong numbers that pass every structural test.
+
+---
+
 ## Reference files (load on demand)
 
 The core below is the default flow. Pull in a reference file when you reach its topic:
@@ -60,7 +81,9 @@ The core below is the default flow. Pull in a reference file when you reach its 
 | `reference/iceberg-cdk.md` | Building the Iceberg path — full CDK (table bucket, IAM grants, Glue 5.x job + trigger, JAR upload, maintenance, teardown) |
 | `reference/scripts.md` | Need any Glue job script, mart/view SQL, `run-views.py`, `smoke-test.py`, quality-check SQL, **dirty-data handling** (NFD filenames, mixed encoding, trailing-minus numbers, mixed date formats, join-key normalization, cross-source bridges, Excel normalization) |
 | `reference/hive-pattern.md` | User opted into Hive — full path (3 buckets, crawlers, transform job, crawler bootstrap) |
+| `reference/sap-sources.md` | Source is **SAP** (ECC / S/4HANA / BW / HANA) — native OData & HANA connectors, ODP delta, prerequisites, and the CSV-export fallback |
 | `reference/vpc-connectivity.md` | JDBC source is on-prem or in a private subnet |
+| `reference/cross-region-query.md` | Do the catalog + query layers need to be in a different region from storage (#8 = yes)? → read before building anything |
 | `reference/gotchas.md` | Hit an opaque failure, or before generating Athena DDL on S3 Tables |
 
 ---
@@ -92,15 +115,56 @@ What is the current state of your data platform?
 | Input | Example | Notes |
 | --- | --- | --- |
 | `project_prefix` | `acme` | Lowercase, kebab-friendly. Naming convention for every resource. |
-| `aws_region` | `ap-northeast-2`, `us-west-2` | Where the data lake lives. |
-| `source_type` | `jdbc` / `s3` / `cdc` | Drives the decision tree in §3. |
+| `aws_region` | `ap-northeast-2`, `us-west-2` | Where the data lake lives — storage + ETL, and also catalog + query unless split (#8). |
+| `query_region` (optional) | `ap-northeast-1`, `us-east-1` | **Defaults to `aws_region`.** Set only when #8 = yes. Owns the Glue resource link, Athena workgroup, and results bucket → `reference/cross-region-query.md`. |
+| `source_type` | `jdbc` / `s3` / `sap` / `cdc` | Drives the decision tree in §3. `sap` → `reference/sap-sources.md` (native connectors exist — don't force it to `jdbc`). |
 | `source_details` | see below | DB endpoint + Secrets Manager ARN, OR existing S3 path. |
 | `business_questions` | "Monthly defect-rate trend, Top 5 defects by supplier" | Drives table selection and Athena view/mart design. |
+| `downstream_consumer` | `bi` / `c360` / `ml` / `unknown` | **ASK THIS — do not make the user volunteer it.** Determines the mart contract. See "Downstream consumer" below. |
+
+### Downstream consumer — ASK, then configure it yourself
+
+> **Ask this right after `business_questions`, before the follow-up questions.** The downstream consumer changes the mart design, and retrofitting it means rewriting the mart jobs. The user should NOT have to know or state the technical requirements — you derive them.
+
+```
+What will consume this data?
+  a) BI dashboards / natural-language Q&A (QuickSight, Amazon Quick)
+  b) Customer 360 / identity resolution (unify customers across channels)
+  c) ML / feature engineering
+  d) Not sure yet — general-purpose analytics
+```
+
+Then apply the profile **silently** — announce the consequences, don't ask about them:
+
+| Answer | What YOU configure without being told |
+|---|---|
+| **(a) BI** | Marts shaped to the business questions; `sum_safe_columns` declared; single-row KPI mart for cards. Consumption skill takes it from here. |
+| **(b) C360** | 🔴 The full profile below. |
+| **(c) ML** | Wide denormalized feature marts; keep raw grain; no aggregation-only marts. |
+| **(d) Unknown** | Default BI shape; note in `ARCHITECTURE.md` that mart design may need revisiting. |
+
+**On (b) C360 / identity resolution — apply ALL of these automatically:**
+
+1. **Build a `mart_er_input` table** on Entity Resolution's 12-column contract (all lowercase): `variantid` (unique, ≤38 chars), `firstname`, `lastname`, `email`, `phone`, `dateofbirth`, `loyaltynumber`, `street`, `city`, `state`, `postalcode`, `country`, `sourcechannel`.
+2. **Do NOT deduplicate customers across channels.** One row per (customer × source channel) — `variantid` = `V-{channel}-{id}`. Resolving those variants is Entity Resolution's job; if you merge them, the C360 build has nothing to do. **Say this to the user explicitly** — it looks like a bug otherwise.
+3. **ASK the name order of EVERY source — it cannot be inferred.** `KIM MINHO` and `MINHO KIM` are indistinguishable as strings; only the source system knows its convention. Ask per source and pass it in: `family_first` (Korean-UI apps, SAP romanized exports), `given_first` (call-center free text, Western-facing forms), or `given_only` (app display names). Guessing produces opposite first/last names per channel, and a Name+Email rule then fails even with identical emails. Worked helper → `reference/gotchas.md`.
+4. **Normalize phone country codes**, not just digits: `+82-10-…` and `010-…` must produce the same string.
+5. **NULL out OTA/relay emails** (`*@booking.com`, `*@expedia*`) — they are per-booking aliases and will never match.
+6. **Make the marts incremental** — `MERGE INTO` on a stable business key with an `updated_at` watermark, not a full CTAS rebuild. Customer attributes churn continuously.
+7. **Add the ER export bridge** — Entity Resolution CANNOT read Iceberg/S3 Tables. Athena `UNLOAD` → Parquet → classic 2-level Glue table, on a dated prefix. Full mechanics + failure modes → `reference/gotchas.md` → "Downstream: AWS Entity Resolution".
+8. **Tell the consumer to set `applyNormalization: false`** if any name may contain Hangul or other non-Latin script — Entity Resolution's own normalizer **strips Hangul entirely**, blanking the name fields. Record it as `er_apply_normalization: false` in `platform.yaml`.
+9. **Record it** in `platform.yaml` as `downstream: {consumer: c360, er_input_table: ..., er_glue_table: ...}` so the C360 skill can discover it without being told.
+
+> **If any source is in a VPC (Aurora, RDS, SQL Server on EC2, on-prem), create the VPC endpoints FIRST** — `s3` + `dynamodb` gateway, plus `s3tables` + `glue` + `secretsmanager` interface. Missing `s3tables` lets the job read every source successfully and then fail on the Iceberg write ~90 seconds in. Verified failure mode → `reference/vpc-connectivity.md`.
+
+Then tell the user, in one line: *"I'll add a `mart_er_input` table shaped for Entity Resolution and keep channel variants unmerged — that's what the C360 step resolves."*
 
 **`source_details` by type:**
-- **JDBC**: `{ engine: "sqlserver"|"mysql"|"postgresql"|"oracle", host, port, database, secret_arn, tables: [...] }`
+- **JDBC**: `{ engine: "sqlserver"|"mysql"|"postgresql"|"oracle", host, port, database, secret_arn, tables: [...] }` — for Aurora/RDS, **probe the engine version rather than assuming one**: `aws rds describe-db-engine-versions --engine aurora-postgresql --region {region}` (a guessed version fails with `InvalidParameterCombination: Cannot find version …`).
+- **Per-source name convention** (collect when the downstream is C360): `name_order: "family_first"|"given_first"|"given_only"` per source. Not inferable from the data — see the Downstream consumer section.
 - **S3**: `{ bucket, prefix, format: "csv"|"json"|"parquet" }`
-- **CDC**: Out of scope — see §3.
+- **SAP**: `{ access: "odata"|"hana"|"s3_export"|"none_yet", instance_url, service_path, client_number, port, logon_language, auth: "basic"|"oauth2", entities: [...] }` — collect ALL of these for `odata`; a missing client number or service path blocks the build. See `reference/sap-sources.md` §2.1 for the customer-side prerequisite list.
+- **CDC**: Out of scope — see §3. (Exception: **SAP ODP delta** is a connector option on a batch Glue job, not a streaming architecture — in scope, see `reference/sap-sources.md` §2.4.)
 
 ### Follow-up questions (ask after primary inputs, ONE AT A TIME, with a recommended default)
 
@@ -113,6 +177,7 @@ What is the current state of your data platform?
 | 5 | Code-to-name mappings? (status codes etc.) | **Yes, generate from source data** (query DISTINCT, propose mappings) |
 | 6 | Partitioning strategy? | **Partition by date (year/month)** — optimal for time-series |
 | 7 | Sensitive columns to mask/exclude? | **None** (add masking later via Lake Formation governance) |
+| 8 | Catalog + query layer in a different region from storage? | **No — same region as storage** |
 
 For question #1, present the two patterns explicitly:
 
@@ -124,9 +189,48 @@ Which storage pattern would you like to use?
 
 The choice determines the build: **Iceberg (default)** uses §4 + `reference/iceberg-cdk.md`; **Hive (opt-in)** follows `reference/hive-pattern.md`. Both share the `{prefix}_db` interface so the consumption layer is unaffected.
 
-> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept ALL defaults (including **Iceberg** for #1) and proceed.
+For question #8, present it as:
 
-### ⚠️ MANDATORY: run ALL precondition checks before building
+```
+Do the catalog + query layers need to live in a different region from storage?
+  a) No (recommended ✓) — everything in {aws_region}. Simplest, no cross-region cost.
+  b) Yes — data must stay in {aws_region}, but a consumer service (BI, an AI/agentic
+     feature, a downstream engine) is only available in another region
+```
+
+On **(a)** — the overwhelming majority — nothing changes; ignore `reference/cross-region-query.md` entirely. On **(b)**: collect `query_region`, then read **`reference/cross-region-query.md`** BEFORE generating anything. Ask its §2 Step 1 question ("is residency a regulatory **mandate** or a **preference**?") early — the answer eliminates one mechanism, and a zero-egress mandate means neither works and the build should stop.
+
+> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept ALL defaults (including **Iceberg** for #1 and **No** for #8) and proceed.
+
+### 🛑 GATE 1 (USER-BLOCKING) — scope & residency confirmation
+
+Summarize what you're about to build and **await explicit confirmation**. Do not run preconditions or generate code before the user answers.
+
+```
+Build plan:
+  Prefix: {prefix} · Region: {aws_region} · Environment: {environment}
+  Storage pattern: {Iceberg (S3 Tables) | Hive}
+  Downstream: {BI | C360 / identity resolution | ML | general-purpose}
+  Source: {source_type} → {n} table(s)
+  Schedule: {cron} · Volume: {rows/day}
+  Split-region: {No | Yes — catalog + query in {query_region}}
+Proceed?
+```
+
+**If #8 = yes, GATE 1 additionally requires TWO acknowledgements** — these are policy decisions, never assumed:
+
+1. **Residency driver** — the user must state whether keeping data in `{aws_region}` is a **regulatory mandate** or a **preference**. This is not a preamble; it eliminates a mechanism and gets recorded in `platform.yaml` as `residency`. Do not infer it from the region choice or the customer's industry.
+2. **Cross-boundary data flow** — the user must acknowledge, in concrete terms, what leaves `{aws_region}`:
+   - *Query in place:* data files stay put, but **aggregated result rows transit and are cached in `{query_region}`** (plus query metadata and any chat transcripts). This is **not** zero egress.
+   - *Replication:* a **full copy of the mart tables** lives in `{query_region}`.
+
+   If the mandate turns out to be **zero-egress**, STOP — neither mechanism qualifies. Recommend dashboards in `{aws_region}` without the region-restricted features rather than building something that does not meet the constraint.
+
+Full decision flow, mechanism trade-offs, and the numbers to present → **`reference/cross-region-query.md`** §2.
+
+**If the source is SAP, GATE 1 also requires the access path settled** — which SAP access **already exists** (OData service activated / HANA credentials granted / S3 export / nothing yet). OData and HANA prerequisites are SAP-side work owned by the customer's Basis team and can take days to weeks, so they cannot be assumed inside a short engagement. If nothing is ready, say so at GATE 1, build on a representative export, and hand over the prerequisite list as an action item — do NOT block the build, and do NOT present an export-only design as the production architecture. → `reference/sap-sources.md` §1, §5.
+
+### ⛔ GATE 2 (AGENT-BLOCKING) — run ALL precondition checks before building
 
 Do NOT skip any precondition, and do NOT start the build until every one passes. If ANY fails: (1) report which and why, (2) give the fix command, (3) STOP and wait — or fix it yourself if safe (e.g. `cdk bootstrap`), (4) re-run to confirm, (5) only then build. A missing prerequisite surfaces later as an opaque deploy/runtime failure that is far more expensive to debug.
 
@@ -173,9 +277,9 @@ aws glue get-catalog --catalog-id s3tablescatalog --region {aws_region} >/dev/nu
 - **Glue Data Catalog integration (REQUIRED):** one-time per account+region; registers the `s3tablescatalog` federated catalog. If missing, enable it before deploy — `aws glue create-catalog` command in `reference/iceberg-cdk.md`. Without it, the Glue write and any Athena query against `s3tablescatalog/...` fail.
 - **IAM granularity:** S3 Tables IAM is **table-level** (`s3tables:*` on table-bucket/namespace/table ARNs). Grant ETL + Athena roles `s3tables:*` on the table bucket ARN plus `glue:*` on `s3tablescatalog` (see §5 / `reference/iceberg-cdk.md`).
 
-### Interactive data model design (MANDATORY before building)
+### 🛑 GATE 3 (USER-BLOCKING) — interactive data model design
 
-Before generating CDK/scripts, propose the data model plan:
+Before generating CDK/scripts, propose the data model plan and **wait for confirmation**:
 
 **Step 1: Propose tables + marts with recommendations**
 
@@ -222,6 +326,10 @@ Two storage patterns (chosen via follow-up #1):
 - **Iceberg / S3 Tables (default)** — a **Glue 5.x Spark Job (Iceberg connector)** reads the source (raw S3 files in `{prefix}-raw-zone`, or a JDBC DB directly) and writes **straight into Iceberg tables in an S3 Table Bucket**, scheduled by a Glue Trigger (cron). No curated bucket, no crawler at any stage: types are declared in job code, Iceberg auto-registers schema on write, S3 Tables compacts automatically. Athena is query-only. Adds ACID, MERGE upserts, time travel. Data-flow diagram in §4.
 - **Hive (opt-in)** — classic three-bucket layout (raw → curated Parquet → Athena), cataloged by Glue Crawlers. Diagram + full path in `reference/hive-pattern.md`.
 
+Plus one optional topology add-on (chosen via follow-up #8):
+
+- **Split-region catalog + query (opt-in)** — storage + ETL stay in `{aws_region}`; the catalog + query layers run in `{query_region}`. Layers on top of EITHER storage pattern. Two mechanisms — query in place via a Glue resource link, or replicate the mart layer — and **the user chooses; neither is a default.** Full path in `reference/cross-region-query.md`.
+
 ---
 
 ## 3. Decision Trees
@@ -230,8 +338,20 @@ Two storage patterns (chosen via follow-up #1):
 
 ```
 User's source type?
-├── JDBC (SQL Server / MySQL / PostgreSQL / Oracle)
+├── SAP (ECC / S/4HANA / BW / HANA — "our ERP")
+│   ├── ⚠️ Do NOT default to generic JDBC or assume CSV export is the only option.
+│   │     Glue has NATIVE SAP connectors: SAP OData (source+target, ODP delta) and SAP HANA.
+│   ├── Ask what already exists: OData service activated? HANA access granted?
+│   │     Datasphere/BW already exporting to S3? Or only CSV/Excel exports?
+│   ├── Prerequisites are SAP-side (Basis team, days-to-weeks) — surface at GATE 1,
+│   │     and do NOT block the build if they aren't ready
+│   └── → reference/sap-sources.md (decision tree, prereqs, connection options, delta)
+│
+├── JDBC (SQL Server / MySQL / PostgreSQL / Oracle) — RDS **or self-managed on EC2 / on-prem**
 │   ├── Create Glue Connection (in VPC if source is private/on-prem — reference/vpc-connectivity.md)
+│   ├── ℹ️ Self-managed is fully supported. If the user says "my DB isn't in the Glue Studio
+│   │     list": the visual editor's "Amazon RDS" node IS the JDBC node, and this skill
+│   │     generates code-based jobs anyway. NO crawler, NO source catalog table needed.
 │   ├── Iceberg (default): Glue 5.x JDBC job (ingest-jdbc-iceberg.py) → writes Iceberg directly (CAN SKIP raw S3)
 │   │     Hive (opt-in): ingest-jdbc.py → raw Parquet, then transform.py → curated
 │   ├── Schedule via Glue Trigger (cron, daily 02:00 KST default) — NOT EventBridge + Athena
@@ -305,16 +425,18 @@ Only STOP and ask when a column mapping is genuinely ambiguous (multiple plausib
 
 > 🔴 Schema adaptability above only handles **column-name / type** drift. Real Korean manufacturing ERP exports also carry **value-level** corruption that passes every structural check (row-count > 0, null-check, STRICT) yet silently produces WRONG numbers — e.g. a date format the parser misses dropped 16% of production rows, and trailing-minus costs cast to NULL zeroing every cost KPI. You MUST screen for these BEFORE trusting any aggregate. Full helpers + Spark snippets → **`reference/scripts.md` → "Dirty real-world data handling"**.
 
-| # | Corruption | Symptom if unhandled | Fix (one-liner) |
-|---|-----------|---------------------|-----------------|
-| 1 | **Unicode NFD filenames** (CJK/Korean decomposed form on macOS) — e.g. a filename with CJK characters | `NoSuchKey` on literal match — breaks on EVERY Korean/CJK filename on macOS | `list_objects` prefix-match, then use the **actual byte key** returned |
-| 2 | **Mixed encoding per source** (MES = EUC-KR, SAP = UTF-8 in one pipeline) | Mojibake / garbled Korean in dimensions | Per-source `.option("encoding", ...)` branch in the Spark job |
-| 3 | **SAP trailing-minus negatives** — `150.000-` means -150 (often >50% of rows) | `cast('double')` → NULL → all cost/amount KPIs become 0 | `parse_num` helper: detect trailing `-`, move it to front before cast |
-| 4 | **Mixed date formats** (`yyyyMMddHHmmss` + `yyyy-MM-dd HH:mm:ss` + `yyyy/M/d H:m:s` no zero-pad + literal `'NULL'`) | Unparsed rows silently dropped → metric too low (16% loss seen) | `coalesce(to_timestamp(c,fmt1), …fmt2, …fmt3)` chain + filter literal `'NULL'` |
-| 5 | **Join-key leading-zero / whitespace** — MATNR as `10010015` vs `000…010010002` vs `  000…009` | Joins return 0 rows → empty dimensions | `norm_key`: `regexp_replace(trim(c),'^0+','')` on BOTH sides before any join |
-| 6 | **Cross-source bridge (no common key)** — SAP material groups (`FG100…`) vs Finance categories (e.g. `bracket-type…`) | Cannot join the two sources at all | Domain-knowledge bridge table: infer mapping from name-membership overlap |
+> **Most of these are SAP CSV-export artifacts.** If the source is SAP, check whether a **native connector** (SAP OData / SAP HANA) is available first — typed fields eliminate the numeric and date corruption at the source rather than parsing around it. → `reference/sap-sources.md`
 
-> **Rule:** the Iceberg/Spark default path reads empty CSV fields as `null` automatically, but it does NOT auto-fix any of the six above. After ingest, run the row-count reconciliation in §8 (source vs base table) — a gap means one of these silently dropped or zeroed rows.
+**Screen for these six** — each has a worked Spark fix, numbered identically, in `reference/scripts.md` → "Dirty real-world data handling":
+
+1. **Unicode NFD filenames** (CJK/Korean decomposed on macOS) → `NoSuchKey` on every Korean filename from a Mac
+2. **Mixed encoding per source** (MES=EUC-KR + SAP=UTF-8 in one pipeline) → mojibake in dimensions
+3. **SAP trailing-minus negatives** (`150.000-` = -150, often >50% of rows) → cast to NULL → cost KPIs become 0
+4. **Mixed date formats** (incl. non-zero-padded `yyyy/M/d` and literal `'NULL'`) → rows silently dropped (16% loss seen)
+5. **Join-key leading-zero / whitespace** (`10010015` vs `000…010010002`) → joins return 0 rows → empty dimensions
+6. **Cross-source bridge, no common key** → the two sources cannot be joined at all
+
+> **Rule:** the Iceberg/Spark default path reads empty CSV fields as `null` automatically, but it does NOT auto-fix any of the six. After ingest, run the GATE 4 reconciliation in §8 (source vs base table) — a gap means one of these silently dropped or zeroed rows.
 
 ### Mart grain declaration + downstream SUM safety
 
@@ -397,6 +519,8 @@ Per 🔴 rule 3, `CREATE VIEW` doesn't work across the S3 Tables catalog. Materi
 |---------|----------------|------------------------|
 | Iceberg (default) | `s3tablescatalog/{prefix}-table-bucket` | `mart_*` CTAS tables |
 | Hive (opt-in) | `AwsDataCatalog` | `v_*` views |
+| Split-region, query in place (#8) | `AwsDataCatalog` in `{query_region}`, database `{prefix}_db_link` | `mart_*` through the resource link |
+| Split-region, replicated (#8) | `s3tablescatalog/{prefix}-table-bucket` in `{query_region}` (local replica) | replicated `mart_*` |
 
 Record which pattern was used in `ARCHITECTURE.md` (§10) — the consumption skill reads it to pick the catalog. Cross-catalog reference format:
 - S3 Tables: `"s3tablescatalog/{prefix}-table-bucket"."{prefix}_db"."{table}"`
@@ -416,6 +540,7 @@ Record which pattern was used in `ARCHITECTURE.md` (§10) — the consumption sk
 | `{prefix}-glue-etl-role` | Glue ETL Jobs | S3 read/write on buckets, Catalog read+write, Secrets Manager (JDBC), CloudWatch Logs |
 | `{prefix}-athena-query-role` | Athena queries | Catalog read, S3 read on curated, S3 write on analytics |
 | `{prefix}-quicksight-role` | VPC/federated-query scenarios only | Usually NOT needed — see `reference/gotchas.md` |
+| `{prefix}-query-role-{query_region}` | Athena in `{query_region}` (split-region only, #8) | Storage-region `s3tables:Get*`/`glue:Get*` + local results-bucket write → `reference/cross-region-query.md` §A4 |
 
 ### Lake Formation IAM-only mode
 
@@ -452,6 +577,8 @@ etlRole.addToPolicy(new iam.PolicyStatement({
 
 JDBC connectivity (Glue Connection, on-prem/VPC prerequisites, `test-connection`) applies to **both** patterns when the source is JDBC → **`reference/vpc-connectivity.md`**. For a public/reachable endpoint, create the Glue Connection directly.
 
+**SAP sources** use a Glue **SAP OData** or **SAP HANA** connection instead of raw JDBC — same job shape (read → type → `writeTo` Iceberg), different `create_dynamic_frame` call. SAP is rarely internet-reachable, so expect VPC configuration too. → **`reference/sap-sources.md`**
+
 - **Iceberg (default):** ONE Glue 5.x Spark job per source that reads and **writes Iceberg directly** (`ingest-iceberg.py` / `ingest-jdbc-iceberg.py`). No separate transform job, no curated bucket. Full CDK (job + JAR upload + `--conf`/`--extra-jars`/`--user-jars-first` + cron trigger) → **`reference/iceberg-cdk.md`**.
 - **Hive (opt-in):** two-job `ingest-jdbc.py` → `transform.py` flow with conditional trigger chaining → **`reference/hive-pattern.md`**.
 
@@ -460,6 +587,8 @@ Both schedule with a **Glue Trigger (cron)** — never EventBridge + Athena (Ath
 ---
 
 ## 7. Query Layer (Athena)
+
+> **Split-region (#8 = yes)?** Two hard constraints shape everything below: (1) **Athena resolves the Glue Data Catalog in its OWN region** — there is no way to point a workgroup at a remote catalog, so `{query_region}` gets a **resource-link database** whose target carries `{aws_region}`; (2) the results `OutputLocation` bucket **must be in the workgroup's own region** — only source data is remote. Build the workgroup below in `{query_region}` instead, and follow **`reference/cross-region-query.md`**.
 
 ### Workgroup config
 
@@ -522,6 +651,8 @@ After `cdk deploy --all --require-approval never` succeeds, run the bootstrap yo
 ---
 
 ## 8. Data Quality Checks
+
+> ⛔ **GATE 4 (AGENT-BLOCKING) — reconciliation before declaring success.** Do not report a pipeline run as good until: (1) row counts and key SUMs reconcile against the source within ~1%; (2) every mart's declared `-- GRAIN` matches its actual SQL grain; (3) split-region only — a `COUNT(*)` from `{query_region}` **equals** the same count in `{aws_region}`. Diagnose and fix failures yourself, then re-run. "Validation passed" without reconciliation is the exact failure this gate exists to catch.
 
 After every pipeline run, run row-count, null-rate, date-range, duplicate-PK, and referential-integrity checks. Generate one set per curated table in `athena-views/quality-checks.sql`. SQL templates in `reference/scripts.md`.
 
@@ -588,6 +719,7 @@ The skill MUST generate a `README.md`, an `ARCHITECTURE.md`, and a `platform.yam
 - Pattern: `Iceberg (S3 Tables)`  OR  `Hive`     <-- record which one was built
 ### Naming Convention
 - Project prefix: `{prefix}` · Region: `{region}` · Environment: `{environment}`
+- Split-region (only if #8 = yes): storage + ETL in `{region}` · catalog + query in `{query_region}` · mechanism: `{resource_link|replication}`
 ```
 
 **Storage + catalog — Iceberg (default):**
@@ -647,6 +779,14 @@ Create on first run; **READ it first** on re-run; update EVERY time infrastructu
 | ZSTD compression | Better ratio than Snappy for analytics | Snappy (Hive default only) |
 | Single DB `{prefix}_db` | Clean LF grant boundary; convention discovery | `default` database |
 | Glue Trigger (cron) | Native Glue scheduler | EventBridge → Athena (no scheduler) |
+[split-region only — pick the row matching the chosen mechanism:]
+| Query in place (Glue resource link) | Data files never leave {region}; user chose this for residency | Replication (copies data out of {region}) |
+| Replicated mart layer to {query_region} | Cheaper at this scan volume; residency is a preference, not a mandate | Resource link (needless per-scan transfer here) |
+## Data Residency Disclosure
+[split-region only] Mechanism: {resource_link|replication}. Residency driver: {mandate|preference}.
+Stays in {region}: [source of record; base_* and mart_* data files].
+Crosses to {query_region}: [aggregated result rows cached in SPICE; query metadata; chat transcripts
+— plus a full copy of mart_* if replication]. Approved by: {name/role, date}.
 ## Known Issues & Gotchas
 [copy the table from reference/gotchas.md]
 ## Change Log
@@ -665,6 +805,14 @@ platform:
   catalog: "s3tablescatalog/{prefix}-table-bucket"  # or AwsDataCatalog for Hive
   created: "YYYY-MM-DD"
   updated: "YYYY-MM-DD"
+  # --- split-region block: OMIT ENTIRELY unless follow-up #8 = yes ---
+  query_region: "{query_region}"                  # where catalog + query run
+  cross_region_mechanism: "resource_link"          # resource_link | replication
+  residency: "mandate"                             # mandate | preference — WHY the mechanism was chosen.
+                                                   # Never "optimize" a mandate-driven resource_link into
+                                                   # replication; it breaks a compliance constraint.
+  query_catalog: "AwsDataCatalog"                  # in {query_region}
+  query_database: "{prefix}_db_link"               # the resource link (resource_link only)
 storage:
   table_bucket: "{prefix}-table-bucket"  # Iceberg only
   raw_zone: "{prefix}-raw-zone"
@@ -698,8 +846,19 @@ etl:
     schedule: "cron(0 17 * * ? *)"
 lineage:
   - "raw_quality_inspections -> mart_quality_summary -> quality-dataset(SPICE) -> quality-dashboard"
+downstream:                              # who consumes this — asked in §1, not volunteered
+  consumer: "c360"                       # bi | c360 | ml | unknown
+  er_input_table: "mart_er_input"        # c360 only — the 12-column ER contract mart
+  er_export_prefix: "s3://{prefix}-analytics-zone/er-input/"
+  er_glue_table: "{prefix}_er.er_input"  # classic 2-level Glue table ER reads (NOT Iceberg)
+  variants_unmerged: true                # c360: one row per (customer x channel) — ER resolves them
 consumption:
-  quicksight_region: "{region}"
+  quicksight_region: "{region}"          # = query_region when #8 = yes
+  er_apply_normalization: false           # c360: FALSE when names contain Hangul/non-Latin —
+                                          # ER's normalizer strips Hangul and blanks name fields
+  requires_spice: false                  # TRUE when cross_region_mechanism=resource_link —
+                                         # consumption MUST NOT use DIRECT_QUERY (every visual
+                                         # interaction would bill a cross-region scan)
   spice_refresh: "DAILY 04:00 Asia/Seoul"
   datasets: {}
   dashboards: {}
@@ -713,6 +872,8 @@ consumption:
 ## 11. Teardown
 
 > **Iteration tip — separate stacks.** CFN rolls back the whole stack on any resource failure. Split into **StorageStack** (very stable), **CatalogStack** (stable: DB, crawlers, IAM), **PipelineStack** (changes every iteration: jobs, triggers, named queries, views). View/mart iteration won't roll back upstream resources. Cross-stack refs via `props`.
+
+> 🛑 **GATE 5 (USER-BLOCKING) — teardown intent.** Never run a destructive command without an explicit confirmation that names what will be deleted: which buckets, which tables, and that the data is unrecoverable. "Clean up" or "we're done" is NOT sufficient authorization — state the blast radius and wait.
 
 Teardown is destructive. **You run these yourself when asked, but always confirm intent first** ("This will delete S3 data + Glue catalog. Confirm?"). Buckets use `RemovalPolicy.RETAIN` so `cdk destroy` can't accidentally delete data.
 
@@ -733,6 +894,8 @@ cdk destroy --all
 
 > **Iceberg adds a step:** delete the S3 Table Bucket contents (tables → namespace → table bucket) before `cdk destroy`. Commands in `reference/iceberg-cdk.md`.
 
+> **Split-region adds a step, and it goes FIRST:** tear down `{query_region}` before touching storage — delete the resource link, empty + delete the query-region results bucket, `cdk destroy QueryStack` (and stop replication first under Mechanism B). Deleting a resource link touches no data. Full sequence → `reference/cross-region-query.md` §9. **Cross-account:** revoke the LF grant / RAM share (Mechanism A) or the destination bucket policy (Mechanism B) as well — the consumer account keeps access until you do.
+
 For partial teardown (remove one source), use CDK context flags instead of destroy: `cdk deploy --context source:sqlserver=remove`.
 
 ---
@@ -749,9 +912,12 @@ Don't enable LF strict mode / LF-TBAC / cross-account sharing by default. Trigge
 
 | Trigger | What to add |
 | --- | --- |
+| Downstream is **C360 / AWS Entity Resolution** | A `mart_er_input` table on ER's 12-column contract + an Athena `UNLOAD` → Parquet → classic Glue table bridge (**ER cannot read Iceberg**). Do NOT dedup customers — that is ER's job. → `reference/gotchas.md` → "Downstream: AWS Entity Resolution" |
 | A second team needs a subset of tables | LF column/row-level grants per role |
 | PII columns identified | LF column masking + `data-classification=confidential` tag |
 | Cross-account sharing | LF cross-account grant + RAM share (or AWS DataZone) |
+| Cross-**region** catalog + query | `reference/cross-region-query.md` (follow-up #8) — resource link or mart replication |
+| Cross-account **AND** cross-region | Both supported and documented by AWS → `reference/cross-region-query.md` §8. ⚠️ Cross-account voids this skill's LF IAM-only default: Mechanism A requires RAM + LF grants, Mechanism B requires a destination-side table-bucket policy (+ KMS key policies on both ends) |
 | "Data mesh" / "data products" | AWS DataZone (separate skill) |
 | Audit/compliance | CloudTrail data events on S3 + LF audit trail |
 
@@ -792,4 +958,4 @@ Update platform.yaml and ARCHITECTURE.md after every change.
 
 ## Section Map
 
-🔴 Critical Rules · Reference files (load-on-demand table) · §1 Prerequisites & Inputs · §2 Architecture Overview · §3 Decision Trees · §4 Storage Pattern: Iceberg (CORE FLOW) · §5 IAM & Security · §6 ETL Pipeline · §7 Query Layer · §8 Data Quality · §9 Cost Guardrails · §10 Output Contract · §11 Teardown · §12 Batch-Only Scope · §13 Governance · Reference files: `iceberg-cdk.md`, `scripts.md`, `hive-pattern.md`, `vpc-connectivity.md`, `gotchas.md`
+🔴 Critical Rules · **Validation Gates (5: scope&residency / preconditions / data model / reconciliation / teardown)** · Reference files (load-on-demand table) · §1 Prerequisites & Inputs · §2 Architecture Overview · §3 Decision Trees · §4 Storage Pattern: Iceberg (CORE FLOW) · §5 IAM & Security · §6 ETL Pipeline · §7 Query Layer · §8 Data Quality · §9 Cost Guardrails · §10 Output Contract · §11 Teardown · §12 Batch-Only Scope · §13 Governance · Reference files: `iceberg-cdk.md`, `scripts.md`, `hive-pattern.md`, `sap-sources.md`, `vpc-connectivity.md`, `cross-region-query.md`, `gotchas.md`
