@@ -386,6 +386,87 @@ export class GraphStack extends Construct {
 }
 ```
 
+## API Stack — Gateway Response (CORS on errors) + Authorizer
+
+```typescript
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+
+export class ApiStack extends Construct {
+  public readonly api: apigateway.RestApi;
+
+  constructor(scope: Construct, id: string, props: ApiStackProps) {
+    super(scope, id);
+
+    this.api = new apigateway.RestApi(this, 'Api', {
+      restApiName: `${props.projectName}-api`,
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: apigateway.Cors.ALL_METHODS,
+        allowHeaders: ['Content-Type', 'Authorization'],
+      },
+    });
+
+    // ⚠️ CRITICAL: Gateway Response — authorizer 401/403에 CORS 헤더 추가
+    // 이것이 없으면 인증 오류가 "Failed to fetch"로 위장되어 디버깅 불가
+    this.api.addGatewayResponse('Default4xx', {
+      type: apigateway.ResponseType.DEFAULT_4XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers': "'Content-Type,Authorization'",
+        'Access-Control-Allow-Methods': "'GET,POST,PUT,DELETE,OPTIONS'",
+      },
+    });
+    this.api.addGatewayResponse('Default5xx', {
+      type: apigateway.ResponseType.DEFAULT_5XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers': "'Content-Type,Authorization'",
+        'Access-Control-Allow-Methods': "'GET,POST,PUT,DELETE,OPTIONS'",
+      },
+    });
+
+    // Cognito Authorizer
+    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuth', {
+      cognitoUserPools: [props.userPool],
+      identitySource: 'method.request.header.Authorization',
+    });
+
+    // Lambda integrations — all routes under /api
+    // Use addProxy for catch-all routing to a single Lambda:
+    const apiResource = this.api.root.addResource('api');
+    apiResource.addProxy({
+      defaultIntegration: new apigateway.LambdaIntegration(props.apiHandler, {
+        // ⚠️ timeout 제한: API GW REST API는 최대 29초 (hard limit)
+        timeout: cdk.Duration.seconds(29),
+      }),
+      defaultMethodOptions: {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      },
+      anyMethod: true,
+    });
+  }
+}
+```
+
+### Gateway Response 검증 (curl)
+
+배포 후 반드시 확인:
+
+```bash
+# 인증 없이 호출 → 401이 CORS 헤더와 함께 오는지 확인
+curl -s -o /dev/null -w "%{http_code}" -H "Origin: http://localhost:3000" \
+  https://<api-id>.execute-api.<region>.amazonaws.com/prod/api/profiles
+# → 401 (not 0 or CORS error)
+
+# CORS 헤더 확인
+curl -sI -H "Origin: http://localhost:3000" \
+  https://<api-id>.execute-api.<region>.amazonaws.com/prod/api/profiles \
+  | grep -i "access-control"
+# → Access-Control-Allow-Origin: * 이 있어야 함
+```
+
 ## Main Stack (Orchestrator)
 
 ```typescript

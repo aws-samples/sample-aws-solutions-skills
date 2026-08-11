@@ -2,6 +2,13 @@
 
 **Stack**: React 18 + Vite + TypeScript + Tailwind v3 + shadcn/ui + Radix primitives + lucide-react + recharts + sonner. **Cloudscape is not used.**
 
+## ⚠️ 디자인 원칙 (필수)
+
+1. **액센트 1색**: `primary` 색상 하나 + neutral 계열(background, foreground, muted, border)만 사용. 원색 여러 개 혼합 금지.
+2. **색은 정보에만**: Badge/Status/Alert 등 의미 전달 목적에만 색 사용. 장식 목적 금지.
+3. **장식 그라데이션 금지**: 제목 텍스트 그라데이션, 배경 글로우, 컬러 보더 그라데이션 사용하지 않음.
+4. shadcn/ui의 CSS variable 테마를 그대로 사용하면 위 원칙이 자연스럽게 충족됨.
+
 ## ⚠️ Required: backend API connection (if skipped, the UI shows a blank screen)
 
 The frontend must connect to the deployed API Gateway endpoint. **If this connection is missing, the pages render but no data appears.**
@@ -129,18 +136,21 @@ export default {
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from 'react-oidc-context';
 import { Toaster } from 'sonner';
-import { LayoutDashboard, Database, Network, GaugeCircle, Sparkles, Users2, GitGraph, Send } from 'lucide-react';
+import { LayoutDashboard, Database, Network, GaugeCircle, Sparkles, Users2, GitGraph, Send, ListChecks } from 'lucide-react';
 import Layout from './components/Layout';
+import AuthGate from './components/AuthGate';
 import DashboardPage from './pages/DashboardPage';
+import WorkflowPage from './pages/WorkflowPage';
 // ... other pages
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/workflow', label: 'Demo Workflow', icon: ListChecks },   // 데모 스테퍼 (필수)
   { to: '/ingestion', label: 'Data Ingestion', icon: Database },
   { to: '/matching', label: 'Entity Matching', icon: Network },
   { to: '/accuracy', label: 'Accuracy', icon: GaugeCircle },
   { to: '/ai-rules', label: 'AI Rules', icon: Sparkles },
-  { to: '/profile-import', label: 'Send to CP', icon: Send },     // note 5: Send-to-CP screen
+  { to: '/profile-import', label: 'Send to CP', icon: Send },
   { to: '/profiles', label: 'Unified Profile', icon: Users2 },
   { to: '/graph', label: 'Knowledge Graph', icon: GitGraph },     // optional
 ];
@@ -148,16 +158,19 @@ const NAV = [
 export default function App() {
   return (
     <AuthProvider {...oidcConfig}>
-      <BrowserRouter>
-        <Layout nav={NAV}>
-          <Routes>
-            <Route path="/" element={<DashboardPage />} />
-            {/* ... */}
-            <Route path="*" element={<Navigate to="/" />} />
-          </Routes>
-        </Layout>
-        <Toaster position="top-right" richColors />
-      </BrowserRouter>
+      <AuthGate>
+        <BrowserRouter>
+          <Layout nav={NAV}>
+            <Routes>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/workflow" element={<WorkflowPage />} />
+              {/* ... other routes */}
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </Layout>
+          <Toaster position="top-right" richColors />
+        </BrowserRouter>
+      </AuthGate>
     </AuthProvider>
   );
 }
@@ -232,6 +245,96 @@ export async function apiCall<T>(path: string, init: RequestInit = {}): Promise<
 }
 ```
 
+## AuthGate — 인증 상태 래퍼 (필수)
+
+인증 실패 시 "Failed to fetch" 대신 명확한 로그인 UI를 표시합니다. `App.tsx`에서 모든 라우트를 감쌉니다.
+
+```tsx
+// src/components/AuthGate.tsx
+import { useAuth } from 'react-oidc-context';
+import { Button } from './ui/button';
+import { Alert, AlertTitle, AlertDescription } from './ui/alert';
+import { LogIn, Loader2 } from 'lucide-react';
+
+export default function AuthGate({ children }: { children: React.ReactNode }) {
+  const auth = useAuth();
+
+  if (auth.isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (auth.error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen p-6">
+        <Alert variant="destructive" className="max-w-md">
+          <AlertTitle>Authentication Error</AlertTitle>
+          <AlertDescription className="mt-2">
+            {auth.error.message}
+            <Button className="mt-4 w-full" onClick={() => auth.signinRedirect()}>
+              <LogIn className="h-4 w-4 mr-2" /> Sign in again
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  if (!auth.isAuthenticated) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center space-y-4">
+          <h2 className="text-xl font-semibold">Sign in required</h2>
+          <p className="text-muted-foreground">Please sign in to access the application.</p>
+          <Button onClick={() => auth.signinRedirect()}>
+            <LogIn className="h-4 w-4 mr-2" /> Sign in with SSO
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+}
+```
+
+`App.tsx`에서 사용:
+
+```tsx
+<AuthProvider {...oidcConfig}>
+  <AuthGate>
+    <BrowserRouter>
+      <Layout nav={NAV}>...</Layout>
+    </BrowserRouter>
+  </AuthGate>
+</AuthProvider>
+```
+
+## auth.ts — singleton userManager (필수)
+
+`userManager`를 여러 곳에서 `new`하면 세션 충돌이 발생합니다. 반드시 하나만 export합니다.
+
+```typescript
+// src/api/auth.ts
+import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
+
+const oidcConfig = {
+  authority: `https://cognito-idp.${import.meta.env.VITE_REGION}.amazonaws.com/${import.meta.env.VITE_COGNITO_USER_POOL_ID}`,
+  client_id: import.meta.env.VITE_COGNITO_CLIENT_ID,
+  redirect_uri: `${window.location.origin}/callback`,
+  post_logout_redirect_uri: window.location.origin,
+  response_type: 'code',
+  scope: 'openid email',
+  userStore: new WebStorageStateStore({ store: window.localStorage }),
+};
+
+// ⚠️ Singleton — 전체 앱에서 이 인스턴스만 사용
+export const userManager = new UserManager(oidcConfig);
+```
+
 ## Page pattern — use only standard shadcn components
 
 Every page follows the same visual skeleton:
@@ -246,6 +349,98 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 import PageHeader from '../components/PageHeader';
+```
+
+## WorkflowPage — 데모 스테퍼 (필수)
+
+6개 서비스의 실행 순서와 의존관계를 시각적으로 안내합니다. 평평한 메뉴 구조에서는 무엇을 먼저 실행해야 하는지 알 수 없으므로, 이 페이지가 데모 진행의 나침반 역할을 합니다.
+
+```tsx
+import { CheckCircle2, Circle, Loader2, ChevronRight } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+
+interface Step {
+  id: string;
+  label: string;
+  description: string;
+  route: string;
+  checkEndpoint: string; // GET → { completed: boolean }
+}
+
+const STEPS: Step[] = [
+  { id: 'ingest', label: '1. Data Ingestion', description: 'S3에 원본 데이터 적재 + Glue Table 생성', route: '/ingestion', checkEndpoint: '/api/ingestion/status' },
+  { id: 'rules', label: '2. AI Rule Generation', description: 'Bedrock로 매칭 규칙 생성 + HITL 승인', route: '/ai-rules', checkEndpoint: '/api/rules' },
+  { id: 'matching', label: '3. Entity Matching', description: '3가지 전략 순차 실행 + 비교', route: '/matching', checkEndpoint: '/api/matching/status?type=advanced' },
+  { id: 'import', label: '4. Send to CP', description: 'Golden Profile + Reservation/Folio → Customer Profiles', route: '/profile-import', checkEndpoint: '/api/profile-import/status' },
+  { id: 'profile', label: '5. Unified Profile', description: '통합 프로필 + Calculated Attributes 확인', route: '/profiles', checkEndpoint: '/api/profiles/search?key=email&value=check' },
+  { id: 'graph', label: '6. Knowledge Graph (Optional)', description: 'Neptune 동기화 + Graph RAG 질의', route: '/graph', checkEndpoint: '/api/graph/status' },
+];
+
+export default function WorkflowPage() {
+  const navigate = useNavigate();
+  const [statuses, setStatuses] = useState<Record<string, 'pending' | 'done' | 'running'>>({});
+
+  useEffect(() => {
+    // 각 단계 완료 여부 확인
+    STEPS.forEach(async (step) => {
+      try {
+        const res = await apiCall<{ completed?: boolean; status?: string }>(step.checkEndpoint);
+        const done = res.completed || res.status === 'SUCCEEDED' || res.status === 'COMPLETED';
+        setStatuses(prev => ({ ...prev, [step.id]: done ? 'done' : 'pending' }));
+      } catch {
+        setStatuses(prev => ({ ...prev, [step.id]: 'pending' }));
+      }
+    });
+  }, []);
+
+  const currentStep = STEPS.findIndex(s => statuses[s.id] !== 'done');
+
+  return (
+    <>
+      <PageHeader title="Demo Workflow"
+        description="단계별로 진행하세요. 각 단계는 이전 단계의 결과에 의존합니다." />
+
+      <div className="space-y-3">
+        {STEPS.map((step, i) => {
+          const status = statuses[step.id] ?? 'pending';
+          const isCurrent = i === currentStep;
+          return (
+            <Card
+              key={step.id}
+              className={cn(
+                'cursor-pointer transition-colors hover:bg-muted/50',
+                isCurrent && 'ring-2 ring-primary'
+              )}
+              onClick={() => navigate(step.route)}
+            >
+              <CardContent className="flex items-center gap-4 py-4">
+                {status === 'done' ? (
+                  <CheckCircle2 className="h-6 w-6 text-green-600 shrink-0" />
+                ) : isCurrent ? (
+                  <Circle className="h-6 w-6 text-primary shrink-0" />
+                ) : (
+                  <Circle className="h-6 w-6 text-muted-foreground/40 shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className={cn('font-medium text-sm', status === 'done' && 'text-muted-foreground')}>
+                    {step.label}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{step.description}</p>
+                </div>
+                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+
+      {/* 전체 진행률 */}
+      <div className="mt-6 text-sm text-muted-foreground text-center">
+        {Object.values(statuses).filter(s => s === 'done').length} / {STEPS.length} steps completed
+      </div>
+    </>
+  );
+}
 ```
 
 ## DashboardPage — StatCard + Recharts
@@ -319,48 +514,404 @@ export default function IngestionPage() {
 }
 ```
 
-## MatchingComparisonPage — run all 3 simultaneously + compare
+## MatchingComparisonPage — 개별 실행 + 규칙 표시 + 비교 테이블 + AI 추천 (필수)
+
+> ⚠️ ER 동시 실행 쿼터: 리전당 1개. `Promise.all` 사용 금지.
+> 각 전략을 **개별적으로** 실행할 수 있되, 동시에 두 개를 실행할 수는 없습니다.
+
+### 필수 UI 요소
+
+1. **전략별 카드**: 각 전략(simple/advanced/ml)마다 독립 카드 — 규칙 내용 표시, 개별 실행 버튼, 개별 결과
+2. **쿼터 배너**: 동시 실행 불가 안내
+3. **비교 테이블**: 완료된 전략들을 나란히 비교 (원본/그룹/매칭/미매칭/중복제거율)
+4. **AI 추천**: 2개 이상 결과가 있으면 Bedrock 기반 전략 추천
+
+### 백엔드 추가 라우트
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/matching/rules?type=<matchingType>` | 해당 전략의 규칙 목록 조회 |
+
+```typescript
+// GET /api/matching/rules?type=simple — 전략별 규칙 조회
+async function getMatchingRules(matchingType: string) {
+  const workflowName = `${WORKFLOW_NAME}-${matchingType}`;
+  const { rules, resolutionType } = await erClient.send(
+    new GetMatchingWorkflowCommand({ workflowName })
+  );
+  // rules: [{ ruleName: 'NameAndEmail', matchingKeys: ['name','email'] }, ...]
+  return { matchingType, resolutionType, rules: rules ?? [] };
+}
+```
+
+### 프론트엔드
 
 ```tsx
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { Loader2, AlertTriangle, Sparkles, Play, CheckCircle2, List } from 'lucide-react';
+
+type MatchingType = 'simple' | 'advanced' | 'ml';
+
+interface MatchingRule {
+  ruleName: string;
+  matchingKeys: string[];
+}
+
+interface MatchingSummary {
+  matchingType: MatchingType;
+  totalVariants: number;
+  groups: number;
+  matched: number;
+  unmatched: number;
+  deduplicationRate: string;
+}
+
+interface StrategyState {
+  type: MatchingType;
+  label: string;
+  description: string;
+  rules: MatchingRule[];
+  rulesLoading: boolean;
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  result: MatchingSummary | null;
+}
+
+const INITIAL_STRATEGIES: StrategyState[] = [
+  { type: 'simple', label: 'Simple Rule', description: '단일 키 매칭 (예: 이메일만)', rules: [], rulesLoading: false, status: 'idle', result: null },
+  { type: 'advanced', label: 'Advanced Rule', description: '복합 키 조합 (예: 이름+이메일, 전화+생년월일)', rules: [], rulesLoading: false, status: 'idle', result: null },
+  { type: 'ml', label: 'ML Matching', description: '머신러닝 기반 유사도 매칭 (규칙 없음, 학습 데이터 기반)', rules: [], rulesLoading: false, status: 'idle', result: null },
+];
 
 export default function MatchingComparisonPage() {
-  const [results, setResults] = useState<any[]>([]);
-  const [running, setRunning] = useState(false);
+  const [strategies, setStrategies] = useState<StrategyState[]>(INITIAL_STRATEGIES);
+  const [busy, setBusy] = useState(false); // 리전 전체에서 실행 중인 job 있음
+  const [recommendation, setRecommendation] = useState<string | null>(null);
+  const [loadingReco, setLoadingReco] = useState(false);
 
-  async function runAll() {
-    setRunning(true);
+  // 페이지 로드 시: 각 전략의 규칙 + 기존 결과 로드
+  useEffect(() => {
+    strategies.forEach((s, i) => {
+      loadRules(s.type, i);
+      loadExistingResult(s.type, i);
+    });
+    checkBusy();
+  }, []);
+
+  async function loadRules(type: MatchingType, idx: number) {
+    updateStrategy(idx, { rulesLoading: true });
     try {
-      const [s, a, m] = await Promise.all([
-        apiCall('/api/matching/run', { method: 'POST', body: JSON.stringify({ matchingType: 'simple' }) }),
-        apiCall('/api/matching/run', { method: 'POST', body: JSON.stringify({ matchingType: 'advanced' }) }),
-        apiCall('/api/matching/run', { method: 'POST', body: JSON.stringify({ matchingType: 'ml' }) }),
-      ]);
-      setResults([s, a, m]);
-      toast.success('All 3 matching types complete');
-    } finally { setRunning(false); }
+      const res = await apiCall<{ rules: MatchingRule[] }>(`/api/matching/rules?type=${type}`);
+      updateStrategy(idx, { rules: res.rules, rulesLoading: false });
+    } catch {
+      updateStrategy(idx, { rulesLoading: false });
+    }
+  }
+
+  async function loadExistingResult(type: MatchingType, idx: number) {
+    try {
+      const res = await apiCall<{ summary: MatchingSummary }>(`/api/matching/results?type=${type}`);
+      if (res.summary.groups > 0) {
+        updateStrategy(idx, { result: res.summary, status: 'succeeded' });
+      }
+    } catch { /* no prior results */ }
+  }
+
+  async function checkBusy() {
+    const res = await apiCall<{ busy: boolean; runningType?: string }>('/api/matching/running');
+    setBusy(res.busy);
+    if (res.busy && res.runningType) {
+      const idx = strategies.findIndex(s => s.type === res.runningType);
+      if (idx >= 0) updateStrategy(idx, { status: 'running' });
+    }
+  }
+
+  // 개별 전략 실행
+  async function runSingle(type: MatchingType) {
+    const idx = strategies.findIndex(s => s.type === type);
+
+    // 쿼터 사전 체크
+    const check = await apiCall<{ busy: boolean; runningType?: string }>('/api/matching/running');
+    if (check.busy) {
+      toast.error(`다른 매칭(${check.runningType})이 실행 중입니다. 완료 후 다시 시도하세요.`);
+      return;
+    }
+
+    updateStrategy(idx, { status: 'running', result: null });
+    setBusy(true);
+
+    // 매칭 시작
+    await apiCall('/api/matching/run', {
+      method: 'POST',
+      body: JSON.stringify({ matchingType: type, wait: false }),
+    });
+
+    // 폴링 (10초 간격)
+    const poll = async () => {
+      const res = await apiCall<{ status: string }>(`/api/matching/status?type=${type}`);
+      if (res.status === 'RUNNING') {
+        setTimeout(poll, 10000);
+      } else {
+        // 완료 — 결과 조회
+        const result = await apiCall<{ summary: MatchingSummary }>(`/api/matching/results?type=${type}`);
+        updateStrategy(idx, { status: res.status === 'SUCCEEDED' ? 'succeeded' : 'failed', result: result.summary });
+        setBusy(false);
+        toast.success(`${type} 매칭 완료`);
+      }
+    };
+    poll();
+  }
+
+  // 전체 순차 실행
+  async function runAll() {
+    for (const s of strategies) {
+      if (s.status === 'succeeded') continue; // 이미 완료된 건 스킵
+      await runSingleAndWait(s.type);
+    }
+  }
+
+  async function runSingleAndWait(type: MatchingType) {
+    const idx = strategies.findIndex(s => s.type === type);
+    const check = await apiCall<{ busy: boolean }>('/api/matching/running');
+    if (check.busy) {
+      // 다른 job이 끝날 때까지 대기
+      await new Promise(r => setTimeout(r, 10000));
+      return runSingleAndWait(type);
+    }
+
+    updateStrategy(idx, { status: 'running', result: null });
+    setBusy(true);
+
+    await apiCall('/api/matching/run', {
+      method: 'POST',
+      body: JSON.stringify({ matchingType: type, wait: false }),
+    });
+
+    // 동기 대기
+    let status = 'RUNNING';
+    while (status === 'RUNNING') {
+      await new Promise(r => setTimeout(r, 10000));
+      const res = await apiCall<{ status: string }>(`/api/matching/status?type=${type}`);
+      status = res.status;
+    }
+
+    const result = await apiCall<{ summary: MatchingSummary }>(`/api/matching/results?type=${type}`);
+    updateStrategy(idx, { status: 'succeeded', result: result.summary });
+    setBusy(false);
+  }
+
+  function updateStrategy(idx: number, patch: Partial<StrategyState>) {
+    setStrategies(prev => prev.map((s, i) => i === idx ? { ...s, ...patch } : s));
+  }
+
+  const completedResults = strategies.filter(s => s.result).map(s => s.result!);
+
+  // AI 추천 요청
+  async function getRecommendation() {
+    if (completedResults.length < 2) return;
+    setLoadingReco(true);
+    try {
+      const res = await apiCall<{ recommendation: string; status?: string; requestId?: string }>(
+        '/api/matching/recommend-latest'
+      );
+      if (res.status === 'PROCESSING') {
+        // 시작+폴링 (29초 대응)
+        const pollReco = async () => {
+          const poll = await apiCall<{ status: string; recommendation?: string }>(
+            `/api/matching/recommend-latest?id=${res.requestId}`
+          );
+          if (poll.status === 'COMPLETED') {
+            setRecommendation(poll.recommendation!);
+            setLoadingReco(false);
+          } else {
+            setTimeout(pollReco, 10000);
+          }
+        };
+        pollReco();
+      } else {
+        setRecommendation(res.recommendation);
+        setLoadingReco(false);
+      }
+    } catch {
+      setLoadingReco(false);
+      toast.error('추천 생성에 실패했습니다');
+    }
   }
 
   return (
     <>
       <PageHeader title="Matching Comparison"
-        actions={<Button onClick={runAll} disabled={running}>Run all 3 matching types</Button>} />
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {results.map(r => (
-          <Card key={r.type}>
+        description="3가지 매칭 전략을 개별 또는 순차 실행하고 결과를 비교합니다"
+        actions={
+          <Button onClick={runAll} disabled={busy} variant="secondary">
+            Run All (Sequential)
+          </Button>
+        } />
+
+      {/* 쿼터 안내 배너 */}
+      <Alert className="mb-4">
+        <AlertTriangle className="h-4 w-4" />
+        <AlertTitle>Entity Resolution Quota</AlertTitle>
+        <AlertDescription>
+          리전당 동시 매칭 작업 1개만 실행 가능합니다 (조정 불가). 하나가 완료된 후 다음을 실행하세요.
+        </AlertDescription>
+      </Alert>
+
+      {/* ─── 전략별 카드 (개별 실행 + 규칙 + 결과) ─── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+        {strategies.map(s => (
+          <Card key={s.type} className={cn(s.status === 'running' && 'ring-2 ring-primary')}>
             <CardHeader>
-              <Badge variant={r.type === 'ml' ? 'destructive' : 'secondary'}>{r.label}</Badge>
-              <CardTitle>{r.matchedGroups} groups</CardTitle>
+              <div className="flex items-center justify-between">
+                <Badge variant="secondary">{s.label}</Badge>
+                {s.status === 'succeeded' && <CheckCircle2 className="h-4 w-4 text-green-600" />}
+                {s.status === 'running' && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+              </div>
+              <CardDescription>{s.description}</CardDescription>
             </CardHeader>
-            <CardContent className="text-sm space-y-1">
-              <p>Unmatched: <b>{r.unmatchedProfiles}</b></p>
-              <p>Precision: <b>{(r.precision*100).toFixed(1)}%</b></p>
-              <p>Recall: <b>{(r.recall*100).toFixed(1)}%</b></p>
-              <p className="text-muted-foreground">{r.executionTime} · {r.cost}</p>
+            <CardContent className="space-y-3">
+              {/* 규칙 표시 */}
+              <div>
+                <p className="text-xs font-medium text-muted-foreground flex items-center gap-1 mb-1">
+                  <List className="h-3 w-3" /> Rules
+                </p>
+                {s.rulesLoading ? (
+                  <Skeleton className="h-4 w-full" />
+                ) : s.rules.length > 0 ? (
+                  <ul className="text-xs space-y-1">
+                    {s.rules.map(rule => (
+                      <li key={rule.ruleName} className="flex items-center gap-1.5">
+                        <span className="font-mono bg-muted px-1.5 py-0.5 rounded">{rule.ruleName}</span>
+                        <span className="text-muted-foreground">
+                          ({rule.matchingKeys.join(' + ')})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-muted-foreground italic">
+                    {s.type === 'ml' ? 'ML 모델 기반 (명시적 규칙 없음)' : '규칙 미설정'}
+                  </p>
+                )}
+              </div>
+
+              {/* 개별 결과 */}
+              {s.result && (
+                <div className="border-t pt-3 space-y-1">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    <span className="text-muted-foreground">원본 레코드</span>
+                    <span className="text-right font-medium">{s.result.totalVariants}</span>
+                    <span className="text-muted-foreground">그룹 수</span>
+                    <span className="text-right font-medium">{s.result.groups}</span>
+                    <span className="text-muted-foreground">매칭</span>
+                    <span className="text-right font-medium">{s.result.matched}</span>
+                    <span className="text-muted-foreground">미매칭</span>
+                    <span className="text-right font-medium">{s.result.unmatched}</span>
+                  </div>
+                  <div className="text-center pt-2">
+                    <span className="text-lg font-bold">{s.result.deduplicationRate}</span>
+                    <span className="text-xs text-muted-foreground ml-1">중복제거율</span>
+                  </div>
+                </div>
+              )}
+
+              {/* 실행 버튼 */}
+              <Button
+                className="w-full"
+                size="sm"
+                onClick={() => runSingle(s.type)}
+                disabled={busy || s.status === 'running'}
+              >
+                {s.status === 'running' ? (
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Running...</>
+                ) : s.status === 'succeeded' ? (
+                  <><Play className="h-4 w-4 mr-2" /> Re-run</>
+                ) : (
+                  <><Play className="h-4 w-4 mr-2" /> Run {s.label}</>
+                )}
+              </Button>
             </CardContent>
           </Card>
         ))}
       </div>
+
+      {/* ─── 비교 테이블 (2개 이상 결과 있을 때) ─── */}
+      {completedResults.length >= 2 && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle>전략별 비교</CardTitle>
+            <CardDescription>완료된 전략들의 결과를 나란히 비교합니다</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>전략</TableHead>
+                  <TableHead className="text-right">원본</TableHead>
+                  <TableHead className="text-right">그룹</TableHead>
+                  <TableHead className="text-right">매칭</TableHead>
+                  <TableHead className="text-right">미매칭</TableHead>
+                  <TableHead className="text-right">중복제거율</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {completedResults.map(r => (
+                  <TableRow key={r.matchingType}>
+                    <TableCell><Badge variant="secondary">{r.matchingType}</Badge></TableCell>
+                    <TableCell className="text-right">{r.totalVariants}</TableCell>
+                    <TableCell className="text-right">{r.groups}</TableCell>
+                    <TableCell className="text-right">{r.matched}</TableCell>
+                    <TableCell className="text-right">{r.unmatched}</TableCell>
+                    <TableCell className="text-right font-semibold">{r.deduplicationRate}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ─── AI 추천 ─── */}
+      {completedResults.length >= 2 && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5" /> AI Recommendation
+            </CardTitle>
+            <CardDescription>
+              Bedrock가 결과를 분석하여 최적 전략을 추천합니다
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {recommendation ? (
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{recommendation}</p>
+            ) : (
+              <Button variant="secondary" onClick={getRecommendation} disabled={loadingReco}>
+                {loadingReco && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                결과 기반 전략 추천 받기
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ─── 바 차트 ─── */}
+      {completedResults.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Deduplication Rate</CardTitle></CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={completedResults.map(r => ({
+                type: r.matchingType,
+                rate: parseFloat(r.deduplicationRate),
+              }))}>
+                <XAxis dataKey="type" /><YAxis unit="%" domain={[0, 100]} />
+                <Tooltip />
+                <Bar dataKey="rate" fill="hsl(var(--primary))" radius={[4,4,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      )}
     </>
   );
 }
@@ -502,6 +1053,71 @@ Generate → preview → Approve/Reject flow. Place an AI model selector in the 
 ```
 
 Send `modelId` along in the request body, and the Lambda passes that value to Bedrock InvokeModel.
+
+## AiRulesPage — 시작+폴링 적용 (29초 벽 대응)
+
+기존 AiRulesPage에서 Bedrock 호출 결과를 동기적으로 기다리면 API Gateway 29초 타임아웃에 걸립니다. 시작+폴링 패턴을 적용합니다.
+
+```tsx
+export default function AiRulesPage() {
+  const [generating, setGenerating] = useState(false);
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [suggestion, setSuggestion] = useState<any>(null);
+
+  // 생성 시작 (즉시 반환)
+  async function startGeneration() {
+    setGenerating(true);
+    setSuggestion(null);
+    const res = await apiCall<{ requestId: string; status: string; result?: any; cached?: boolean }>(
+      '/api/ai-agent/start', { method: 'POST', body: JSON.stringify({ modelId }) }
+    );
+
+    // 캐시 히트면 즉시 결과
+    if (res.cached && res.result) {
+      setSuggestion(res.result);
+      setGenerating(false);
+      return;
+    }
+
+    setRequestId(res.requestId);
+    pollForResult(res.requestId);
+  }
+
+  // 10초 간격 폴링
+  async function pollForResult(id: string) {
+    const poll = async () => {
+      const res = await apiCall<{ status: string; result?: any }>(`/api/ai-agent/latest-generation?id=${id}`);
+      if (res.status === 'COMPLETED') {
+        setSuggestion(res.result);
+        setGenerating(false);
+      } else if (res.status === 'FAILED') {
+        toast.error('AI 규칙 생성에 실패했습니다');
+        setGenerating(false);
+      } else {
+        setTimeout(poll, 10000);
+      }
+    };
+    poll();
+  }
+
+  return (
+    <>
+      <PageHeader title="AI Rule Generation" />
+      {/* model selector + generate button + HITL approve/reject dialog */}
+      <Button onClick={startGeneration} disabled={generating}>
+        {generating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+        Generate Rules
+      </Button>
+      {generating && (
+        <p className="text-sm text-muted-foreground mt-2">
+          AI가 규칙을 생성 중입니다 (약 30-40초 소요)...
+        </p>
+      )}
+      {/* suggestion preview + approve/reject */}
+    </>
+  );
+}
+```
 
 ## Per-domain customization points
 

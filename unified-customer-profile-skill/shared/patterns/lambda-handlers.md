@@ -44,11 +44,25 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
 ## Matching Handler
 
-Run Entity Resolution workflows + retrieve results
+Run Entity Resolution workflows + retrieve results.
+
+> ⚠️ **ER 동시 실행 제약**: 리전당 동시 매칭 job **1개** (Adjustable: No).
+> `Promise.all`로 여러 workflow를 동시 실행하면 HTTP 200이 반환되지만 job이 시작되지 않는 silent failure가 발생합니다.
+> 반드시 **순차 실행** + **사전 상태 확인** 패턴을 사용하세요.
+
+### API Routes (5개 — 모두 필수)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/matching/running` | 현재 실행 중인 job이 있는지 확인 (사전 체크) |
+| `GET` | `/api/matching/rules?type=<matchingType>` | 해당 전략의 규칙 목록 조회 (UI에 규칙 표시용) |
+| `POST` | `/api/matching/run` | 매칭 시작 (wait=false → 즉시 반환) |
+| `GET` | `/api/matching/status?type=<matchingType>` | job 상태 폴링 |
+| `GET` | `/api/matching/results?type=<matchingType>` | 완료된 결과 조회 (비교 테이블용 요약 포함) |
 
 ```typescript
-import { EntityResolutionClient, StartMatchingJobCommand, GetMatchingJobCommand, ListMatchingJobsCommand } from '@aws-sdk/client-entityresolution';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { EntityResolutionClient, StartMatchingJobCommand, GetMatchingJobCommand, ListMatchingJobsCommand, GetMatchingWorkflowCommand } from '@aws-sdk/client-entityresolution';
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 
@@ -62,62 +76,310 @@ const RESULTS_TABLE = process.env.RESULTS_TABLE!;
 const GLUE_DB_NAME = process.env.GLUE_DB_NAME!;
 const GLUE_TABLE_NAME = process.env.GLUE_TABLE_NAME!;
 
-// POST /api/matching/run — run matching
-async function runMatching(body: { matchingType: 'simple' | 'advanced' | 'ml' }) {
+// GET /api/matching/rules?type=simple — 전략별 규칙 조회 (UI 표시용)
+async function getMatchingRules(matchingType: string) {
+  const workflowName = `${WORKFLOW_NAME}-${matchingType}`;
+  try {
+    const workflow = await erClient.send(new GetMatchingWorkflowCommand({ workflowName }));
+    const rules = (workflow.resolutionTechniques?.ruleBasedProperties?.rules ?? []).map(r => ({
+      ruleName: r.ruleName,
+      matchingKeys: r.matchingKeys ?? [],
+    }));
+    return {
+      matchingType,
+      resolutionType: workflow.resolutionTechniques?.resolutionType ?? 'UNKNOWN',
+      rules,
+    };
+  } catch (err: any) {
+    if (err.name === 'ResourceNotFoundException') {
+      return { matchingType, resolutionType: 'NOT_CONFIGURED', rules: [] };
+    }
+    throw err;
+  }
+}
+
+// GET /api/matching/running — 실행 중인 job 확인 (쿼터 사전 체크)
+async function checkRunning() {
+  // 모든 workflow type에 대해 최근 job 확인
+  for (const type of ['simple', 'advanced', 'ml']) {
+    const workflowName = `${WORKFLOW_NAME}-${type}`;
+    try {
+      const { jobs } = await erClient.send(new ListMatchingJobsCommand({ workflowName }));
+      const running = jobs?.find(j => j.status === 'RUNNING');
+      if (running) {
+        return { busy: true, runningType: type, jobId: running.jobId, startTime: running.startTime };
+      }
+    } catch { /* workflow not found — skip */ }
+  }
+  return { busy: false };
+}
+
+// POST /api/matching/run — 매칭 시작 (비동기)
+// Body: { matchingType: 'simple'|'advanced'|'ml', wait?: boolean }
+async function runMatching(body: { matchingType: 'simple' | 'advanced' | 'ml'; wait?: boolean }) {
   const workflowName = `${WORKFLOW_NAME}-${body.matchingType}`;
 
-  // 1. Start ER Job
-  const { jobId } = await erClient.send(new StartMatchingJobCommand({
-    workflowName,
+  // 1. 쿼터 사전 체크 — 이미 실행 중이면 거부
+  const runningCheck = await checkRunning();
+  if (runningCheck.busy) {
+    return error(409, `리전에 이미 실행 중인 매칭 job이 있습니다 (${runningCheck.runningType}). 완료 후 다시 시도하세요.`);
+  }
+
+  // 2. Start ER Job
+  const { jobId } = await erClient.send(new StartMatchingJobCommand({ workflowName }));
+
+  // 3. DynamoDB에 상태 기록 (프론트엔드 폴링용)
+  await ddbClient.send(new PutCommand({
+    TableName: RESULTS_TABLE,
+    Item: {
+      pk: `JOB_STATUS#${body.matchingType}`,
+      sk: 'LATEST',
+      jobId,
+      status: 'RUNNING',
+      startedAt: new Date().toISOString(),
+    },
   }));
 
-  // 2. Polling (in practice, Step Functions or EventBridge is recommended)
+  // 4. wait=false (default): 즉시 반환 → 프론트엔드가 /status를 폴링
+  if (!body.wait) {
+    return { jobId, status: 'RUNNING', matchingType: body.matchingType };
+  }
+
+  // 5. wait=true: Lambda 내에서 폴링 (테스트용 — API GW 29초 주의)
   let status = 'RUNNING';
   while (status === 'RUNNING') {
     await new Promise(r => setTimeout(r, 5000));
-    const job = await erClient.send(new GetMatchingJobCommand({
-      workflowName,
-      jobId: jobId!,
-    }));
+    const job = await erClient.send(new GetMatchingJobCommand({ workflowName, jobId: jobId! }));
     status = job.status || 'UNKNOWN';
   }
 
-  // 3. Parse results (S3 output)
   const results = await parseErOutput(workflowName, jobId!);
+  await saveResults(body.matchingType, results);
+  await updateJobStatus(body.matchingType, jobId!, 'SUCCEEDED', results.length);
 
-  // 4. Save to DynamoDB
-  for (const result of results) {
-    await ddbClient.send(new PutCommand({
-      TableName: RESULTS_TABLE,
-      Item: {
-        pk: `MATCH#${body.matchingType}`,
-        sk: `${result.matchId}#${result.variantId}`,
-        ...result,
-        timestamp: new Date().toISOString(),
-      },
-    }));
-  }
-
-  return { jobId, matchCount: results.length, matchingType: body.matchingType };
+  return { jobId, matchCount: results.length, matchingType: body.matchingType, status };
 }
 
-// GET /api/matching/results — retrieve results
+// GET /api/matching/status?type=simple — job 상태 폴링
+async function getMatchingStatus(matchingType: string) {
+  // DynamoDB에서 최신 job 상태 조회
+  const { Item } = await ddbClient.send(new GetCommand({
+    TableName: RESULTS_TABLE,
+    Key: { pk: `JOB_STATUS#${matchingType}`, sk: 'LATEST' },
+  }));
+
+  if (!Item) return { status: 'NONE', matchingType };
+
+  // RUNNING이면 ER에서 실시간 상태 확인
+  if (Item.status === 'RUNNING') {
+    const workflowName = `${WORKFLOW_NAME}-${matchingType}`;
+    try {
+      const job = await erClient.send(new GetMatchingJobCommand({ workflowName, jobId: Item.jobId }));
+      if (job.status !== 'RUNNING') {
+        // 완료됨 — 결과 파싱 + 저장
+        const results = await parseErOutput(workflowName, Item.jobId);
+        await saveResults(matchingType, results);
+        await updateJobStatus(matchingType, Item.jobId, job.status!, results.length);
+        return { status: job.status, matchingType, matchCount: results.length, jobId: Item.jobId };
+      }
+    } catch { /* job not found */ }
+  }
+
+  return { status: Item.status, matchingType, matchCount: Item.matchCount, jobId: Item.jobId };
+}
+
+// GET /api/matching/results?type=simple — 완료된 결과 조회
 async function getResults(matchingType: string) {
   const { Items } = await ddbClient.send(new QueryCommand({
     TableName: RESULTS_TABLE,
     KeyConditionExpression: 'pk = :pk',
     ExpressionAttributeValues: { ':pk': `MATCH#${matchingType}` },
   }));
-  return Items || [];
+
+  const results = Items || [];
+
+  // 비교 테이블용 요약 통계 포함
+  const totalVariants = await getTotalVariantCount();
+  const groups = new Set(results.map((r: any) => r.matchId)).size;
+  const matched = results.filter((r: any) => r.matchId).length;
+  const unmatched = totalVariants - matched;
+  const deduplicationRate = totalVariants > 0 ? ((1 - groups / totalVariants) * 100).toFixed(1) : '0';
+
+  return {
+    items: results,
+    summary: {
+      matchingType,
+      totalVariants,
+      groups,
+      matched,
+      unmatched,
+      deduplicationRate: `${deduplicationRate}%`,
+    },
+  };
 }
 
-// Parse S3 ER output
+// 내부 헬퍼
+async function saveResults(matchingType: string, results: any[]) {
+  for (const result of results) {
+    await ddbClient.send(new PutCommand({
+      TableName: RESULTS_TABLE,
+      Item: {
+        pk: `MATCH#${matchingType}`,
+        sk: `${result.matchId}#${result.variantId}`,
+        ...result,
+        timestamp: new Date().toISOString(),
+      },
+    }));
+  }
+}
+
+async function updateJobStatus(matchingType: string, jobId: string, status: string, matchCount?: number) {
+  await ddbClient.send(new PutCommand({
+    TableName: RESULTS_TABLE,
+    Item: {
+      pk: `JOB_STATUS#${matchingType}`,
+      sk: 'LATEST',
+      jobId, status, matchCount,
+      completedAt: new Date().toISOString(),
+    },
+  }));
+}
+
 async function parseErOutput(workflowName: string, jobId: string) {
-  // ER output format: s3://{bucket}/er-output/{workflowName}/{jobId}/
+  // ER output: s3://{bucket}/er-output/{workflowName}/{jobId}/
   // JSON Lines: { matchId, variantId, confidenceScore? }
-  // ... S3 list + get + parse
   return [];
 }
+
+async function getTotalVariantCount(): Promise<number> {
+  // Glue Table의 전체 레코드 수 (S3 파일 기준 또는 DDB 메타데이터)
+  return 0;
+}
+```
+
+## ⚠️ 시작+폴링 패턴 — 29초 타임아웃 대응 (공통)
+
+Bedrock 호출처럼 29초를 초과할 수 있는 모든 기능에 적용하는 공통 패턴입니다.
+
+```typescript
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
+import { DynamoDBDocumentClient, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+
+const lambdaClient = new LambdaClient({});
+const CACHE_TABLE = process.env.CACHE_TABLE!; // DynamoDB (pk: string, sk: string, status, result, ttl)
+
+/**
+ * 시작+폴링 패턴 (Start + Poll pattern)
+ *
+ * 사용 대상: Bedrock 규칙 생성, 매칭 추천, 그래프 인사이트 등
+ * API Gateway REST API의 29초 통합 타임아웃을 우회합니다.
+ *
+ * Flow:
+ *   POST /api/<feature>/start → requestId 반환 (즉시, <1초)
+ *     └── Lambda self-invoke (async) → 작업 실행 → DDB에 결과 저장
+ *   GET /api/<feature>/status?id=<requestId> → 폴링 (프론트엔드 10초 간격)
+ */
+
+// POST /api/<feature>/start
+async function startAsyncTask(featureKey: string, payload: any) {
+  const requestId = crypto.randomUUID();
+
+  // 캐시 확인 — 동일 입력이면 즉시 반환
+  const cacheKey = buildCacheKey(featureKey, payload);
+  const cached = await ddbClient.send(new GetCommand({
+    TableName: CACHE_TABLE,
+    Key: { pk: featureKey, sk: cacheKey },
+  }));
+  if (cached.Item?.status === 'COMPLETED') {
+    return { requestId: cached.Item.sk, status: 'COMPLETED', result: cached.Item.result, cached: true };
+  }
+
+  // DDB에 PROCESSING 상태 기록
+  await ddbClient.send(new PutCommand({
+    TableName: CACHE_TABLE,
+    Item: {
+      pk: featureKey,
+      sk: requestId,
+      cacheKey,
+      status: 'PROCESSING',
+      payload,
+      createdAt: new Date().toISOString(),
+      ttl: Math.floor(Date.now() / 1000) + 3600, // 1시간 TTL
+    },
+  }));
+
+  // Lambda self-invoke (비동기 — 900초까지 실행 가능)
+  await lambdaClient.send(new InvokeCommand({
+    FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME!,
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({
+      __asyncTask: true,
+      featureKey,
+      requestId,
+      payload,
+    })),
+  }));
+
+  return { requestId, status: 'PROCESSING' };
+}
+
+// GET /api/<feature>/status?id=<requestId>
+async function pollAsyncTask(featureKey: string, requestId: string) {
+  const { Item } = await ddbClient.send(new GetCommand({
+    TableName: CACHE_TABLE,
+    Key: { pk: featureKey, sk: requestId },
+  }));
+
+  if (!Item) return { status: 'NOT_FOUND' };
+  if (Item.status === 'COMPLETED') return { status: 'COMPLETED', result: Item.result };
+  if (Item.status === 'FAILED') return { status: 'FAILED', error: Item.error };
+  return { status: 'PROCESSING', createdAt: Item.createdAt };
+}
+
+// Worker 모드 (self-invoke에 의해 실행)
+async function handleAsyncWorker(event: { __asyncTask: true; featureKey: string; requestId: string; payload: any }) {
+  try {
+    const result = await executeTask(event.featureKey, event.payload);
+    await ddbClient.send(new PutCommand({
+      TableName: CACHE_TABLE,
+      Item: {
+        pk: event.featureKey,
+        sk: event.requestId,
+        cacheKey: buildCacheKey(event.featureKey, event.payload),
+        status: 'COMPLETED',
+        result,
+        completedAt: new Date().toISOString(),
+        ttl: Math.floor(Date.now() / 1000) + 3600,
+      },
+    }));
+  } catch (err: any) {
+    await ddbClient.send(new PutCommand({
+      TableName: CACHE_TABLE,
+      Item: {
+        pk: event.featureKey,
+        sk: event.requestId,
+        status: 'FAILED',
+        error: err.message,
+        ttl: Math.floor(Date.now() / 1000) + 3600,
+      },
+    }));
+  }
+}
+
+function buildCacheKey(featureKey: string, payload: any): string {
+  // 입력 기반 해시 — 같은 요청에 대해 동일 키 생성
+  const crypto = require('crypto');
+  return crypto.createHash('md5').update(JSON.stringify(payload)).digest('hex');
+}
+```
+
+CDK에서 self-invoke 권한 추가 필수:
+
+```typescript
+fn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['lambda:InvokeFunction'],
+  resources: [fn.functionArn],
+}));
 ```
 
 ## Ingestion Handler (Multi-Mode)

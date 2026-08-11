@@ -105,11 +105,15 @@ Based on the approved design, generate incrementally in the following order:
    ```
 5. **Frontend** — `shared/patterns/frontend-pages.md` (React + Vite + Tailwind + shadcn/ui, NO Cloudscape)
    ```
-   frontend/src/pages/{Dashboard,Ingestion,MatchingComparison,Accuracy,AiRules,
+   frontend/src/pages/{Dashboard,Workflow,Ingestion,MatchingComparison,Accuracy,AiRules,
                        ProfileImport,ProfileView}.tsx
+   frontend/src/components/{AuthGate,Layout,PageHeader,StatCard}.tsx
    frontend/src/components/ui/    ← shadcn (Card, Button, Badge, Alert, Skeleton, Table, Select, Tabs, Dialog)
-   frontend/src/{components,api,lib,hooks}/
+   frontend/src/api/{client,auth}.ts   ← singleton userManager + apiCall
+   frontend/src/{lib,hooks}/
    ```
+   **필수 화면**: WorkflowPage (데모 스테퍼), MatchingComparison (순차 실행 + 비교 테이블 + AI 추천)
+   **필수 컴포넌트**: AuthGate (인증 래퍼), singleton userManager
 6. **Scripts**: `scripts/{deploy,destroy,check-prerequisites,update-frontend-env}.sh`
 7. **Docs**: `docs/{architecture,deployment,api-reference,calc-attr-guide}.md`
 
@@ -124,12 +128,46 @@ Based on the approved design, generate incrementally in the following order:
 ### Phase 5: Deploy
 
 Deployment guide + post-deploy verification steps:
-1. Run ER matching (Matching Comparison page)
+1. Run ER matching (Matching Comparison page) — **한 번에 하나씩 순차 실행** (리전당 동시 job 1개)
 2. **Send to CP — Step 1**: golden profiles import
 3. **Send to CP — Step 2**: Reservation/Folio import (3-10 min, background)
 4. Wait Calculated Attribute Status → COMPLETED (a few minutes)
 5. Verify calc attr values are populated on the Profile Detail page
 6. If empty, follow the "debugging checklist" in `shared/reference/calculated-attributes.md`
+
+#### 코드 변경 후 재배포 절차 (Hot Reload)
+
+`cdk deploy`는 인프라 변경만 반영합니다. **Lambda 코드나 프론트엔드 수정은 별도 재배포가 필요합니다.**
+
+**Lambda 재배포**:
+```bash
+# 1. 빌드 (esbuild)
+cd backend/lambdas/<handler-name>
+npx esbuild handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js
+# 2. zip
+cd dist && zip -r handler.zip handler.js
+# 3. 배포 + 완료 대기
+aws lambda update-function-code --function-name <projectName>-<handler> --zip-file fileb://handler.zip
+aws lambda wait function-updated --function-name <projectName>-<handler>
+```
+
+**프론트엔드 재배포**:
+```bash
+# 1. 빌드
+cd frontend && npm run build
+# 2. S3 동기화
+aws s3 sync dist/ s3://<frontend-bucket>/ --delete
+# 3. CloudFront 무효화 (⚠️ 누락하면 "고쳤는데 화면 그대로" 발생)
+aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
+```
+
+**CDK 스택 이름 확인** (배포 실패 방지):
+```bash
+aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+  --query "StackSummaries[?contains(StackName,'<projectName>')].StackName"
+```
+
+**E2E 테스트 권장**: Playwright로 전체 플로우 테스트. API 테스트만으로는 잡을 수 없는 "구조적으로 동작 불가한 버튼"과 "렌더링 백지" 문제를 발견할 수 있습니다.
 
 ## Generation rules
 
@@ -149,15 +187,19 @@ For detailed explanations, see `shared/reference/constraints.md`. One-line summa
 
 1. **Connect Instance Quota**: Default 2/account, max 4–5 with quota request. Never > 4 without explicit user approval.
 2. **ER ML Matching**: Supported in only some regions — always verify via AWS Knowledge MCP.
-3. **Neptune cost**: db.r5.large = ~$300/mo, warning required. Serverless recommended (~$200/mo).
-4. **CP Domain names**: unique per account × region.
-5. **Bedrock model ID**: cross-region inference profile prefix (`us.`, `eu.`, `apac.`) required. Re-confirm the latest ID via MCP.
-6. **EventBridge Pipes + Kinesis**: `pipes.amazonaws.com` required in the IAM trust.
-7. **CP Object Type — no `_profileId`**: CP reserved key (auto-filled with a UUID). Use a custom PROFILE key like `GuestKey` instead. For details, see "CP Object Type definition" in `shared/patterns/lambda-handlers.md`.
-8. **CP Object Type — Target only `_profile`**: AWS docs state "the only supported target object is `_profile`." Child instances (Reservation, Folio) must omit Target.
-9. **CP Object Type — Keys immutable**: Keys/StandardIdentifiers cannot be changed via PutProfileObjectType. To change, delete-then-create + `SchemaRev` cache-buster.
-10. **Calculated Attribute lifecycle**: values are populated only after Object Type instance ingestion + CP indexing (Status=COMPLETED, Readiness=100%). The UI explicitly guides through Send-to-CP step 2. For details, see `shared/reference/calculated-attributes.md`.
-11. **Cognito OIDC redirect URI**: must exactly match the Hosted UI callback URL (down to the trailing slash).
+3. **⚠️ ER Concurrent Jobs: 리전당 1개 (조정 불가)**: `Promise.all`로 동시 실행하면 silent failure (HTTP 200이지만 job 미시작). 반드시 순차 실행 + 사전 `/running` 체크.
+4. **Neptune cost**: db.r5.large = ~$300/mo, warning required. Serverless recommended (~$200/mo).
+5. **CP Domain names**: unique per account × region.
+6. **Bedrock model ID**: cross-region inference profile prefix (`us.`, `eu.`, `apac.`) required. Re-confirm the latest ID via MCP.
+7. **EventBridge Pipes + Kinesis**: `pipes.amazonaws.com` required in the IAM trust.
+8. **CP Object Type — no `_profileId`**: CP reserved key (auto-filled with a UUID). Use a custom PROFILE key like `GuestKey` instead. For details, see "CP Object Type definition" in `shared/patterns/lambda-handlers.md`.
+9. **CP Object Type — Target only `_profile`**: AWS docs state "the only supported target object is `_profile`." Child instances (Reservation, Folio) must omit Target.
+10. **CP Object Type — Keys immutable**: Keys/StandardIdentifiers cannot be changed via PutProfileObjectType. To change, delete-then-create + `SchemaRev` cache-buster.
+11. **Calculated Attribute lifecycle**: values are populated only after Object Type instance ingestion + CP indexing (Status=COMPLETED, Readiness=100%). The UI explicitly guides through Send-to-CP step 2. For details, see `shared/reference/calculated-attributes.md`.
+12. **Cognito OIDC redirect URI**: must exactly match the Hosted UI callback URL (down to the trailing slash).
+13. **⚠️ API Gateway REST API 29초 타임아웃 (변경 불가)**: Bedrock 호출(규칙 생성, 매칭 추천, 그래프 인사이트)은 30초+ 소요. 시작+폴링 패턴 필수 (DDB 캐시 + Lambda self-invoke + `/status` 폴링 엔드포인트).
+14. **⚠️ Authorizer 401에 CORS 헤더 누락**: Gateway Response(DEFAULT_4XX)에 CORS 설정 필수. 미설정 시 모든 인증 오류가 `Failed to fetch`로 위장됨.
+15. **코드 변경 ≠ cdk deploy**: Lambda 코드/프론트엔드 수정은 별도 재배포 필요. 특히 CloudFront 무효화 누락이 "고쳤는데 반영 안 됨"의 최대 원인.
 
 ## When to call MCP
 
