@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>LLM Gateway 구축 — 사전 준비사항</title>
+<title>AWS GenAI Lab — LLM Gateway 구축 사전 준비사항</title>
 <style>
   :root{
     --ink:#0f172a; --muted:#64748b; --soft:#94a3b8;
@@ -76,6 +76,7 @@
   .badge{display:inline-flex;align-items:center;font-size:12.5px;font-weight:800;padding:4px 12px;border-radius:999px;}
   .b-req{color:var(--bad);background:rgba(225,29,72,.10);}
   .b-opt{color:#4f46e5;background:rgba(99,102,241,.12);}
+  .b-rec{color:#b45309;background:rgba(245,158,11,.16);}
   .b-win{color:#0369a1;background:rgba(3,105,161,.12);}
   .b-mac{color:#7c3aed;background:rgba(124,58,237,.12);}
 
@@ -141,7 +142,7 @@
 <div class="wrap">
 
   <div class="hero">
-    <p class="eyebrow">LLM Gateway Governance · 사전 준비</p>
+    <p class="eyebrow"><span style="text-transform:none">AWS GenAI Lab</span> · LLM Gateway Governance · 사전 준비</p>
     <h1>이 Skill로 LLM Gateway를 구축하기 전에</h1>
     <p>Kiro · Claude Code · Codex와 대화하며 사내 개발자용 <b>LLM 거버넌스 게이트웨이</b>를 AWS에 배포합니다.</p>
     <p>아래 6가지를 <b>Phase 1 Discovery 시작 전에</b> 모두 확인하면, 배포 중간(<code>cdk deploy</code>)에서의 실패를 예방할 수 있습니다.</p>
@@ -151,7 +152,7 @@
   <!-- Tabs -->
   <div class="tabs">
     <button class="tab active" data-tab="t1"><span class="tnum">1</span>AI 도구<small>Kiro · Claude Code · Codex</small></button>
-    <button class="tab" data-tab="t2"><span class="tnum">2</span>로컬 툴체인<small>Docker · Node · CDK · CLI</small></button>
+    <button class="tab" data-tab="t2"><span class="tnum">2</span>로컬 툴체인<small>Docker(권장) · Node · CDK · CLI</small></button>
     <button class="tab" data-tab="t3"><span class="tnum">3</span>AWS 계정 · 권한<small>계정 · IAM · Bedrock</small></button>
     <button class="tab" data-tab="t4"><span class="tnum">4</span>IAM Identity Center<small>조직? 계정(Linked)?</small></button>
     <button class="tab" data-tab="t5"><span class="tnum">5</span>도메인 · TLS<small>사용 도메인 있나요?</small></button>
@@ -179,15 +180,15 @@
 
   <!-- ===================== TAB 2: 로컬 툴체인 ===================== -->
   <section class="panel" id="t2">
-    <div class="callout"><b>Docker</b>가 첫 배포의 가장 흔한 걸림돌입니다 — <code>cdk deploy</code>(Phase 5)가 LiteLLM 프록시 이미지를 CDK <code>fromAsset</code>로 빌드하므로 <b>데몬이 반드시 실행 중</b>이어야 합니다. 실패는 synth 성공 <b>이후</b> 늦게 발생하니, 배포 전에 미리 켜 두세요. <b>Docker를 아예 설치할 수 없는 머신이라면</b>(예: WSL2/Hyper-V 설치가 금지된 관리형 Windows) 유일하게 면제 가능한 항목입니다 — <code>litellm.imageBuild.mode='codebuild'</code>로 이미지를 <b>CodeBuild(네이티브 ARM)</b>에서 빌드하는 경로로 전환하세요(스킬 문서 <code>cdk-stacks.md</code> §4-1, 3단계 배포).</div>
+    <div class="callout"><b>Docker는 권장 사항입니다</b> — 필수는 아닙니다. 로컬에 Docker 데몬이 켜져 있으면 <code>cdk deploy</code>(Phase 5)가 LiteLLM 프록시 이미지를 CDK <code>fromAsset</code>으로 <b>가장 빠르게</b> 빌드하므로 권장합니다. 이 경로를 쓸 때는 실패가 synth 성공 <b>이후</b>에 늦게 발생하니 배포 전에 데몬을 미리 켜 두세요. <b>Docker가 없거나 설치할 수 없는 머신이라면</b>(예: WSL2/Hyper-V 설치가 금지된 관리형 Windows) <code>litellm.imageBuild.mode='codebuild'</code>로 전환해 이미지를 <b>CodeBuild(네이티브 ARM)</b>에서 빌드하면 됩니다 — 배포는 그대로 완주됩니다(스킬 문서 <code>cdk-stacks.md</code> §4-1, 3단계 배포).</div>
 
     <section class="card">
-      <h2><span class="num">2</span> 필수 로컬 도구 <span class="badge b-req right">필수</span></h2>
+      <h2><span class="num">2</span> 로컬 도구 <span class="badge b-req right">필수</span></h2>
       <table class="first-strong">
         <colgroup><col style="width:22%"><col style="width:20%"><col></colgroup>
         <thead><tr><th>도구</th><th>최소 버전</th><th>왜 필요한가 · 확인</th></tr></thead>
         <tbody>
-          <tr><td>Docker (데몬 실행)</td><td>최신</td><td>LiteLLM 이미지 <code>fromAsset</code> 빌드 · <code>docker info</code></td></tr>
+          <tr><td>Docker (데몬 실행) <span class="badge b-rec">권장</span></td><td>최신</td><td>LiteLLM 이미지 <code>fromAsset</code> 로컬 빌드(가장 빠름) · <code>docker info</code><br>없으면 <code>litellm.imageBuild.mode='codebuild'</code>로 대체 가능</td></tr>
           <tr><td>Node.js</td><td>18.x / 20.x LTS</td><td>CDK 앱 + npm/npx · <code>node -v</code></td></tr>
           <tr><td>AWS CDK CLI</td><td>v2</td><td><code>synth</code>/<code>deploy</code>/<code>bootstrap</code> · <code>cdk --version</code></td></tr>
           <tr><td>AWS CLI</td><td>v2</td><td>SSO 로그인·CLI 검증 · <code>aws --version</code></td></tr>
@@ -235,8 +236,8 @@ winget install jqlang.jq</code></pre>
 
     <section class="card">
       <h2><span class="tag">검증</span> 한 번에 확인 (전 OS 공통)</h2>
-      <p>설치 후 실행 — 하나라도 실패하면 Phase 1 전에 해결해야 합니다.</p>
-      <pre><code>docker info    &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ Docker 데몬"   || echo "❌ Docker"
+      <p>설치 후 실행 — <b>Docker 외</b> 항목이 실패하면 Phase 1 전에 해결해야 합니다.</p>
+      <pre><code>docker info    &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ Docker 데몬"   || echo "⚠️  Docker(권장) — codebuild 모드로 대체 가능"
 node -v        &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ Node: $(node -v)" || echo "❌ Node.js"
 cdk --version  &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ CDK: $(cdk --version)" || echo "❌ CDK"
 aws --version  &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ AWS CLI" || echo "❌ AWS CLI"
@@ -246,7 +247,7 @@ jq --version   &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ jq" || echo "⚠�
 
   <!-- ===================== TAB 3: AWS 계정 · 권한 ===================== -->
   <section class="panel" id="t3">
-    <div class="callout">게이트웨이 플랫폼 스택은 <b>한 계정</b>에 배포됩니다. <b>AgentCore Web Search</b>와 <b>Mantle(GPT-5.x)</b>은 게이트웨이 리전과 무관하게 <b>us-east-1 고정</b>이라, <b>게이트웨이 리전 + us-east-1</b> 두 곳 모두 <code>cdk bootstrap</code>이 가능해야 합니다. (CloudFront는 제거됨 — ALB가 엣지, ACM은 <b>리전</b> 인증서)</div>
+    <div class="callout">게이트웨이 플랫폼 스택은 <b>한 계정</b>에 배포됩니다. <b>AgentCore Web Search</b>와 <b>Mantle(GPT-5.6 Sol/Terra/Luna · 5.5 · 5.4)</b>은 게이트웨이 리전과 무관하게 <b>us-east-1 고정</b>이라, <b>게이트웨이 리전 + us-east-1</b> 두 곳 모두 <code>cdk bootstrap</code>이 가능해야 합니다. (CloudFront는 제거됨 — ALB가 엣지, ACM은 <b>리전</b> 인증서)</div>
 
     <section class="card">
       <h2><span class="num">3</span> AWS 계정 접근 <span class="badge b-req right">필수</span></h2>
@@ -257,7 +258,7 @@ jq --version   &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ jq" || echo "⚠�
           <tr><td>대상 계정</td><td>게이트웨이용 계정 1개. sandbox/dev 계정의 Administrator가 가장 간단(공유/prod면 배포 롤을 스코프)</td></tr>
           <tr><td>배포 IAM 권한</td><td>VPC/네트워킹 · Aurora Serverless v2 · ECS Fargate + ALB · Secrets Manager · IAM 롤 · API Gateway · Lambda · <b>ACM(리전)</b> (+ 도메인 사용 시 Route53) · <code>BedrockAgentCore::Gateway</code> · EC2 VPC peering · Route53 PHZ · (SSO 프로비저닝 시 <code>sso-admin</code>/<code>identitystore</code>)</td></tr>
           <tr><td>CDK bootstrap</td><td><b>게이트웨이 리전 + us-east-1</b> 양쪽. 다른 팀이 다른 qualifier로 bootstrap했다면 커스텀 <code>--qualifier</code> 준비</td></tr>
-          <tr><td>Bedrock 모델 액세스</td><td>Claude 모델 → <b>게이트웨이 리전</b>, GPT-5.x(Mantle) → <b>us-east-1</b> 에서 Model access 활성화</td></tr>
+          <tr><td>Bedrock 모델 액세스</td><td>Claude 모델 → <b>게이트웨이 리전</b>, <b>GPT-5.6 Sol/Terra/Luna · 5.5 · 5.4</b>(Mantle) → <b>us-east-1</b> 에서 Model access 활성화</td></tr>
           <tr><td>AWS Marketplace</td><td>Mantle은 Marketplace 오퍼링 — 계정이 <b>구독 가능</b>해야 함(첫 호출 자동 구독). 구매 제한 계정은 부적합</td></tr>
           <tr><td>서비스 쿼터</td><td>첫 배포엔 기본 쿼터로 충분. 기존 워크로드가 많으면 VPC/EIP 쿼터 점검</td></tr>
         </tbody>
@@ -311,11 +312,11 @@ jq --version   &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ jq" || echo "⚠�
       <h2><span class="tag">체크</span> 배포 전 사전요건</h2>
       <ul class="clean">
         <li>▢ <b>Kiro / Claude Code / Codex</b> 중 하나 설치 + 이 스킬 링크</li>
-        <li>▢ <code>docker info</code> 성공(데몬 실행)</li>
+        <li>▢ <code>docker info</code> 성공(데몬 실행) — <b>권장</b>, 없으면 <code>imageBuild.mode='codebuild'</code>로 대체</li>
         <li>▢ <code>node -v</code> → 18/20 · <code>cdk --version</code> → v2 · <code>aws --version</code> → v2</li>
         <li>▢ <code>aws sts get-caller-identity</code> 가 의도한 대상 계정으로 resolve</li>
         <li>▢ 배포 자격증명이 VPC/ECS/RDS/Lambda/APIGW/<b>ALB/ACM</b>/IAM 생성 가능</li>
-        <li>▢ Bedrock 모델 액세스: Claude(게이트웨이 리전) + GPT-5.x(us-east-1) 활성화</li>
+        <li>▢ Bedrock 모델 액세스: Claude(게이트웨이 리전) + <b>GPT-5.6 Sol/Terra/Luna · 5.5 · 5.4</b>(us-east-1) 활성화</li>
         <li>▢ 계정이 AWS Marketplace 구독 가능(Mantle 첫 호출 자동 구독)</li>
         <li>▢ <b>IAM Identity Center</b>: 조직(Organization)을 쓸 수 있는지 / Linked(계정) 인스턴스인지 <b>결과만</b> 확인</li>
         <li>▢ <b>사용 가능한 도메인 유무</b> 확인 (있으면 HTTPS 공개, 없으면 도메인 없이 배포)</li>
@@ -325,7 +326,7 @@ jq --version   &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo "✅ jq" || echo "⚠�
     </section>
   </section>
 
-  <footer>powered by <b>LLM Gateway Governance</b> · AWS Solution Skill — 사전 준비 가이드 · <a href="/">전체 소개 슬라이드</a> · <a href="/llm-gateway-governance-skill.zip">스킬 다운로드(.zip)</a></footer>
+  <footer>powered by <b>AWS GenAI Lab</b> · LLM Gateway Governance Skill — 사전 준비 가이드 · <a href="/">전체 소개 슬라이드</a> · <a href="/llm-gateway-governance-skill.zip">스킬 다운로드(.zip)</a></footer>
 </div>
 <script>
   (function(){

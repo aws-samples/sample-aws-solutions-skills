@@ -78,11 +78,11 @@ Validation rules (enforced in `lib/config/schema.ts`):
 
 ## Token Service behavior for `cognito-native`
 
-1. API Gateway's `CognitoUserPoolsAuthorizer` validates the Cognito JWT (signature/issuer/audience/expiry) **before** the Lambda runs, and exposes the verified claims at `requestContext.authorizer.claims` — including `cognito:groups`.
+1. API Gateway's `CognitoUserPoolsAuthorizer` (with **no `authorizationScopes`**, so it accepts the ID token the client sends) validates the Cognito JWT (signature/issuer/audience/expiry) **before** the Lambda runs, and exposes the verified claims at `requestContext.authorizer.claims` — including `cognito:groups` and `email`.
 2. The Lambda reads `cognito:groups` from the verified claims (**no Identity Store call** — the group list is already inside the trusted JWT). The claim may arrive as a JSON string, a native list, or a comma-separated string; parse all three defensively.
 3. Filter group names by `COGNITO_TEAM_GROUP_PREFIX`; apply `COGNITO_MULTI_GROUP_STRATEGY=require-single-team-group` (exactly one match, else 403).
 4. That single group name **is** the LiteLLM `team_alias`, unbranched (no `if group in {...}` mapping). Onboarding a new team is Cognito console work only (create group + add users), never a Lambda redeploy.
-5. Look up the cached virtual key in DynamoDB (`pk=USER#cognito-native:<sub>`); on a miss, call LiteLLM `/key/generate` (master key from Secrets Manager) with the resolved `team_id`, cache best-effort, and return `{"api_key": "sk-..."}`.
+5. Look up the cached virtual key in DynamoDB (`pk=USER#<email>` — the bare email-first identity, no auth-source prefix); on a miss, call LiteLLM `/key/generate` (master key from Secrets Manager) with the resolved `team_id`, cache best-effort, and return `{"api_key": "sk-..."}`.
 
 No `identitystore:*` (or any IdC) IAM actions are required.
 
@@ -113,7 +113,7 @@ For Windows, `setup` writes the client config values as an explicit Python invoc
 
 - [ ] The **initial user(s)** from Discovery exist (`admin-create-user`) and each is in exactly one `teamGroupPrefix` group (`admin-add-user-to-group`) — the pool ships with zero users, so this is a deploy-time agent step, not an afterthought.
 - [ ] `llmgw-login` opens a browser, completes the Cognito Hosted UI login, and caches tokens.
-- [ ] The token helper sends the **access token** (`token_use=access`), not the `id_token` — the Cognito authorizer 401s on an id_token even though it also carries `cognito:groups`.
+- [ ] The token helper sends the **id_token**, not the access token — only the id_token carries the `email` claim logged as the LiteLLM `user_id` (the authorizer has no `authorizationScopes`, so it accepts it; both tokens carry `cognito:groups`).
 - [ ] The Token Lambda resolves the expected team from the `cognito:groups` claim (no Identity Store call).
 - [ ] A user in no matching `teamGroupPrefix` group receives 403.
 - [ ] A user in two matching groups receives 403 under `require-single-team-group`.
@@ -124,7 +124,7 @@ For Windows, `setup` writes the client config values as an explicit Python invoc
 ## Gotchas
 
 - **Hosted UI domain prefix is GLOBALLY unique (real-deploy incident)**: a generic `domainPrefix` like `llmgw-dev-auth` may already be owned by another AWS customer anywhere in the world, and the AuthStack deploy fails with a **misleading "domain ... does not exist"** error (it means AlreadyExists). The generated AuthStack suffixes the account id (`llmgw-dev-auth-<accountId>`) — see `constraints.md` → "Cognito Hosted UI domain prefix".
-- **id_token vs access_token**: the API Gateway `COGNITO_USER_POOLS` authorizer accepts only `token_use=access`. Send the id_token and you get 401 — a subtle bug because both tokens carry `cognito:groups`.
+- **id_token vs access_token (log identity)**: a Cognito access token carries no `email` claim — only the id_token does. Send the access token and LiteLLM logs an opaque `sub` UUID as `user_id`. Fix: set **no `authorizationScopes`** on the authorizer (scopes force access-token-only) and send the **id_token** (it carries both `email` and `cognito:groups`). Real incident: logs read `cognito-native:915b9530-…` until flipped.
 - **Stale local client config → blank Hosted UI page (real-deploy incident)**: leftover `~/.llm-gateway/config.json`/token caches from a previous/different deployment carry an old `appClientId`/domain — Cognito's Hosted UI renders a **blank page** for an invalid `client_id` (no error shown). After any redeploy, regenerate the local config from the new outputs and delete stale token caches; verify server-side with `aws cognito-idp describe-user-pool-client --client-id <id>` (`ResourceNotFoundException` = stale id) instead of debugging the browser.
 - **Do not attempt SAML/IdC federation on an account instance** — it is not offered by AWS (see the callout at the top).
 - Group names are operational API contracts. Renaming a Cognito group changes team routing unless an external mapping layer is introduced.

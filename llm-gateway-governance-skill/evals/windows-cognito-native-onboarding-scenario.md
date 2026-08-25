@@ -20,9 +20,9 @@ A developer on **Windows** needs to use Claude Code and Codex against a `cognito
 - [ ] Launchers resolve their own real path (`$PSScriptRoot`) so they run from any cwd; the explicit `"<python.exe>" "C:\Users\<user>\.llm-gateway\gateway_auth.py" token` form is offered when PowerShell execution policy is restrictive.
 
 ### C. Client config
-- [ ] Claude Code `~/.claude/settings.json`: `ANTHROPIC_BASE_URL`, `AWS_REGION`, **all four** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`, `apiKeyHelper` → `get-gateway-token.ps1` (or `python ...gateway_auth.py token`), `permissions.deny: ["WebSearch"]`.
+- [ ] Claude Code `~/.claude/settings.json`: `ANTHROPIC_BASE_URL`, **all four** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`, `apiKeyHelper` → `get-gateway-token.ps1` (or `python ...gateway_auth.py token`), `permissions.deny: ["WebSearch"]`. Must **not** write `AWS_REGION` (real incident: pinning it broke an unrelated direct-Bedrock path — the gateway path is plain HTTP(S) and needs no client region).
 - [ ] Codex `~/.codex/config.toml`: `base_url=.../v1`, `wire_api=responses`, `web_search="disabled"`, and the auth block **split into `command` (executable only, absolute `sys.executable`) + `args` (array: helper path, `token`)** — never one joined string (Codex spawns without a shell; a joined string fails CreateProcess with os error 123 → 401 "No api key passed in").
-- [ ] The token helper sends the Cognito **access token** (id_token → 401).
+- [ ] The token helper sends the Cognito **id_token** (not the access token — only it carries the `email` claim logged as the LiteLLM `user_id`; the authorizer has no `authorizationScopes` so it accepts the id_token).
 - [ ] AgentCore Web Search MCP is registered via `claude mcp add-json` + `headersHelper` → `gateway_auth.py mcp-headers`.
 - [ ] `ANTHROPIC_BASE_URL` / Codex `base_url` = the **`GatewayUrl` output** (the ALB domain — CloudFront is removed; `certMode` is orthogonal to `cognito-native`): `https://<custom-domain>` for `acm`, or `http://<alb-dns>` for `http` (plaintext, reachable only from the SG `albIngressCidrs` allowlist — no cert trust step, no tunnel).
 - [ ] Ends by generating the **two HTML onboarding docs** (`developer-setup.html` + `admin-onboarding.html`) via `scripts/gen-onboarding.py`; the developer doc carries the PowerShell launchers + the `certMode`-specific base URL.

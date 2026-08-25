@@ -22,7 +22,7 @@ through the LiteLLM Admin UI, never by editing this Lambda again.
 | Tiers? | 2 — standard (all models, unlimited budget) + **economy** (low-cost models + $50/person cap) |
 | Economy target? | Interns/students. Separated by the IdC permission set `LlmGatewayEconomy` |
 | Standard target? | Full-time engineers. Permission set `LlmGatewayUser` |
-| Model policy? | The economy tier **blocks** high-cost models like Opus/GPT-5.5/Fable, allowing only Sonnet/Haiku/GPT-5.4 |
+| Model policy? | The economy tier **blocks** high-cost models like Opus/GPT-5.6-Sol/GPT-5.5/Fable, allowing only Sonnet/Haiku/GPT-5.4/GPT-5.6-Luna |
 | MCP? | Both tiers are allowed AgentCore Web Search (`default_tools`) |
 
 ---
@@ -61,7 +61,7 @@ MCP_ACCESS_GROUPS = ["default_tools"]
 TIER_CONFIG = {
     # Orion Edu's economy permission set/team: low-cost models only + $50 per-person cap.
     "LlmGatewayEconomy": {
-        "models": ["gpt-5.4", "claude-sonnet-5", "claude-haiku-4-5"],  # excludes gpt-5.5, claude-opus-4-8, claude-fable-5
+        "models": ["gpt-5.4", "gpt-5.6-luna", "claude-sonnet-5", "claude-haiku-4-5"],  # excludes gpt-5.6-sol/-terra, gpt-5.5, claude-opus-4-8, claude-fable-5
         "max_budget": 50.0,
     },
     # "LlmGatewayUser" (standard) has no entry -> first login creates it with no

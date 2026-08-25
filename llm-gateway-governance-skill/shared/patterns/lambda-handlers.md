@@ -57,7 +57,7 @@ Key environment variables (all injected by CDK):
 ### Core idea (WHY)
 
 The **entire purpose** of this service is exactly one thing: hand out a LiteLLM virtual key
-**only to a principal verified through the configured auth mode**. In `org-sso`, that is an IAM Identity Center permission-set role ARN. In `cognito-native`, that is a Cognito access-token JWT validated by the API Gateway Cognito authorizer (Cognito is the sole identity source — no external IdP, no IdC federation, no Identity Store). A direct IAM role (e.g. an `assumed-role`
+**only to a principal verified through the configured auth mode**. In `org-sso`, that is an IAM Identity Center permission-set role ARN. In `cognito-native`, that is a Cognito JWT (the client sends the ID token) validated by the API Gateway Cognito authorizer (Cognito is the sole identity source — no external IdP, no IdC federation, no Identity Store). A direct IAM role (e.g. an `assumed-role`
 without the `AWSReservedSSO_` prefix) is **rejected with 403**. Without this rejection,
 anyone with mere IAM permissions could bypass the gateway.
 
@@ -80,10 +80,18 @@ AUTH_MODE=org-sso:
   Lambda parses AWSReservedSSO_<PermissionSet> and maps PermissionSet == team_alias.
 
 AUTH_MODE=cognito-native:
-  API Gateway Cognito authorizer validates the Cognito ACCESS-token JWT and provides
-  requestContext.authorizer.claims (incl. cognito:groups). Lambda reads that claim
-  directly (no Identity Store round-trip), filters by COGNITO_TEAM_GROUP_PREFIX,
-  requires exactly one match, and maps that group name == team_alias.
+  API Gateway Cognito authorizer validates the Cognito JWT (the client sends the
+  ID token — see below) and provides requestContext.authorizer.claims (incl.
+  cognito:groups AND email). Lambda reads those claims directly (no Identity Store
+  round-trip), filters groups by COGNITO_TEAM_GROUP_PREFIX, requires exactly one
+  match, and maps that group name == team_alias.
+
+  WHY the ID token (not the access token): only the ID token carries the `email`
+  claim; a Cognito ACCESS token does not. The authorizer therefore configures NO
+  authorizationScopes (scopes exist only on access tokens and would force
+  access-token-only), so it accepts the ID token and email reaches this Lambda
+  with zero extra API calls. The ID token still carries cognito:groups, so team
+  resolution is unchanged.
 """
 
 import json
@@ -183,8 +191,11 @@ def _resolve_org_sso_principal(event: dict[str, Any]) -> Optional[Principal]:
         logger.warning("rejected non-SSO principal: %s", arn)
         return None
     account, permission_set, username = match.group(1), match.group(2), match.group(3)
+    # user_key is logged verbatim by LiteLLM as user_id — keep it human-readable
+    # with NO auth-source prefix. The source stays legible via key_alias
+    # ("{source}-{user_key}") and metadata.auth_mode, so audit is unaffected.
     return Principal(
-        user_key=f"org-sso:{account}:{username}",
+        user_key=f"{account}:{username}",
         display_name=username,
         team_alias=permission_set,
         source="org-sso",
@@ -216,19 +227,33 @@ def _extract_groups(raw: Any) -> list[str]:
 
 
 def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Principal]:
-    # The API Gateway CognitoUserPoolsAuthorizer has already validated the access
-    # token (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
-    # requestContext.authorizer.claims — not arbitrary body/header claims.
+    # The API Gateway CognitoUserPoolsAuthorizer has already validated the Cognito
+    # JWT (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
+    # requestContext.authorizer.claims — not arbitrary body/header claims. The
+    # client sends the ID token (the authorizer has no authorizationScopes, so it
+    # accepts it), which is why the `email` claim below is populated.
     claims = event.get("requestContext", {}).get("authorizer", {}).get("claims") or {}
     if not isinstance(claims, dict) or not claims:
         logger.warning("cognito-native rejected: missing Cognito authorizer claims")
         return None
 
-    user_key = claims.get("sub") or claims.get("cognito:username") or claims.get("email")
-    if not user_key:
-        logger.warning("cognito-native rejected: missing sub/username claim")
+    # WHY (log readability): LiteLLM prints `user_id` verbatim in spend logs and
+    # the Admin UI. Cognito's `sub` is an opaque UUID, so keying the identity on
+    # it makes every row read "cognito-native:915b9530-..." — impossible to tell
+    # who the caller was. Prefer the human-readable `email` as the logged identity,
+    # falling back to `cognito:username` then `sub`. The immutable `sub` is still
+    # stamped into metadata (cognito_sub) so the audit trail survives even if the
+    # email is later reassigned. NOTE: in an email-alias pool `cognito:username`
+    # equals the sub UUID, so email is the only readable claim.
+    sub = claims.get("sub")
+    email = claims.get("email")
+    username = claims.get("cognito:username")
+    identity = email or username or sub
+    if not identity:
+        logger.warning("cognito-native rejected: missing email/username/sub claim")
         return None
-    display_name = str(claims.get("email") or claims.get("cognito:username") or user_key)
+    user_key = identity
+    display_name = str(email or username or identity)
 
     groups = _extract_groups(claims.get("cognito:groups"))
     prefix = os.environ.get("COGNITO_TEAM_GROUP_PREFIX", "")
@@ -241,11 +266,19 @@ def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Princip
 
     team_alias = candidates[0]
     return Principal(
-        user_key=f"cognito-native:{user_key}",
+        # user_key is logged verbatim by LiteLLM as user_id — keep it the bare
+        # human-readable identity (email-first) with NO "cognito-native:" prefix.
+        # The auth source stays legible via key_alias ("{source}-{user_key}") and
+        # metadata.auth_mode, so nothing is lost from the audit trail.
+        user_key=user_key,
         display_name=display_name,
         team_alias=team_alias,
         source="cognito-native",
-        metadata={"cognito_sub": str(user_key), "team_group": team_alias},
+        # cognito_sub = the IMMUTABLE audit key (UUID); cognito_email = the
+        # human-readable address. user_key (= identity, email-first) is what
+        # LiteLLM logs as user_id; sub stays here so revocation/audit can still
+        # pin the exact Cognito principal even if the email is reassigned.
+        metadata={"cognito_sub": str(sub), "cognito_email": str(email or ""), "team_group": team_alias},
     )
 ```
 
@@ -613,7 +646,8 @@ def _recover_existing_key(endpoint: str, master_key: str, username: str, alias: 
     #      expired/near-expiry. Returns None after freeing the alias so the caller re-creates.
     #      Three real-deploy lessons baked in (constraints.md → "Virtual-key lifetime"):
     try:
-        # ① user_key contains ':' and '+' (e.g. org-sso:<acct>:user+tag) — it MUST be
+        # ① user_key can contain ':' and '+' (e.g. org-sso <acct>:user+tag, or a
+        #    plus-addressed email user+tag@example.com) — it MUST be
         #    percent-encoded or '+' arrives as a space and LiteLLM 404s "user not found";
         #    unhandled, that crashed recovery and EVERY issuance 500ed until LiteLLM's
         #    periodic expired-key cleanup happened to free the alias (~30 min outage).
@@ -664,7 +698,7 @@ def _resp(status: int, body: dict[str, Any]) -> dict[str, Any]:
 ### Behavior checklist (regeneration checklist)
 
 - [ ] `org-sso`: the caller ARN is read **not from client input** but from `requestContext.identity.userArn` (filled in by API GW IAM Auth).
-- [ ] `cognito-native`: the API Gateway Cognito authorizer verifies the **access token** (id_token → 401) before the Lambda runs; the Lambda reads `cognito:groups` from `requestContext.authorizer.claims` and makes **no Identity Store / `identitystore:*` call**.
+- [ ] `cognito-native`: the API Gateway Cognito authorizer (no `authorizationScopes`) verifies the **ID token** the client sends before the Lambda runs; the Lambda reads `cognito:groups` and `email` from `requestContext.authorizer.claims` and makes **no Identity Store / `identitystore:*` call**.
 - [ ] The `_SSO_ARN_RE` regex enforces `AWSReservedSSO_` → non-SSO gets **403** (org-sso).
 - [ ] DynamoDB single-item cache: `pk=USER#<user_key>`, `sk=VIRTUAL_KEY`, `ttl`.
 - [ ] The master key is from Secrets Manager (`LITELLM_MASTER_KEY_ARN`), the endpoint from SSM (`LITELLM_ENDPOINT_SSM`).
@@ -704,7 +738,7 @@ def _resolve_principal(event: dict[str, Any]) -> Principal | None:
 
 `cognito-native` requirements:
 
-1. **Do not verify the JWT in the Lambda.** The API Gateway `CognitoUserPoolsAuthorizer` already validates the **access token** (signature/issuer/audience/expiry) before the Lambda runs and exposes the verified claims at `requestContext.authorizer.claims`. (An id_token is rejected with 401 at the authorizer.)
+1. **Do not verify the JWT in the Lambda.** The API Gateway `CognitoUserPoolsAuthorizer` already validates the Cognito JWT (signature/issuer/audience/expiry) before the Lambda runs and exposes the verified claims at `requestContext.authorizer.claims`. (Set **no `authorizationScopes`** so the authorizer accepts the **ID token** the client sends — only the id_token carries `email`.)
 2. Read `cognito:groups` from those verified claims — **no Identity Store round-trip, no `identitystore:*` IAM**. Parse defensively (JSON string / native list / comma-separated) — see `_extract_groups` in Section 1.
 3. Filter group names by `COGNITO_TEAM_GROUP_PREFIX` when configured.
 4. Apply `COGNITO_MULTI_GROUP_STRATEGY=require-single-team-group`: exactly one matching group is required; zero or multiple → 403 with a clear log message.
@@ -745,10 +779,18 @@ AUTH_MODE=org-sso:
   Lambda parses AWSReservedSSO_<PermissionSet> and maps PermissionSet == team_alias.
 
 AUTH_MODE=cognito-native:
-  API Gateway Cognito authorizer validates the Cognito ACCESS-token JWT and provides
-  requestContext.authorizer.claims (incl. cognito:groups). Lambda reads that claim
-  directly (no Identity Store round-trip), filters by COGNITO_TEAM_GROUP_PREFIX,
-  requires exactly one match, and maps that group name == team_alias.
+  API Gateway Cognito authorizer validates the Cognito JWT (the client sends the
+  ID token — see below) and provides requestContext.authorizer.claims (incl.
+  cognito:groups AND email). Lambda reads those claims directly (no Identity Store
+  round-trip), filters groups by COGNITO_TEAM_GROUP_PREFIX, requires exactly one
+  match, and maps that group name == team_alias.
+
+  WHY the ID token (not the access token): only the ID token carries the `email`
+  claim; a Cognito ACCESS token does not. The authorizer therefore configures NO
+  authorizationScopes (scopes exist only on access tokens and would force
+  access-token-only), so it accepts the ID token and email reaches this Lambda
+  with zero extra API calls. The ID token still carries cognito:groups, so team
+  resolution is unchanged.
 """
 
 import json
@@ -848,8 +890,11 @@ def _resolve_org_sso_principal(event: dict[str, Any]) -> Optional[Principal]:
         logger.warning("rejected non-SSO principal: %s", arn)
         return None
     account, permission_set, username = match.group(1), match.group(2), match.group(3)
+    # user_key is logged verbatim by LiteLLM as user_id — keep it human-readable
+    # with NO auth-source prefix. The source stays legible via key_alias
+    # ("{source}-{user_key}") and metadata.auth_mode, so audit is unaffected.
     return Principal(
-        user_key=f"org-sso:{account}:{username}",
+        user_key=f"{account}:{username}",
         display_name=username,
         team_alias=permission_set,
         source="org-sso",
@@ -881,19 +926,33 @@ def _extract_groups(raw: Any) -> list[str]:
 
 
 def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Principal]:
-    # The API Gateway CognitoUserPoolsAuthorizer has already validated the access
-    # token (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
-    # requestContext.authorizer.claims — not arbitrary body/header claims.
+    # The API Gateway CognitoUserPoolsAuthorizer has already validated the Cognito
+    # JWT (signature/issuer/audience/expiry) before this Lambda runs. Trust ONLY
+    # requestContext.authorizer.claims — not arbitrary body/header claims. The
+    # client sends the ID token (the authorizer has no authorizationScopes, so it
+    # accepts it), which is why the `email` claim below is populated.
     claims = event.get("requestContext", {}).get("authorizer", {}).get("claims") or {}
     if not isinstance(claims, dict) or not claims:
         logger.warning("cognito-native rejected: missing Cognito authorizer claims")
         return None
 
-    user_key = claims.get("sub") or claims.get("cognito:username") or claims.get("email")
-    if not user_key:
-        logger.warning("cognito-native rejected: missing sub/username claim")
+    # WHY (log readability): LiteLLM prints `user_id` verbatim in spend logs and
+    # the Admin UI. Cognito's `sub` is an opaque UUID, so keying the identity on
+    # it makes every row read "cognito-native:915b9530-..." — impossible to tell
+    # who the caller was. Prefer the human-readable `email` as the logged identity,
+    # falling back to `cognito:username` then `sub`. The immutable `sub` is still
+    # stamped into metadata (cognito_sub) so the audit trail survives even if the
+    # email is later reassigned. NOTE: in an email-alias pool `cognito:username`
+    # equals the sub UUID, so email is the only readable claim.
+    sub = claims.get("sub")
+    email = claims.get("email")
+    username = claims.get("cognito:username")
+    identity = email or username or sub
+    if not identity:
+        logger.warning("cognito-native rejected: missing email/username/sub claim")
         return None
-    display_name = str(claims.get("email") or claims.get("cognito:username") or user_key)
+    user_key = identity
+    display_name = str(email or username or identity)
 
     groups = _extract_groups(claims.get("cognito:groups"))
     prefix = os.environ.get("COGNITO_TEAM_GROUP_PREFIX", "")
@@ -906,11 +965,19 @@ def _resolve_cognito_native_principal(event: dict[str, Any]) -> Optional[Princip
 
     team_alias = candidates[0]
     return Principal(
-        user_key=f"cognito-native:{user_key}",
+        # user_key is logged verbatim by LiteLLM as user_id — keep it the bare
+        # human-readable identity (email-first) with NO "cognito-native:" prefix.
+        # The auth source stays legible via key_alias ("{source}-{user_key}") and
+        # metadata.auth_mode, so nothing is lost from the audit trail.
+        user_key=user_key,
         display_name=display_name,
         team_alias=team_alias,
         source="cognito-native",
-        metadata={"cognito_sub": str(user_key), "team_group": team_alias},
+        # cognito_sub = the IMMUTABLE audit key (UUID); cognito_email = the
+        # human-readable address. user_key (= identity, email-first) is what
+        # LiteLLM logs as user_id; sub stays here so revocation/audit can still
+        # pin the exact Cognito principal even if the email is reassigned.
+        metadata={"cognito_sub": str(sub), "cognito_email": str(email or ""), "team_group": team_alias},
     )
 ```
 

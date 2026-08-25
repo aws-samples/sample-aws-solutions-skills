@@ -24,8 +24,9 @@ llmgw-login
      no external IdP, no IdC — Cognito is the sole identity source)
    → gateway_auth.py completes the PKCE code exchange and caches the tokens
    → the client runs get-gateway-token helper on every request
-   → helper sends the Cognito ACCESS token (NOT id_token — the API Gateway
-     Cognito authorizer 401s on an id_token) to Token Service (/auth/token)
+   → helper sends the Cognito ID token (NOT the access token — only the id_token
+     carries the `email` claim logged as the LiteLLM user_id; the authorizer has
+     no authorizationScopes so it accepts it) to Token Service (/auth/token)
    → API Gateway Cognito authorizer verifies the JWT; Token Lambda reads the
      verified cognito:groups claim (no Identity Store call) and returns sk-...
    → the client uses that virtual key as a Bearer token against the gateway URL (the public ALB)
@@ -209,7 +210,7 @@ scripts/healthcheck.ps1          # Windows verification (thin wrapper)
 `gateway_auth.py` subcommands:
 - `setup`: **all onboarding derivation/merge logic lives here, once, cross-platform** (the `.sh`/`.ps1` setup scripts are thin wrappers, so the merge rules can never drift between OSes). Reads `outputs.json` (env vars remain overrides), derives the gateway/token URLs and `authMode` (Cognito outputs present → `cognito-native`, else `org-sso`), writes `~/.llm-gateway/config.json` (+ the legacy `env` file the POSIX `.sh` helpers read), **copies `gateway_auth.py` itself to `~/.llm-gateway/gateway_auth.py`** (a stable, repo-independent helper path — the path the docs reference), **merges** `~/.claude/settings.json` and `~/.codex/config.toml` (backup first — only our keys/block), and (org-sso) idempotently appends the AWS SSO profile. On Windows it writes the helper commands using `sys.executable` (never bare `python`, which may resolve to the Microsoft Store alias stub).
 - `login`: `cognito-native` only — PKCE verifier/challenge, loopback HTTP listener (**loops until `/callback`** — a single `handle_request()` is a bug: any stray hit like favicon/preconnect would consume it), `webbrowser` to the Cognito Hosted UI `/oauth2/authorize`, code exchange at `/oauth2/token`, tokens cached under `~/.llm-gateway/`. In `org-sso` mode it exits with the correct `aws sso login` command instead.
-- `token`: **`org-sso`** → boto3 SigV4 POST to the Token Service (region parsed from the `execute-api` URL host, empty body byte-identical — same rules as §1; boto3 is imported lazily so `cognito-native` stays stdlib-only). **`cognito-native`** → refresh the Cognito tokens when needed and send `Authorization: Bearer <ACCESS token>` (⚠️ **the access token, never the id_token** — the API Gateway Cognito authorizer 401s on an id_token even though it also carries `cognito:groups`). Either way: parse `api_key`, print only the key to stdout, non-zero exit on failure.
+- `token`: **`org-sso`** → boto3 SigV4 POST to the Token Service (region parsed from the `execute-api` URL host, empty body byte-identical — same rules as §1; boto3 is imported lazily so `cognito-native` stays stdlib-only). **`cognito-native`** → refresh the Cognito tokens when needed and send `Authorization: Bearer <ID token>` (⚠️ **the id_token, not the access token** — only the id_token carries the `email` claim the Token Lambda logs as the LiteLLM `user_id`; an access token would authenticate but log an opaque `sub` UUID. The authorizer has no `authorizationScopes`, so it accepts the id_token; both tokens carry `cognito:groups`). Either way: parse `api_key`, print only the key to stdout, non-zero exit on failure.
 - `mcp-headers`: print `{"Authorization": "Bearer <key>"}` as JSON — the entry point for Claude Code's MCP `headersHelper` so the AgentCore Web Search MCP always gets a fresh virtual key with no static token in `.mcp.json`.
 - `healthcheck`: call `token`, then probe `<gatewayUrl>/health/liveliness` — the **full URL including scheme** from config, so it works in `certMode=http` too (never hardcode `https://`).
 
@@ -246,6 +247,9 @@ DEFAULT_CONFIG_DIR = Path.home() / ".llm-gateway"
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_TOKEN_CACHE_PATH = DEFAULT_CONFIG_DIR / "tokens.json"
 LOOPBACK_HOST, LOOPBACK_PORT = "127.0.0.1", 8400
+# "gpt" default = the proven gpt-5.5. If the deployment offers gpt-5.6-* AND the
+# post-deploy Codex smoke test passed (constraints.md GPT-5.6 gate), the operator
+# may promote it (e.g. "gpt": "gpt-5.6-sol") — never before the smoke test.
 DEFAULT_ALIASES = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5",
                    "haiku": "claude-haiku-4-5", "fable": "claude-fable-5", "gpt": "gpt-5.5"}
 
@@ -440,9 +444,12 @@ def _fetch_key_cognito(cfg: dict[str, Any], cache_path: Path) -> str:
         _log("ERROR: not logged in. Run: llmgw-login"); sys.exit(1)
     cache = _refresh_if_needed(cfg, cache)
     _save_cache(cache_path, cache)
-    # IMPORTANT: send the ACCESS token. The API Gateway COGNITO_USER_POOLS
-    # authorizer only accepts token_use=access; an id_token returns 401.
-    bearer = cache["access_token"]
+    # IMPORTANT: send the ID token. The authorizer has NO authorizationScopes, so
+    # it accepts the id_token, which — unlike the access token — carries the `email`
+    # claim the Token Lambda logs as the LiteLLM user_id (it also carries
+    # cognito:groups for team mapping). An access token here would authenticate but
+    # log an opaque sub UUID.
+    bearer = cache["id_token"]
     req = urllib.request.Request(cfg["tokenServiceUrl"], data=b"{}",
                                  headers={"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"},
                                  method="POST")
@@ -547,18 +554,45 @@ def _merge_claude_settings(gw: str, region: str, auth_mode: str, aliases: dict, 
             _log(f"ERROR: {p} exists but is not valid JSON - fix or move it first (backup was taken)")
             sys.exit(1)
     env = cfg.setdefault("env", {})
-    # Remove direct-Bedrock remnants BEFORE merging (real Windows incident): leaving them
-    # makes two auth paths fight — CLAUDE_CODE_USE_BEDROCK=1 bypasses ANTHROPIC_BASE_URL
-    # entirely, and a stale AWS_BEARER_TOKEN_BEDROCK produces 403 "API key is not valid".
+    # Remove direct-Bedrock remnants BEFORE merging (real incident, twice: a
+    # Windows one, and a macOS one on 2026-08-25): leaving them makes two auth
+    # paths fight. CLAUDE_CODE_USE_BEDROCK=1 bypasses ANTHROPIC_BASE_URL
+    # entirely; a stale AWS_BEARER_TOKEN_BEDROCK produces 403 "API key is not
+    # valid"; and on an Amazon-internal build, the top-level `awsCredentialExport`
+    # key is its OWN independent direct-Bedrock switch — present alone (even with
+    # CLAUDE_CODE_USE_BEDROCK removed) it still routed straight to Bedrock and fed
+    # it our short ANTHROPIC_DEFAULT_*_MODEL alias as the raw model id
+    # ("invalid model identifier"). Remove all three.
     for k in ("CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"):
         env.pop(k, None)
+    cfg.pop("awsCredentialExport", None)
+    # Real incident (2026-08-25, immediately after fixing the remnants above): a
+    # leftover `modelOverrides` table from a direct-Bedrock setup REWRITES our
+    # alias ("claude-opus-4-8") to the raw Bedrock id
+    # ("global.anthropic.claude-opus-4-8") BEFORE the request ever reaches
+    # ANTHROPIC_BASE_URL — the gateway has no model registered under that raw id,
+    # so LiteLLM 400s with "Invalid model name". `fallbackModel` is the same
+    # problem (raw Bedrock ids Claude Code retries with on error), and
+    # `availableModels`/`enforceAvailableModels` gate the `/model` picker to that
+    # same direct-Bedrock catalog. All four are direct-Bedrock remnants, same
+    # category as the env keys above — remove them too.
+    for k in ("modelOverrides", "fallbackModel", "availableModels", "enforceAvailableModels"):
+        cfg.pop(k, None)
     # A leftover TOP-LEVEL "model" (a raw Bedrock model ID from a direct-Bedrock setup)
     # outranks the ANTHROPIC_DEFAULT_*_MODEL aliases, so the gateway receives a model it
     # doesn't serve → "team not allowed to access model". The alias env vars are the contract.
     cfg.pop("model", None)
+    # ⚠️ Do NOT set/touch AWS_REGION here (real incident, 2026-08-25): the
+    # ANTHROPIC_BASE_URL + apiKeyHelper gateway path is plain HTTP(S) and never
+    # needs an AWS region client-side. A prior version of this function forced
+    # AWS_REGION to the gateway's region, which broke an UNRELATED, pre-existing
+    # direct-Bedrock auth path on the machine (its Bedrock access was scoped to a
+    # different region) — 403 "not authorized to perform:
+    # bedrock:InvokeModelWithResponseStream". Leaving AWS_REGION alone removes
+    # that failure mode; the `region` param is used elsewhere in setup (e.g.
+    # deriving org-sso's AWS_PROFILE region), not written into settings.
     env.update({
         "ANTHROPIC_BASE_URL": gw,
-        "AWS_REGION": region,
         # ALL FOUR aliases — omitting Fable hides that tier from /model.
         "ANTHROPIC_DEFAULT_OPUS_MODEL": aliases["opus"],
         "ANTHROPIC_DEFAULT_SONNET_MODEL": aliases["sonnet"],
@@ -577,10 +611,27 @@ def _merge_claude_settings(gw: str, region: str, auth_mode: str, aliases: dict, 
 
 
 def _merge_codex_config(gw: str, aliases: dict, prog_args: "tuple[str, list[str]]", stamp: str) -> None:
-    # TOML: replace ONLY our [model_providers.llm-gateway](+.auth) block; upsert
+    # TOML: replace ONLY our [model_providers.llm-gateway](+.auth) block; edit
     # top-level keys ONLY in the top-level region (before the first table header
-    # — appending after a table would silently re-scope them); keep a user's
-    # existing model= value and say so.
+    # — appending after a table would silently re-scope them).
+    #
+    # ⚠️ Real incident (2026-08-25): `model_provider` / `model` / `web_search`
+    # are FORCE-SET (see force_upsert below), never "preserve if present". An
+    # earlier version of this script treated them like ordinary user data —
+    # "keep the existing value, just log a note" — and on a machine that already
+    # had `model_provider = "amazon-bedrock"` (e.g. from following AWS's own
+    # Codex-on-Bedrock workshop) that silently left Codex routing straight to
+    # Bedrock, completely bypassing this gateway (no Bearer auth, no usage
+    # tracking) with no error until a 404 surfaced as a misleading
+    # "Reconnecting... high demand" loop. Codex was doing exactly what its config
+    # said — the bug was ours: these three keys are not "user preference to leave
+    # alone", they are the switch that decides whether Codex talks to this
+    # gateway at all, so this script's whole job is to set them authoritatively.
+    # (AWS's own workshop makes the same point by having the learner overwrite
+    # the *entire* file with `cat > config.toml <<EOF`, so no stale value can
+    # compete.) Every OTHER existing top-level key (chatgpt_base_url,
+    # forced_login_method, model_reasoning_effort, notify, [mcp_servers.*],
+    # [projects.*], etc.) is still left untouched — only these three are forced.
     p = Path.home() / ".codex" / "config.toml"
     p.parent.mkdir(parents=True, exist_ok=True)
     text = ""
@@ -604,11 +655,20 @@ def _merge_codex_config(gw: str, aliases: dict, prog_args: "tuple[str, list[str]
              f"args = {args_toml}\n"
              "refresh_interval_ms = 300000\n"
              "timeout_ms = 5000\n")
-    text = re.sub(r"^\[model_providers\.llm-gateway(?:\.auth)?\][^\[]*(?=^\[|\Z)", "", text, flags=re.M | re.S)
+    # ⚠️ Real incident (2026-08-25): `[^\[]*` (stop at the next literal `[`)
+    # breaks on `args = []` inside our OWN auth block — an empty/populated TOML
+    # array contains a literal `[`, so the old block never actually got removed
+    # on ANY prior run; each run just appended another copy, eventually producing
+    # a duplicate-key TOML parse error. Match by LINE instead: consume any line
+    # that does not itself START with `[` (a real table header), which tolerates
+    # `[`/`]` appearing mid-line in a value.
+    text = re.sub(r"^\[model_providers\.llm-gateway(?:\.auth)?\]\n(?:(?!\[)[^\n]*\n?)*", "", text, flags=re.M)
     m = re.search(r"^\[", text, flags=re.M)
     top, rest = (text[: m.start()], text[m.start():]) if m else (text, "")
 
     def upsert(region_text: str, key: str, line: str) -> str:
+        # Preserve-and-warn: for ordinary top-level keys we don't own, leave the
+        # user's existing value alone. NOT used for the three routing keys below.
         hit = re.search(rf"^{key}\s*=\s*(.+)$", region_text, flags=re.M)
         if hit is None:
             return line + "\n" + region_text
@@ -616,14 +676,27 @@ def _merge_codex_config(gw: str, aliases: dict, prog_args: "tuple[str, list[str]
             _log(f"    note: keeping existing top-level `{hit.group(0).strip()}` (wanted `{line}`)")
         return region_text
 
-    top = upsert(top, "model_provider", 'model_provider = "llm-gateway"')
-    top = upsert(top, "model", f'model = "{aliases["gpt"]}"')
+    def force_upsert(region_text: str, key: str, line: str) -> str:
+        # Authoritative: this key controls gateway routing, so REPLACE any
+        # existing value (logging what got overwritten) rather than deferring to
+        # it. See the incident note at the top of this function.
+        hit = re.search(rf"^{key}\s*=\s*(.+)$", region_text, flags=re.M)
+        if hit is None:
+            return line + "\n" + region_text
+        old = hit.group(0).strip()
+        if old != line:
+            _log(f"    overwrote existing top-level `{old}` -> `{line}` (required for gateway routing)")
+            return region_text[: hit.start()] + line + region_text[hit.end():]
+        return region_text
+
+    top = force_upsert(top, "model_provider", 'model_provider = "llm-gateway"')
+    top = force_upsert(top, "model", f'model = "{aliases["gpt"]}"')
     # web_search MUST be disabled (real incident): custom providers default the
     # web_search capability ON, Codex's interactive TUI then attaches a web_search
     # tool, and Mantle rejects it ("Live web access is not yet available") -> LiteLLM
     # 500 -> Codex shows a misleading "Reconnecting... high demand" loop. `codex exec`
     # doesn't attach the tool, so the failure only appears in interactive sessions.
-    top = upsert(top, "web_search", 'web_search = "disabled"')
+    top = force_upsert(top, "web_search", 'web_search = "disabled"')
     parts = [top.rstrip("\n"), rest.strip("\n"), block.rstrip("\n")]
     p.write_text("\n\n".join(s for s in parts if s) + "\n")
     _log(f"    merged: {p}")
@@ -827,7 +900,7 @@ Avoid `sed`, `chmod`, bash here-docs, and Unix-only paths anywhere in the client
 
 **All derivation/merge logic lives in `gateway_auth.py setup` (§1A) — one cross-platform implementation.** The setup scripts are thin launchers, so the merge rules can never drift between the macOS/Linux and Windows paths (drift is exactly what would re-create the overwrite incident below on the OS nobody tested). The zero-touch contract is unchanged: read `outputs.json` (`cdk deploy --outputs-file outputs.json`) and derive everything; env vars are **overrides only** (`GATEWAY_URL` or `ALB_DNS`+`GATEWAY_SCHEME`, `TOKEN_SERVICE_URL`, `SSO_START_URL`/`SSO_ACCOUNT_ID`/`SSO_ROLE_NAME`, `AWS_PROFILE_NAME`). The skill agent runs it automatically right after deploy (Phase 5) — **on a Windows operator machine run the `.ps1`** (or `python scripts\gateway_auth.py setup`); the `.sh` requires bash (WSL/Git Bash).
 
-> ⚠️ **Merge, don't overwrite (real-deploy incident).** An earlier revision rendered the templates with `sed` and wrote them with `>` — one run wiped the user's existing `~/.claude/settings.json` hooks/plugins and `~/.codex/config.toml` project-trust sections (recovered only thanks to another tool's own backups). These are **shared personal config files**: JSON is handled load → update only our keys (`env`, `apiKeyHelper`, `permissions.deny`) → save; TOML replaces only the `[model_providers.llm-gateway]` block; both are backed up to `*.llmgw-backup-<timestamp>` on every run. The rules are enforced in `_merge_claude_settings` / `_merge_codex_config` (§1A) — the **only** place they exist. Never regress to template-overwrite, and never re-implement the merge in shell (that is how the Windows copy drifts).
+> ⚠️ **Merge, don't overwrite (real-deploy incident).** An earlier revision rendered the templates with `sed` and wrote them with `>` — one run wiped the user's existing `~/.claude/settings.json` hooks/plugins and `~/.codex/config.toml` project-trust sections (recovered only thanks to another tool's own backups). These are **shared personal config files**: JSON is handled load → update only our keys (`env`, `apiKeyHelper`, `permissions.deny`) → save; TOML replaces only the `[model_providers.llm-gateway]` block; both are backed up to `*.llmgw-backup-<timestamp>` on every run. The rules are enforced in `_merge_claude_settings` / `_merge_codex_config` (§1A) — the **only** place they exist. Never regress to template-overwrite, and never re-implement the merge (or any `config.toml`/`settings.json` parsing) in shell. Two reasons, both from real incidents: (1) the Windows copy drifts; (2) **BSD tools ≠ GNU tools** — a macOS-side helper that used `grep`/`sed` with `\s` to scrape the `model =` line silently corrupted the value into the literal text `model = "openai.gpt-5.6-sol` (BSD `grep`/`sed` do not support `\s`), which then fed a garbage model id downstream. Config parsing belongs in the one cross-platform Python core, never in per-OS shell.
 
 > **WHY derive from `GatewayUrl`?** CloudFront is removed — the public ALB is the edge, and the `GatewayUrl` output already carries both the scheme and the host (`https://<acm-domain>` or `http://<alb-dns>`). Splitting it yields the scheme + host, so neither the operator nor a developer needs to know `certMode` or look up the ALB DNS (and can never mistakenly use the internal Token-Service ALB DNS `:4000`). Env vars remain as overrides for running without `outputs.json`.
 
@@ -865,8 +938,8 @@ What `setup` performs (implemented once, in Python — §1A):
 | `~/.llm-gateway/gateway_auth.py` | a **copy of the core itself** — the stable, repo-independent helper path the Windows client config points at |
 | `~/.llm-gateway/env` | URLs only, no secrets — still read by the legacy POSIX `.sh` helpers |
 | `~/.llm-gateway/get-mcp-headers.sh` | (POSIX only) one-line `mcp-headers` launcher for the MCP `headersHelper` |
-| `~/.claude/settings.json` | **merge**: gateway URL · region · **all four model aliases** (omitting Fable hides that tier from `/model`) · `apiKeyHelper` (OS-appropriate command) · `permissions.deny: ["WebSearch"]` — backup first |
-| `~/.codex/config.toml` | **merge**: only the `[model_providers.llm-gateway]`(+`.auth`) block, plus top-level `model`/`model_provider` upsert in the top-level region — backup first |
+| `~/.claude/settings.json` | **merge**: gateway URL · **all four model aliases** (omitting Fable hides that tier from `/model`) · `apiKeyHelper` (OS-appropriate command) · `permissions.deny: ["WebSearch"]` — **removes direct-Bedrock remnants** (`CLAUDE_CODE_USE_BEDROCK`, `AWS_BEARER_TOKEN_BEDROCK`, `awsCredentialExport`, `modelOverrides`, `fallbackModel`, `availableModels`, `enforceAvailableModels`, top-level `model`) and does **NOT** touch `AWS_REGION` — backup first |
+| `~/.codex/config.toml` | **merge**: only the `[model_providers.llm-gateway]`(+`.auth`) block, plus a **force-set** (authoritative overwrite) of top-level `model`/`model_provider`/`web_search` in the top-level region — every other top-level key preserved — backup first |
 | `~/.aws/config` | (org-sso only) idempotently append `[sso-session llm-gateway]` + `[profile llm-gateway]` — never clobbers existing profiles |
 
 > **The AWS profile name is `llm-gateway` (named after the gateway, not a specific client).** Claude Code and Codex
@@ -911,7 +984,6 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" healthcheck "$@"
 {
   "env": {
     "ANTHROPIC_BASE_URL": "{GATEWAY_URL}",
-    "AWS_REGION": "us-east-2",
     "AWS_PROFILE": "llm-gateway",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
@@ -929,6 +1001,7 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" healthcheck "$@"
 > - `ANTHROPIC_BASE_URL = {GATEWAY_URL}` (`https://<domain>` for acm, `http://<alb-dns>` for http) — routes to the gateway (public ALB) instead of the Anthropic API.
 >   LiteLLM converts `/v1/messages` to Bedrock Claude.
 > - `apiKeyHelper` — Claude Code runs this script just before each request to obtain the Bearer key. **No static API key.**
+> - **No `AWS_REGION`** (real incident, 2026-08-25) — the `ANTHROPIC_BASE_URL` + `apiKeyHelper` path is plain HTTP(S) and needs no client-side AWS region. `setup` deliberately does **not** write `AWS_REGION`: an earlier version pinned it to the gateway region and broke an unrelated pre-existing direct-Bedrock path on the developer's machine (403 `bedrock:InvokeModelWithResponseStream`). `AWS_PROFILE` is written **only** in `org-sso` mode (for the SigV4 token call); `cognito-native` needs neither.
 > - `ANTHROPIC_DEFAULT_*_MODEL` — match the model aliases to the names in the LiteLLM `model_list` (LiteLLMStack). **Emit all four**, including `ANTHROPIC_DEFAULT_FABLE_MODEL`: omitting the Fable var hides the Fable tier from Claude Code's `/model` picker entirely.
 > - `permissions.deny: ["WebSearch"]` — blocks Claude's built-in WebSearch so that search flows only through the gateway's
 >   AgentCore Web Search MCP (`websearch` server, us-east-1 gateway). The intent is to enforce governance (search traffic also passes through the gateway).
@@ -946,6 +1019,8 @@ exec python3 "$SCRIPT_DIR/gateway_auth.py" healthcheck "$@"
 # Auth (`cognito-native`): run `llmgw-login` once, then auth.command calls gateway_auth.py token.
 # Codex caches the key and refreshes every refresh_interval_ms.
 
+# Default model = the proven gpt-5.5. Switch to a gpt-5.6-* alias only after the
+# deployment's post-deploy Codex smoke test passed (constraints.md GPT-5.6 gate).
 model = "gpt-5.5"
 model_provider = "llm-gateway"
 web_search = "disabled"
@@ -997,7 +1072,7 @@ timeout_ms = 5000
 1. `org-sso`: after `aws sso login --profile llm-gateway`, `./scripts/get-gateway-token.sh` (macOS/Linux) **and** `.\scripts\get-gateway-token.ps1` (Windows — via `gateway_auth.py token` org-sso SigV4) → one line of output starting with `sk-`.
 2. `cognito-native`: after `llmgw-login` (or `llmgw-login.ps1`), `get-gateway-token` → one line of output starting with `sk-`.
 3. Calling org-sso with a direct IAM role (not SSO) → Token Lambda returns 403 (`caller is not an IAM Identity Center (SSO) principal`).
-4. `cognito-native`: a caller in no matching `teamGroupPrefix` group (or in two) → 403 with a clear diagnostic; sending the **id_token** instead of the access token → 401 at the API Gateway Cognito authorizer.
+4. `cognito-native`: a caller in no matching `teamGroupPrefix` group (or in two) → 403 with a clear diagnostic. (The authorizer has no `authorizationScopes`, so it accepts either the id_token or the access token; the client sends the **id_token** because only it carries the `email` claim logged as the LiteLLM `user_id`.)
 5. `healthcheck.sh` / `healthcheck.ps1` → key issuance OK + `/health/liveliness` 200 (probe uses the config `gatewayUrl` scheme — passes in `http` certMode too).
 6. When `claude` runs, model calls go out to the gateway URL and usage shows up in the LiteLLM Admin UI (`/ui/`). Registering the `websearch` MCP (`claude mcp add-json` + `headersHelper`) makes `websearch-web-search-tool___WebSearch` available.
 7. **Windows exit-code contract**: with an invalid/absent config, `.\scripts\get-gateway-token.ps1; $LASTEXITCODE` shows a **non-zero** code (the launcher ends with `exit $LASTEXITCODE` — PS 5.1 does not propagate native exit codes otherwise), and stdout stays empty.

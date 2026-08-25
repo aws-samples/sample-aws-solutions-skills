@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM Gateway Governance Skill — 사용 가이드</title>
+<title>AWS GenAI Lab — LLM Gateway Governance Skill 사용 가이드</title>
 <style>
   :root{
     --gold:#F2C94C; --purple:#8B5CF6; --blue:#3B82F6; --teal:#2DD4BF; --pink:#EC4899;
@@ -31,6 +31,15 @@
   @keyframes in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
   .kicker{display:inline-block;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
     padding:5px 13px;border-radius:30px;margin-bottom:10px;color:#0c1020;background:var(--grad);width:max-content}
+  .lab{display:flex;width:max-content;align-items:center;gap:11px;font-size:27px;line-height:1;font-weight:900;
+    letter-spacing:-.2px;color:#dbe7f7;margin:0 0 18px}
+  .lab b{font-weight:900;background:var(--grad);background-size:200% auto;
+    -webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 5s linear infinite}
+  .lab .spark{width:13px;height:13px;border-radius:50%;background:var(--grad2);flex:none}
+  .slide.active .lab{animation:labIn .85s cubic-bezier(.2,.7,.2,1) both}
+  .slide.active .lab .spark{animation:labPulse 2.6s ease-out infinite}
+  @keyframes labIn{from{opacity:0;transform:translateY(-12px) scale(.94)}to{opacity:1;transform:none}}
+  @keyframes labPulse{0%{box-shadow:0 0 0 0 rgba(139,92,246,.55)}70%{box-shadow:0 0 0 17px rgba(139,92,246,0)}100%{box-shadow:0 0 0 0 rgba(139,92,246,0)}}
   h1{font-size:48px;line-height:1.12;margin:0 0 14px;font-weight:900;letter-spacing:-.5px}
   .g-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;background-size:200% auto;animation:sheen 6s linear infinite}
   @keyframes sheen{to{background-position:200% center}}
@@ -138,6 +147,7 @@
 <!-- 1 TITLE -->
 <section class="slide active">
   <div style="margin:auto 0">
+    <span class="lab"><i class="spark"></i>AWS <b>GenAI Lab</b></span>
     <div class="kicker">AWS Solution Skill · 사용 가이드</div>
     <h1>LLM Gateway Governance<br><span class="g-text">Skill</span></h1>
     <p class="lead">AI(Kiro · Claude Code · Codex)와 대화하며, 사내 개발자용<br>
@@ -146,7 +156,7 @@
       <span class="pill">LiteLLM</span><span class="pill">Amazon Bedrock</span><span class="pill">AgentCore</span>
       <span class="pill">AWS CDK · TypeScript</span><span class="pill">SSO/Cognito · Guardrails · Data Residency</span>
     </div>
-    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 20 슬라이드</p>
+    <p class="src" style="margin-top:20px">← / → · Space · 하단 버튼 · 점 클릭 으로 이동 — 총 24 슬라이드 · <b style="color:#cbdaee">F</b> 전체화면</p>
   </div>
 </section>
 
@@ -158,7 +168,7 @@
     <span class="g-text" style="font-weight:800">단일 거버넌스 게이트웨이</span>를 강제 경유시켜 중앙 통제한다.</p>
   <div class="grid g4" style="margin-top:14px;flex:1">
     <div class="card gold"><h3>① 신원 · Who</h3><p>신원 강제 — <b>org-sso</b>(<code>AWSReservedSSO_</code>) 또는 <b>cognito-native</b>(Cognito User Pool)<br>사용자별 가상키 발급<br>Enterprise 라이선스 불필요</p></div>
-    <div class="card teal"><h3>② 모델·비용 · How much</h3><p>모델 라우팅(Claude/GPT)<br>티어별 allowlist<br>예산 캡(economy $50)</p></div>
+    <div class="card teal"><h3>② 모델·비용 · How much</h3><p>모델 라우팅(Claude · <b>GPT-5.6 Sol/Terra/Luna</b> · 5.5 · 5.4)<br>티어별 allowlist<br>예산 캡(economy $50)</p></div>
     <div class="card pink"><h3>③ 콘텐츠 안전 · What</h3><p>Bedrock Guardrails<br>콘텐츠·PII·금지토픽<br>시크릿 탐지(pre-call)</p></div>
     <div class="card"><h3>④ 관측·감사 · Trace</h3><p>CloudWatch(인프라)<br>Langfuse(프롬프트/트레이스)<br>키별 사용량·예산</p></div>
   </div>
@@ -198,7 +208,7 @@
       <div class="ext" style="flex:1"><div class="t">AWS 서비스 — VPC 엔드포인트로 프라이빗 접근(인터넷 미경유)</div>
         <div class="svcrow">
           <div class="svc">Bedrock · Claude + Guardrail</div>
-          <div class="svc">Bedrock Mantle · GPT</div>
+          <div class="svc">Bedrock Mantle · GPT-5.6 / 5.5 / 5.4</div>
           <div class="svc">AgentCore Gateway · Web Search Tool</div>
           <div class="svc">Secrets Manager</div>
           <div class="svc">DynamoDB · 키캐시</div>
@@ -349,7 +359,7 @@
     <text x="974" y="279" fill="#a8bad2" font-size="10.5" text-anchor="start">+ 사설 호스팅 존(PHZ) DNS</text>
     <use href="#ic-bedrock" x="928" y="330" width="42" height="42"/>
     <text x="978" y="344" fill="#fff" font-size="12.5" font-weight="700" text-anchor="start">Bedrock Mantle</text>
-    <text x="978" y="359" fill="#a8bad2" font-size="10.5" text-anchor="start">GPT-5.5 / GPT-5.4 · Bearer 키(런타임 발급)</text>
+    <text x="978" y="359" fill="#a8bad2" font-size="10.5" text-anchor="start">GPT-5.6 Sol/Terra/Luna · 5.5/5.4 · Bearer 키(런타임 발급)</text>
     <text x="928" y="420" fill="#9bb0cc" font-size="10">MantleNetworkStack + MantlePeeringRoutesStack가</text>
     <text x="928" y="434" fill="#9bb0cc" font-size="10">크로스리전 VPC 피어링·라우팅을 구성</text>
     <rect x="856" y="259" width="48" height="48" rx="10" fill="#0c1426" stroke="rgba(139,92,246,.7)" stroke-width="1.4"/>
@@ -489,7 +499,7 @@
   <h2>누가 · 무엇을 · 얼마나 · 어떻게 <span class="u">통제</span>되는가</h2>
   <div class="grid g3" style="flex:1">
     <div class="card gold"><h3>🪪 신원 (Identity)</h3><p>두 모드: <b>org-sso</b>(IdC 조직 인스턴스, <code>AWSReservedSSO_</code> ARN만 허용) 또는 <b>cognito-native</b>(계정 인스턴스/조직 SSO 불가 시 — Cognito User Pool이 유일 신원원, SAML/IdC 페더레이션 없음)</p></div>
-    <div class="card teal"><h3>🔏 인가 (AuthZ)</h3><p>org-sso: API GW <code>AWS_IAM</code>(SigV4), 권한셋 <code>execute-api:Invoke</code>만. cognito-native: API GW Cognito authorizer(access token만, id_token 401), <code>cognito:groups</code>→팀</p></div>
+    <div class="card teal"><h3>🔏 인가 (AuthZ)</h3><p>org-sso: API GW <code>AWS_IAM</code>(SigV4), 권한셋 <code>execute-api:Invoke</code>만. cognito-native: API GW Cognito authorizer(scopes 없음 → id_token 수용, email claim 로깅), <code>cognito:groups</code>→팀</p></div>
     <div class="card pink"><h3>🔑 키 라이프사이클</h3><p>사용자별 가상키 발급·DynamoDB 캐시(TTL). master key는 Secrets Manager grantRead. 장기 키 배포 없음</p></div>
     <div class="card teal"><h3>📊 티어링 · 예산</h3><p>권한셋→LiteLLM 팀. economy=모델 allowlist + 예산 캡($50). standard=전 모델</p></div>
     <div class="card gold"><h3>🛡️ 정책 (Policy)</h3><p>Bedrock Guardrail + 시크릿 탐지가 모든 Claude 요청에 default 적용. MCP는 키별 access group으로 스코프</p></div>
@@ -561,13 +571,13 @@
       <tr><td>1</td><td><b>엣지 TLS</b></td><td><code>litellm.certMode</code></td><td>acm(도메인+ACM · HTTPS) / http(도메인X · HTTP 평문 · PoC 전용) — 둘 다 SG CIDR allowlist(<code>albIngressCidrs</code>) 필수</td></tr>
       <tr><td>2</td><td><b>관측성 깊이</b></td><td><code>enableLangfuse</code></td><td>Langfuse on / CloudWatch만 — 어느 쪽이든 <b>CloudWatch 사용량 대시보드</b>(토큰·사용자별·시간대별)는 기본 제공</td></tr>
       <tr><td>3</td><td><b>모델·비용 티어</b></td><td>Token Lambda 팀 매핑</td><td>standard(전 모델) / economy(allowlist + 예산캡)</td></tr>
-      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT <b>5.5/5.4만</b>(bedrock_mantle — <b>⛔ 5.6-* 금지</b>: Codex 툴 사용 시 400)</td></tr>
+      <tr><td>4</td><td><b>제공 모델</b></td><td><code>constants.MODELS</code></td><td>Claude Opus/Sonnet/Haiku/<b>Fable 5</b>(bedrock-runtime) + GPT <b>5.6 Sol(플래그십·1M) / Terra(균형) / Luna(경제·저지연) · 5.5 · 5.4</b>(bedrock_mantle) — 5.6는 LiteLLM <code>v1.98.0</code> 핀에서 <b>정식 지원</b>, 배포 후 Codex 스모크 테스트로 확인 후 개발자 온보딩</td></tr>
       <tr><td>5</td><td><b>리전(데이터 레지던시)</b></td><td><code>awsRegion</code></td><td>config가 authoritative(constants 수정 불필요) · AgentCore/Mantle은 us-east-1 고정</td></tr>
       <tr><td>6</td><td><b>용량·비용</b></td><td><code>data.* · litellm.* · natGateways</code></td><td>Aurora ACU · Fargate 크기 · NAT 수</td></tr>
       <tr><td>7</td><td><b>부트스트랩</b></td><td><code>bootstrapQualifier</code></td><td>기본 / 커스텀(충돌 회피)</td></tr>
     </tbody>
   </table>
-  <p class="src">추가 토글: <code>awsRegion</code>(리전 선택) · <code>guardrail.enabled</code> · <code>observability.dashboardEnabled</code> · <code>agentcore</code>(AgentCore 웹검색) · <code>mantle</code>(GPT-5.x 피어링) · <code>sso</code> · <code>auth.keyCacheTtlSeconds</code></p>
+  <p class="src">추가 토글: <code>awsRegion</code>(리전 선택) · <code>guardrail.enabled</code> · <code>observability.dashboardEnabled</code> · <code>agentcore</code>(AgentCore 웹검색) · <code>mantle</code>(GPT-5.6/5.5/5.4 피어링) · <code>sso</code> · <code>auth.keyCacheTtlSeconds</code></p>
 </section>
 
 <!-- 9 WORKFLOW -->
@@ -579,7 +589,7 @@
     <div class="step"><span class="n">2</span><b>Design</b><span>decision-tree 적용 · MCP로 모델 ID/리전 검증</span></div>
     <div class="step"><span class="n">3</span><b>Generate</b><span>CDK·Lambda·LiteLLM·스크립트 생성</span></div>
     <div class="step"><span class="n">4</span><b>Validate</b><span>toolchain 정렬 · 이미지 CLI 사전검증 · typecheck · synth · cdk-nag</span></div>
-    <div class="step"><span class="n">5</span><b>Deploy</b><span>bootstrap(qualifier 확인) · cdk deploy · 온보딩 자동 실행</span></div>
+    <div class="step"><span class="n">5</span><b>Deploy</b><span>bootstrap(qualifier 확인) · cdk deploy · Mantle 워밍업 + GPT-5.6 Codex 스모크 테스트 · 온보딩 자동 실행</span></div>
     <div class="step"><span class="n">6</span><b>Onboarding</b><span>HTML 가이드 2종 생성(developer/admin, 항상 출력)</span></div>
   </div>
   <div class="grid g2" style="margin-top:16px;flex:1">
@@ -636,7 +646,7 @@
     <div class="card pink"><h3>🔁 UI 리다이렉트</h3><p><code>PROXY_BASE_URL</code>/<code>NEXTAUTH_URL</code>=공개 URL 단독 메커니즘 (<code>--forwarded-allow-ips</code>는 이미지에 없음 — 금지)</p></div>
     <div class="card gold"><h3>🏗️ prod 전환 체크</h3><p>RETAIN·백업·per-AZ NAT·스코프 IAM·로그 — 각 항목 <code>PROD TODO</code></p></div>
     <div class="card pink"><h3>🕳️ addListener 0.0.0.0/0</h3><p>CDK 기본 <code>open:true</code>가 SG allowlist 옆에 전세계 오픈 규칙을 <b>조용히 추가</b> → 모든 리스너에 <code>open:false</code> + 배포 후 SG 실사</p></div>
-    <div class="card teal"><h3>⛔ GPT-5.6 금지</h3><p>Codex 인증 목록 외 모델 — 툴 사용 시 <code>namespace</code> 타입이 Mantle 400 유발("high demand"로 오인 표시). <b>5.5/5.4만 제시</b></p></div>
+    <div class="card teal"><h3>🧪 GPT-5.6 스모크 테스트</h3><p><b>5.6 Sol/Terra/Luna 정식 지원</b> — LiteLLM <code>v1.98.0</code> 핀에 5.6 라우팅 포함(v1.93.0부터 stable), Mantle도 Codex <code>namespace</code> 툴 타입을 서버 측에서 수용. 배포 후 <b>멀티턴·툴 사용 Codex 세션</b> 1회로 확인하고 온보딩(5.5/5.4는 폴백 페어)</p></div>
     <div class="card gold"><h3>📐 메트릭 카디널리티</h3><p>EMF 디멘전은 Model/Team(유한)만 — <b>사용자는 property</b>(무한 집합=메트릭 과금 폭발). 사용자별 뷰는 Logs Insights. SEARCH 범례엔 dynamic label 필수</p></div>
   </div>
   <p class="src">근거: shared/reference/constraints.md (실 배포에서 발견·역반영된 항목)</p>
@@ -652,7 +662,7 @@
       <ul style="margin-top:2px">
         <li>대상 계정에 <b>VPC/ECS/RDS/Lambda/APIGW/ALB/ACM/IAM</b> 생성 권한</li>
         <li><b>게이트웨이 리전 + us-east-1</b> 양쪽 모두 <code>cdk bootstrap</code> 가능</li>
-        <li><b>Bedrock 모델 액세스</b> 활성화 — Claude(게이트웨이 리전), GPT-5.x/Mantle(us-east-1)</li>
+        <li><b>Bedrock 모델 액세스</b> 활성화 — Claude(게이트웨이 리전), <b>GPT-5.6 Sol/Terra/Luna · 5.5 · 5.4</b>/Mantle(us-east-1)</li>
         <li><b>AWS Marketplace</b> 구독 가능(Mantle 첫 호출 자동 구독)</li>
       </ul>
     </div>
@@ -682,12 +692,12 @@
 <!-- 13 PREREQUISITES OS INSTALL -->
 <section class="slide">
   <div class="kicker">전제조건 · 로컬 툴체인 설치</div>
-  <h2>Docker · Node · CDK · AWS CLI — <span class="u">OS별 설치 + 확인</span></h2>
+  <h2>Docker(권장) · Node · CDK · AWS CLI — <span class="u">OS별 설치 + 확인</span></h2>
   <div class="grid g3" style="flex:1;min-height:0">
     <div class="term">
       <div class="term-bar"><span class="term-dot r"></span><span class="term-dot y"></span><span class="term-dot g"></span><span class="term-title">🍎 macOS — zsh</span></div>
       <div class="term-body">
-<span class="cm"># 1) Docker Desktop 설치 (데몬 필수)</span>
+<span class="cm"># 1) Docker Desktop 설치 (권장 — 없으면 imageBuild.mode='codebuild')</span>
 <span class="prompt">$</span> brew install --cask docker
 <span class="cm"># 설치 후 Applications에서 Docker.app 1회 실행 → 데몬 기동</span>
 
@@ -778,7 +788,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
 <span class="h">⚠️ WSL과 PowerShell을 섞지 말 것 — cdk deploy를 실행할 셸 한쪽에만 설치</span></div>
     </div>
   </div>
-  <p class="src">스크롤하여 전체 출력 확인 · 하나라도 ❌면 Phase 1 Discovery 진행 금지 · 근거: shared/reference/prerequisites.md §1</p>
+  <p class="src">스크롤하여 전체 출력 확인 · Docker는 권장(없으면 CodeBuild 빌드) · <b>Node · CDK · AWS CLI</b>가 ❌면 Phase 1 Discovery 진행 금지 · 근거: shared/reference/prerequisites.md §1</p>
 </section>
 
 <!-- 14 INSTALL -->
@@ -931,7 +941,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
   </div>
   <div class="card gold" style="margin-top:10px">
     <h3>🔧 Group명 = team_alias가 같아야 하는 이유</h3>
-    <p style="margin:2px 0">Token Lambda(<code>_resolve_team_id</code>)는 검증된 <code>cognito:groups</code> 중 <code>teamGroupPrefix</code>에 맞는 <b>하나</b>를 그대로 <code>team_alias</code>로 씁니다(<code>require-single-team-group</code>: 0개·다중이면 거부). Identity Store 호출·매핑 테이블·if/else 분기 없음 — 2번 Group명과 4번 team_alias가 다르면 엉뚱한 팀으로 연결됩니다. ⚠️ 토큰은 <b>access token만</b> 허용(<code>id_token</code>은 401).</p>
+    <p style="margin:2px 0">Token Lambda(<code>_resolve_team_id</code>)는 검증된 <code>cognito:groups</code> 중 <code>teamGroupPrefix</code>에 맞는 <b>하나</b>를 그대로 <code>team_alias</code>로 씁니다(<code>require-single-team-group</code>: 0개·다중이면 거부). Identity Store 호출·매핑 테이블·if/else 분기 없음 — 2번 Group명과 4번 team_alias가 다르면 엉뚱한 팀으로 연결됩니다. ⚠️ 클라이언트는 <b>id_token</b>을 보냅니다(access token엔 <code>email</code> claim이 없어 로그가 <code>sub</code> UUID로 찍힘; authorizer는 <code>authorizationScopes</code> 없이 id_token 수용).</p>
   </div>
   <p class="src">org-sso 대비: permission set → Cognito User Pool Group · <code>aws sso login</code> → <code>llmgw-login</code> · 근거: shared/reference/account-instance-setup.md · shared/patterns/lambda-handlers.md · shared/reference/litellm-admin-guide.md</p>
 </section>
@@ -1043,7 +1053,7 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
       </a>
       <p class="src" style="margin-top:12px">llm-gateway.daradat.cloud/llm-gateway-governance-skill.zip</p>
     </div>
-    <p class="src" style="margin-top:14px">llm-gateway-governance-skill · Kiro · Claude Code · Codex</p>
+    <p class="src" style="margin-top:14px">AWS GenAI Lab · llm-gateway-governance-skill · Kiro · Claude Code · Codex</p>
   </div>
 </section>
 
@@ -1051,8 +1061,9 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
 
 <div class="dots" id="dots"></div>
 <footer>
-  <div class="brand"><b>LLM Gateway Governance</b> · AWS Solution Skill</div>
+  <div class="brand"><b>AWS GenAI Lab</b> · LLM Gateway Governance Skill</div>
   <div class="nav">
+    <button onclick="toggleFull()" title="전체화면 (F)">⛶ 전체화면</button>
     <button onclick="go(cur-1)">← 이전</button>
     <span class="count" id="count">1 / 24</span>
     <button onclick="go(cur+1)">다음 →</button>
@@ -1073,10 +1084,22 @@ aws-cli/2.22.9 Python/3.13.1 Windows/10</span>
     count.textContent=(cur+1)+' / '+slides.length;
     bar.style.width=((cur+1)/slides.length*100)+'%';
   }
+  function toggleFull(){
+    var el=document.documentElement;
+    var isFull=document.fullscreenElement||document.webkitFullscreenElement;
+    if(!isFull){
+      var req=el.requestFullscreen||el.webkitRequestFullscreen;
+      if(req)req.call(el);
+    }else{
+      var exit=document.exitFullscreen||document.webkitExitFullscreen;
+      if(exit)exit.call(document);
+    }
+  }
   document.addEventListener('keydown',function(e){
     if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();go(cur+1);}
     else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();go(cur-1);}
     else if(e.key==='Home')go(0); else if(e.key==='End')go(slides.length-1);
+    else if(e.key==='f'||e.key==='F'){e.preventDefault();toggleFull();}
   });
   document.getElementById('deck').addEventListener('click',function(e){
     if(e.target.closest('a,button,.dot,table,.flow,.arch,.timeline,.vpc,.card'))return;

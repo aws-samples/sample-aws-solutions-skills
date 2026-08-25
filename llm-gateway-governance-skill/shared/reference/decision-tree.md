@@ -63,7 +63,7 @@ The general mechanism: **map each team's authorization unit → its own LiteLLM 
 
 - Claude family via `bedrock/` (Anthropic Messages/Converse) — Guardrail-compatible, tokenless SigV4.
 - GPT family via `bedrock_mantle/` (OpenAI Responses route) — **NOT** Guardrail-compatible (Bedrock Guardrails are bedrock-runtime only), and **NOT SigV4**: needs a runtime-minted Bearer token in `BEDROCK_MANTLE_API_KEY` (see `constraints.md` → "LiteLLM image + Mantle Bearer-token auth").
-- **GPT tier = `gpt-5.5` / `gpt-5.4` only — ⛔ never offer `gpt-5.6-*`**, even if asked for "the newest GPT": not on OpenAI's certified Codex↔Bedrock model list, and it breaks Codex tool-use (Codex `namespace` tool type → Mantle `400 validation_error`, shown misleadingly as "high demand" reconnects). Redirect to `gpt-5.5`/`gpt-5.4`; see `constraints.md` → "GPT-5.6 is not a valid model choice".
+- **GPT tiers = `gpt-5.6-sol` (flagship coding/agentic, 1M context) / `gpt-5.6-terra` (balanced) / `gpt-5.6-luna` (economy/latency) / `gpt-5.5` (proven flagship) / `gpt-5.4` (proven economy)** — all `bedrock_mantle/`, all through the same us-east-1 peering path. ⛔ **Any `gpt-5.6-*` alias carries a mandatory post-deploy Codex smoke test** (real-deploy incident history + open Codex-CLI issues — multi-turn tool-using session, `web_search="disabled"`) before Phase 6 onboarding; keep `gpt-5.5`/`gpt-5.4` offered as the fallback pair. See `constraints.md` → the GPT-5.6 gate.
 - Always verify the exact model IDs / regional availability with **AWS Knowledge MCP** and `aws bedrock list-inference-profiles` before emitting `lib/config/constants.ts` (model IDs are volatile — never hard-code blindly). **Do not assume a `us.` prefix** — recent (2026) Claude models (Opus 4.8, Sonnet 5, Haiku 4.5, Fable 5) are `global.`-only; a `us.` id returns `The provided model identifier is invalid.`
 - **Fable/Mythos-class models** (e.g. `claude-fable-5`) require the account data-retention mode `provider_data_share` set **per region** (Bedrock control-plane REST API) — a GATE-1 approval item (30-day Anthropic retention + human review). See `constraints.md`.
 - **Claude Code client**: emit **all four** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` vars — omitting the Fable var hides the Fable tier from the `/model` picker.
@@ -93,7 +93,7 @@ If any `bedrock_mantle/` model is offered, deploy `MantleNetworkStack` (us-east-
 | Knob | Where | Guidance |
 |---|---|---|
 | Aurora ACU min/max | `data.minCapacityAcu` / `maxCapacityAcu` | Dev: 0.5 / 4. Prod: raise min for steady traffic. |
-| LiteLLM task size | `litellm.cpu` / `memoryLimitMiB` / `desiredCount` | Dev: 2048 / 4096 / 1. |
+| LiteLLM task size | `litellm.cpu` / `memoryLimitMiB` / `desiredCount` | Dev: 2048 / **4096** / 1. Do **not** drop `memoryLimitMiB` to 2048 (real incident): the image with all callbacks loaded OOM-kills during boot (`exitCode 137`), the ECS circuit breaker retries 5× and rolls the deploy back. 4096 is the floor. |
 | NAT gateways | `network.natGateways` | Dev: 1 (cost). Prod: one per AZ (HA). |
 | Aurora engine version | `data.engineVersion` | Verify it exists in the target region (`describe-db-engine-versions`). |
 

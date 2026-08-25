@@ -121,6 +121,31 @@ curl -s -X POST "$LITELLM_BASE/key/generate" \
 ```
 Or via the UI: **Virtual Keys** → **+ Create New Key** → pick the **Team**, set an optional per-key budget.
 
+### 2.4 Adding a new model to an ALREADY-deployed environment (allowlist migration)
+
+Adding a model to `constants.ts`/`config.yaml` and redeploying makes the gateway *route* it — but **no existing
+team can call it yet** if that team has a `models` allowlist: `TIER_CONFIG` seeds a team only at its first-ever
+creation (Hard Constraint #13) and is never consulted again. A developer on an allowlisted team then gets
+`team not allowed to access model` even though `GET /v1/models` shows the new alias.
+
+For each allowlisted team (e.g. after adding the `gpt-5.6-*` tiers):
+
+```bash
+# 1. Find the team and its current allowlist
+curl -s "$LITELLM_BASE/team/list" -H "Authorization: Bearer $MASTER_KEY" \
+  | jq '.[] | {team_id, team_alias, models}'
+
+# 2. Append the new alias(es) — send the FULL desired list, not a delta
+curl -s -X POST "$LITELLM_BASE/team/update" \
+  -H "Authorization: Bearer $MASTER_KEY" -H "Content-Type: application/json" \
+  -d '{"team_id": "<team_id>", "models": ["gpt-5.4", "gpt-5.6-luna", "claude-sonnet-5", "claude-haiku-4-5"]}' | jq .
+```
+
+Or via the UI: **Teams** → the team → edit **Models**. Teams with **no** allowlist (unrestricted) pick up new
+models automatically and need nothing. Existing virtual keys inherit the team change on their next use — no key
+reissue. ⚠️ If the new model is a `gpt-5.6-*` alias, complete the post-deploy Codex smoke test (constraints.md
+GPT-5.6 gate) **before** widening any team's allowlist to include it.
+
 ---
 
 ## 3. Checking logs / traces

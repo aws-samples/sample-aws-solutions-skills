@@ -187,6 +187,12 @@ mcp_settings:
   require_approval: "never"
 ```
 
+> The `aws_sigv4` auth type is first-class for this pairing on the v1.98.0 pin — LiteLLM's `aws_service_name`
+> even defaults to `bedrock-agentcore` (verified in the installed source, `experimental_mcp_client/client.py`).
+> Newer optional capabilities on this pin (per-key MCP entitlements; server-side MCP execution via
+> `/v1/responses`) are summarized in `litellm-gateway.md` §1.3 — client-side `/mcp` registration remains the
+> primary path.
+
 ## Verification
 
 - `aws bedrock-agentcore-control list-gateway-targets --gateway-identifier <id> --region us-east-1` → target `web-search-tool` status `READY`.

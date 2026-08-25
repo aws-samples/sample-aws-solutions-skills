@@ -1,8 +1,8 @@
 # Pattern: LiteLLM Governance Gateway (config / image / MCP)
 
-> **Reflects current architecture (v1.2)**: web search uses the **AgentCore Web Search Tool** (built-in connector) — Tavily has been removed entirely → `shared/patterns/agentcore-websearch.md`. GPT-5.x (Mantle) is reached in **us-east-1** over cross-region VPC peering, routed via `BEDROCK_MANTLE_REGION`/`BEDROCK_MANTLE_API_BASE`=us-east-1 → `shared/patterns/mantle-peering.md`.
+> **Reflects current architecture (v1.3)**: LiteLLM base pin is **`v1.98.0`** (stable GA line; the old `v1.89.0-rc.1` pin is retired). GPT tiers now include **GPT-5.6 Sol/Terra/Luna** alongside GPT-5.5/5.4 (see `constraints.md` → the GPT-5.6 gate: 5.6 deployments require a post-deploy Codex smoke test). Web search uses the **AgentCore Web Search Tool** (built-in connector) — Tavily has been removed entirely → `shared/patterns/agentcore-websearch.md`. GPT-5.x (Mantle) is reached in **us-east-1** over cross-region VPC peering, routed via `BEDROCK_MANTLE_REGION`/`BEDROCK_MANTLE_API_BASE`=us-east-1 → `shared/patterns/mantle-peering.md`.
 >
-> ⚠️ **Auth is NOT uniform.** Claude (`bedrock/`) is tokenless SigV4 via the ECS Task Role. **Mantle (`bedrock_mantle/`, GPT-5.x) is Bearer-token — it has no SigV4 path** on the Responses route (verified by extracting the actual installed source from the pinned image; the earlier "SigV4 shipped in v1.87.2 / #29788" claim was **false** and is retracted). A short-term Bedrock API key is minted at runtime from the Task Role's own credentials by a LiteLLM callback and kept fresh in-process — no long-term secret, no scheduler. It **must** go in `BEDROCK_MANTLE_API_KEY`, never `AWS_BEARER_TOKEN_BEDROCK` (boto3-reserved; setting it breaks Claude's SigV4). See `shared/reference/constraints.md` → "LiteLLM image + Mantle Bearer-token auth".
+> ⚠️ **Auth is NOT uniform.** Claude (`bedrock/`) is tokenless SigV4 via the ECS Task Role. **Mantle (`bedrock_mantle/`, GPT-5.x) is Bearer-token in this skill.** Verified by extracting the installed source from the `v1.98.0` image (2026-08-24): `BedrockMantleAuthMixin.sign_request` uses a Bearer token when one is present (`litellm_params.api_key` → `BEDROCK_MANTLE_API_KEY` → `AWS_BEARER_TOKEN_BEDROCK`) and **only otherwise** falls back to a new SigV4 path that signs with service name `"bedrock"` — whose correctness against the `bedrock-mantle` endpoint is disputed upstream (BerriAI/litellm#31475, open). This skill therefore **keeps the Bearer callback as the deterministic auth path**: a short-term Bedrock API key is minted at runtime from the Task Role's own credentials by a LiteLLM callback and kept fresh in-process — no long-term secret, no scheduler — and because Bearer takes precedence in the source, the callback fully bypasses the disputed SigV4 fallback. (History: on the old `v1.89.0-rc.1` pin there was **no SigV4 code path at all**; the even earlier "SigV4 shipped in v1.87.2 / #29788" claim was false and stays retracted.) The key **must** go in `BEDROCK_MANTLE_API_KEY`, never `AWS_BEARER_TOKEN_BEDROCK` (boto3-reserved; setting it breaks Claude's SigV4). See `shared/reference/constraints.md` → "LiteLLM image + Mantle Bearer-token auth".
 
 This pattern teaches how to configure the **LiteLLM Proxy** as a single governance gateway.
 It reproduces `services/litellm/` of the reference solution verbatim. The gateway handles all of the following in one place:
@@ -39,16 +39,20 @@ The full `services/litellm/config.yaml`:
 # Routing:
 #   - Claude (Opus 4.8 / Sonnet 5 / Fable 5 / Haiku 4.5) via bedrock/ (Anthropic
 #     Messages/Converse) -> bedrock-runtime (gateway region)
-#   - GPT-5.5 / GPT-5.4 via bedrock_mantle/ (OpenAI Responses) -> bedrock-mantle
-#     (us-east-1, reached over cross-region VPC peering)
+#   - GPT-5.6 Sol/Terra/Luna + GPT-5.5 / GPT-5.4 via bedrock_mantle/ (OpenAI
+#     Responses) -> bedrock-mantle (us-east-1, reached over cross-region VPC
+#     peering). 5.6 aliases require the post-deploy Codex smoke test
+#     (constraints.md GPT-5.6 gate) before developer onboarding.
 #
 # Auth: Claude (bedrock/) is tokenless — the ECS Task Role signs every request
-# with SigV4, nothing to rotate. GPT-5.5/5.4 (bedrock_mantle/) is DIFFERENT:
-# that route has no SigV4 support (verified against the actual installed source)
-# and requires a Bearer token. BEDROCK_MANTLE_API_KEY is minted at runtime from
-# the same Task Role's credentials and kept fresh by
+# with SigV4, nothing to rotate. GPT-5.x (bedrock_mantle/) is DIFFERENT: this
+# deployment authenticates it with a Bearer token. BEDROCK_MANTLE_API_KEY is
+# minted at runtime from the same Task Role's credentials and kept fresh by
 # callbacks/mantle_token_refresh.py -- still no long-term secret, but not
-# literally "tokenless" like Claude.
+# literally "tokenless" like Claude. (v1.98.0 added a SigV4 fallback on this
+# route, used only when no Bearer is present; it signs service "bedrock",
+# disputed upstream in #31475 -- the Bearer callback deliberately keeps us off
+# that fallback.)
 #
 # MCP (AgentCore Web Search):
 #   - LiteLLM calls the AgentCore Gateway's built-in Web Search Tool connector
@@ -85,30 +89,54 @@ model_list:
       aws_region_name: os.environ/AWS_REGION
       guardrails: ["bedrock-content-filter"]
 
-  # Bedrock Mantle models (GPT-5.5 / GPT-5.4) — Bearer token auth (NOT SigV4;
-  # verified against the actual installed source of this image tag). No
-  # api_key is set here in litellm_params on purpose: validate_environment()
-  # in bedrock_mantle/responses/transformation.py falls back to
-  # get_secret_str("BEDROCK_MANTLE_API_KEY"), which re-reads the live process
-  # environment on every call (no caching) -- so callbacks/mantle_token_refresh.py
-  # can keep it fresh in-process without ever needing a LiteLLM restart.
+  # Bedrock Mantle models (GPT-5.6 Sol/Terra/Luna + GPT-5.5 / GPT-5.4) — Bearer
+  # token auth in this deployment (verified against the installed v1.98.0
+  # source). No api_key is set here in litellm_params on purpose: the auth
+  # mixin resolves the Bearer via get_secret_str("BEDROCK_MANTLE_API_KEY"),
+  # which re-reads the live process environment on every call (no caching,
+  # re-verified on v1.98.0) -- so callbacks/mantle_token_refresh.py can keep it
+  # fresh in-process without ever needing a LiteLLM restart. A present Bearer
+  # also takes precedence over v1.98.0's new (upstream-disputed, #31475) SigV4
+  # fallback, so that fallback is never exercised.
   # NO guardrails key: Bedrock Guardrails are bedrock-runtime only, not Mantle.
   #
   # REGION PINNING (do NOT rely on MANTLE_REGION — it is NOT read by LiteLLM):
-  #   The bedrock_mantle provider's _resolve_region reads region from, in order:
+  #   The bedrock_mantle provider's _resolve_region reads region from, in order
+  #   (re-verified in the v1.98.0 source):
   #     1) litellm_params.aws_region_name  2) BEDROCK_MANTLE_API_BASE host
   #     3) BEDROCK_MANTLE_REGION  4) AWS_REGION_NAME  5) AWS_REGION  6) default.
   #   So GPT models set aws_region_name to BEDROCK_MANTLE_REGION (us-east-1, NOT
   #   the gateway region), and the CDK injects env BEDROCK_MANTLE_REGION=us-east-1
   #   + BEDROCK_MANTLE_API_BASE=https://bedrock-mantle.us-east-1.api.aws.
 
-  # OpenAI GPT-5.5 (Bedrock Mantle, OpenAI Responses API)
+  # OpenAI GPT-5.6 Sol (Bedrock Mantle, OpenAI Responses API) — flagship
+  # coding/agentic tier, 1M context. ⛔ requires the post-deploy Codex smoke
+  # test before onboarding (constraints.md GPT-5.6 gate).
+  - model_name: os.environ/GPT56_SOL_MODEL
+    litellm_params:
+      model: os.environ/GPT56_SOL_BACKEND
+      aws_region_name: os.environ/BEDROCK_MANTLE_REGION   # us-east-1 (NOT the gateway region)
+
+  # OpenAI GPT-5.6 Terra (Bedrock Mantle, OpenAI Responses API) — balanced tier.
+  - model_name: os.environ/GPT56_TERRA_MODEL
+    litellm_params:
+      model: os.environ/GPT56_TERRA_BACKEND
+      aws_region_name: os.environ/BEDROCK_MANTLE_REGION   # us-east-1 (NOT the gateway region)
+
+  # OpenAI GPT-5.6 Luna (Bedrock Mantle, OpenAI Responses API) — economy/latency tier.
+  - model_name: os.environ/GPT56_LUNA_MODEL
+    litellm_params:
+      model: os.environ/GPT56_LUNA_BACKEND
+      aws_region_name: os.environ/BEDROCK_MANTLE_REGION   # us-east-1 (NOT the gateway region)
+
+  # OpenAI GPT-5.5 (Bedrock Mantle, OpenAI Responses API) — proven flagship;
+  # fallback pair with GPT-5.4 if a 5.6 smoke test fails.
   - model_name: os.environ/GPT55_MODEL
     litellm_params:
       model: os.environ/GPT55_BACKEND
       aws_region_name: os.environ/BEDROCK_MANTLE_REGION   # us-east-1 (NOT the gateway region)
 
-  # OpenAI GPT-5.4 (Bedrock Mantle, OpenAI Responses API)
+  # OpenAI GPT-5.4 (Bedrock Mantle, OpenAI Responses API) — proven economy tier.
   - model_name: os.environ/GPT54_MODEL
     litellm_params:
       model: os.environ/GPT54_BACKEND
@@ -173,7 +201,7 @@ guardrails:
       default_on: true
 
   # Layer 2: Bedrock Guardrails (content filter + PII + denied topics).
-  # Only compatible with bedrock-runtime models (Claude). Not Mantle (GPT-5.5/5.4).
+  # Only compatible with bedrock-runtime models (Claude). Not Mantle (GPT-5.x).
   - guardrail_name: "bedrock-content-filter"
     litellm_params:
       guardrail: bedrock
@@ -193,10 +221,12 @@ Two routes coexist, and they authenticate **differently**:
 
 - **Claude** → `bedrock/` prefix → `bedrock-runtime` (Anthropic Messages/Converse). No `api_key` → LiteLLM signs
   with the **ECS Task Role via SigV4**. Tokenless, nothing to rotate. Each entry sets `guardrails: ["bedrock-content-filter"]`.
-- **GPT-5.5 / GPT-5.4** → `bedrock_mantle/` prefix → `bedrock-mantle` (OpenAI Responses). **No SigV4 path exists**
-  on this route (verified against the installed source). No `api_key` is set in `litellm_params` **on purpose**:
-  `validate_environment()` falls back to `get_secret_str("BEDROCK_MANTLE_API_KEY")`, which re-reads `os.environ`
-  on every call, so the `mantle_token_refresh` callback (Section 3) keeps the key fresh in-process. **No `guardrails` key.**
+- **GPT-5.x (5.6-sol/terra/luna, 5.5, 5.4)** → `bedrock_mantle/` prefix → `bedrock-mantle` (OpenAI Responses). This
+  deployment authenticates the route with a **Bearer token** (v1.98.0 does have a SigV4 fallback for Bearer-less
+  setups, but it signs service `"bedrock"` — disputed upstream in #31475 — and a present Bearer takes precedence, so
+  it is never exercised here). No `api_key` is set in `litellm_params` **on purpose**: the auth mixin falls back to
+  `get_secret_str("BEDROCK_MANTLE_API_KEY")`, which re-reads `os.environ` on every call (re-verified on v1.98.0),
+  so the `mantle_token_refresh` callback (Section 3) keeps the key fresh in-process. **No `guardrails` key.**
 
 **Backend model IDs** — Claude backends are `bedrock/global.anthropic.<model-id>` inference profiles. **Verify with
 `aws bedrock list-inference-profiles`; do not assume a `us.` prefix** — recent (2026) models are `global.`-only and a
@@ -236,6 +266,15 @@ before adding, don't assume GPT-5.x behavior generalizes.
 - `mcp_settings.require_approval: "never"` — no human approval step on a tool call (autonomous agent execution).
 - **Client-side note**: a developer's Claude Code must still register this MCP endpoint (`claude mcp add-json` +
   `headersHelper`); LiteLLM registering it server-side does not auto-enable it in the client. See `developer-onboarding.md`.
+- **Newer MCP capabilities on the v1.98.0 pin (informational — the client-side registration above stays the primary
+  path):** ① per-key/team/org MCP tool permissions ("MCP entitlements", v1.96.0) extend the `access_groups` model
+  already used here; ② `/v1/responses` supports **server-side MCP execution** — pass
+  `{"type": "mcp", "server_url": "litellm_proxy"}` and the proxy executes registered MCP tools itself, which could give
+  GPT-5.x (Responses API) traffic gateway-executed web search without any client registration. Treat ② as an **opt-in
+  enhancement to validate live before adopting**: tool-call interception by the proxy on this path has known friction
+  (see BerriAI/litellm#36649 — native Bedrock web search for GPT via Mantle, fix PRs open), and `/v1/messages`
+  (Claude Code's path) documents no server-side MCP execution at all — do not move Claude clients off `/mcp`
+  registration.
 
 ### 1.4 Guardrails — layered defense and its boundary
 
@@ -249,7 +288,7 @@ before adding, don't assume GPT-5.x behavior generalizes.
 | Model | Layer 1 hide-secrets | Layer 2 bedrock-content-filter |
 |------|:--:|:--:|
 | Claude (bedrock/) | ✅ (pre_call, global) | ✅ (explicit on the model entry) |
-| GPT-5.5/5.4 (bedrock_mantle/) | ✅ (pre_call, global) | ❌ (bedrock-runtime only, not applied) |
+| GPT-5.x (bedrock_mantle/: 5.6-sol/terra/luna, 5.5, 5.4) | ✅ (pre_call, global) | ❌ (bedrock-runtime only, not applied) |
 
 **Pitfall**: adding `guardrails` to a Mantle model entry breaks the call — Bedrock Guardrails are not compatible with
 `bedrock_mantle`. For content control over Mantle, use a mechanism other than Bedrock Guardrails.
@@ -258,10 +297,11 @@ before adding, don't assume GPT-5.x behavior generalizes.
 
 ## Section 2: Dockerfile + entrypoint.sh — ARM64 image (installs the Mantle token generator)
 
-> **v1.2 update**: the base image has **no `pip`** (uv-managed venv, pip stripped), so the one extra dependency
-> (`aws-bedrock-token-generator`, needed to mint the Mantle Bearer key) is installed by copying the `uv` binary from
-> its official image and running `uv pip install` into the existing venv. The earlier claim that Mantle used SigV4 and
-> needed "no extra dependency" was wrong (see the header note).
+> **v1.3 update**: base pin bumped to **`v1.98.0`** (stable GA line). Re-verified against the v1.98.0 image
+> (2026-08-24): the base **still has no `pip`** (uv-managed venv, pip stripped) and still does **not** bundle
+> `aws-bedrock-token-generator` — so the extra dependency (needed to mint the Mantle Bearer key) is installed exactly
+> as before: copy the `uv` binary from its official image and `uv pip install` into the existing venv. The Bearer
+> callback remains the auth path even though v1.98.0 added a SigV4 fallback (see the header note / constraints.md).
 
 ### 2.1 Dockerfile
 
@@ -271,16 +311,21 @@ The full `services/litellm/Dockerfile`:
 # LiteLLM proxy image for ECS Fargate (ARM64/Graviton).
 #
 # IMPORTANT (verified by extracting the actual installed source from this exact
-# image tag): the bedrock_mantle Responses API route
-# (litellm/llms/bedrock_mantle/responses/transformation.py) does NOT support
-# SigV4/IAM-role auth. Its validate_environment() requires a Bearer token
-# (BEDROCK_MANTLE_API_KEY or AWS_BEARER_TOKEN_BEDROCK) and raises ValueError if
-# neither is set -- there is no SigV4 code path in this file at all. GPT-5.5/5.4
-# therefore need a short-term Bedrock API key, generated at runtime from the ECS
-# Task Role's own credentials via aws-bedrock-token-generator (no long-term IAM
-# user, no static secret) and refreshed by a LiteLLM callback before it expires
-# (see callbacks/mantle_token_refresh.py).
-FROM ghcr.io/berriai/litellm:v1.89.0-rc.1
+# image tag, 2026-08-24): the bedrock_mantle auth mixin
+# (litellm/llms/bedrock_mantle/common_utils.py) uses a Bearer token when one is
+# present (litellm_params.api_key -> BEDROCK_MANTLE_API_KEY ->
+# AWS_BEARER_TOKEN_BEDROCK) and only otherwise falls back to SigV4 signed with
+# service name "bedrock" -- a fallback whose correctness against the
+# bedrock-mantle endpoint is disputed upstream (BerriAI/litellm#31475, open).
+# GPT-5.x therefore keeps the deterministic Bearer path: a short-term Bedrock
+# API key, generated at runtime from the ECS Task Role's own credentials via
+# aws-bedrock-token-generator (no long-term IAM user, no static secret) and
+# refreshed by a LiteLLM callback on every request (see
+# callbacks/mantle_token_refresh.py). A present Bearer bypasses the SigV4
+# fallback entirely. If you bump this tag, re-verify by extracting the real
+# source again (litellm package now lives under
+# /app/.venv/lib/python3.13/site-packages/litellm), not from release notes.
+FROM ghcr.io/berriai/litellm:v1.98.0
 
 # The base image's venv has no pip (uv-managed, pip stripped from the final
 # layer). Pull the uv binary from its own official distroless image and use it
@@ -303,9 +348,13 @@ ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
 
 **WHY, item by item**:
 
-- **`FROM ghcr.io/berriai/litellm:v1.89.0-rc.1`** — ARM64/Graviton base with the bedrock_mantle Responses route. Do
-  **not** assume this route does SigV4 — it does not (see the file header). If you bump the tag, re-verify by extracting
-  the real `transformation.py` from the new tag, not from release notes.
+- **`FROM ghcr.io/berriai/litellm:v1.98.0`** — ARM64/Graviton base from the **stable GA line** (plain `vX.Y.0` tags are
+  the stable releases since ~v1.84; `-rc.N` are pre-releases — never pin an RC again). This tag ships the bedrock_mantle
+  Responses route **with the GPT-5.6 sol/terra/luna cost-map entries** (added in v1.93.0, PR #33412) and a
+  tool-type filter that now *drops* unsupported tool types with a warning instead of letting Mantle 400
+  (`namespace`/`tool_search` are accepted). Auth: Bearer-first with a disputed SigV4 fallback (file header). If you bump
+  the tag, re-verify by extracting the real source from the new tag (`common_utils.py` + `responses/transformation.py`
+  under `/app/.venv/lib/python3.13/site-packages/litellm/llms/bedrock_mantle/`), not from release notes.
 - **`COPY --from=ghcr.io/astral-sh/uv` + `uv pip install`** — the base image has no `pip` (`No module named pip`), so
   packages are added with `uv` into `/app/.venv`. This is the only supported way to add `aws-bedrock-token-generator`.
 - **Bundled files** — `user_trace.py` (Section 5), `mantle_token_refresh.py` (Section 3), `cloudwatch_usage.py` (Section 4), `config.yaml` (Section 1), `entrypoint.sh`.
@@ -327,19 +376,21 @@ The full `services/litellm/entrypoint.sh`:
 # Auth model:
 #   - Claude (bedrock/*) is SigV4 via the ECS Task Role — no tokens, nothing to
 #     rotate.
-#   - Bedrock Mantle (GPT-5.5 / GPT-5.4) does NOT support SigV4 on the Responses
-#     API route (verified against the actual installed LiteLLM source). It needs
-#     a Bearer token (BEDROCK_MANTLE_API_KEY), minted at runtime from this same
-#     Task Role's credentials and kept fresh in-process by the
+#   - Bedrock Mantle (GPT-5.6 sol/terra/luna, GPT-5.5, GPT-5.4) authenticates
+#     with a Bearer token (BEDROCK_MANTLE_API_KEY), minted at runtime from this
+#     same Task Role's credentials and kept fresh in-process by the
 #     mantle_token_refresh LiteLLM callback (services/litellm/callbacks/) — still
-#     no long-term secret checked in or stored anywhere.
+#     no long-term secret checked in or stored anywhere. (v1.98.0 has a SigV4
+#     fallback for Bearer-less setups, but it signs service "bedrock" — disputed
+#     upstream, #31475 — and a present Bearer bypasses it; keep the callback.)
 #
 # Edge: CloudFront is removed — the ALB is the edge (HTTPS:443 for acm, HTTP:80 for
 # http), forwarding X-Forwarded-Proto/X-Forwarded-Host.
 # ⚠️ Do NOT pass `--forwarded-allow-ips` (or FORWARDED_ALLOW_IPS env): the pinned
 # image's litellm CLI does not have that option — the container dies instantly with
-# `Error: No such option: --forwarded-allow-ips` (exitCode 2, verified against the
-# actual image; the proxy_cli.py builds uvicorn args explicitly and reads neither).
+# `Error: No such option: --forwarded-allow-ips` (exitCode 2; re-verified on
+# v1.98.0: `litellm --help` still has no such flag and proxy_cli.py builds uvicorn
+# args explicitly, reading neither).
 # UI redirects therefore rely on PROXY_BASE_URL alone:
 #   acm  → PROXY_BASE_URL = https://<custom-domain> (set by the stack; redirects correct)
 #   http → PROXY_BASE_URL is empty; the /ui -> /ui/ 307 may come back as http://<host>
@@ -383,15 +434,20 @@ The full `services/litellm/callbacks/mantle_token_refresh.py`:
 ```python
 """
 LiteLLM custom callback: keeps BEDROCK_MANTLE_API_KEY fresh for the Bedrock
-Mantle Responses API route (GPT-5.5 / GPT-5.4) by SIGNING A FRESH TOKEN ON
-EVERY REQUEST -- no token caching, no TTL guessing, no background thread.
+Mantle Responses API route (GPT-5.6 sol/terra/luna, GPT-5.5, GPT-5.4) by
+SIGNING A FRESH TOKEN ON EVERY REQUEST -- no token caching, no TTL guessing,
+no background thread.
 
-Why this exists: the bedrock_mantle Responses API transformation
-(litellm/llms/bedrock_mantle/responses/transformation.py, verified by
-extracting the actual installed source from the pinned image tag) has NO
-SigV4/IAM-role code path -- it only accepts a Bearer token via
-BEDROCK_MANTLE_API_KEY or AWS_BEARER_TOKEN_BEDROCK and raises ValueError if
-neither is set.
+Why this exists: the bedrock_mantle auth mixin
+(litellm/llms/bedrock_mantle/common_utils.py, verified by extracting the
+actual installed source from the pinned v1.98.0 image tag, 2026-08-24) uses a
+Bearer token when present (litellm_params.api_key -> BEDROCK_MANTLE_API_KEY ->
+AWS_BEARER_TOKEN_BEDROCK) and only otherwise falls back to SigV4 signed with
+service name "bedrock" -- a fallback disputed upstream (#31475: arguably the
+wrong signing service name for the bedrock-mantle endpoint) and therefore not
+relied on. Keeping a fresh Bearer in BEDROCK_MANTLE_API_KEY makes auth
+deterministic and bypasses that fallback entirely. (On the previous
+v1.89.0-rc.1 pin there was no SigV4 path at all -- Bearer was mandatory.)
 
 CRITICAL: this callback intentionally sets BEDROCK_MANTLE_API_KEY, NOT
 AWS_BEARER_TOKEN_BEDROCK, even though validate_environment() accepts either.
@@ -761,9 +817,22 @@ user_trace_callback = UserTrace()
 - **`setdefault`, never assign** — a client that explicitly sets `trace_user_id` (or a team that layers
   its own metadata) wins; the callback only fills gaps. This keeps it safe to run on every request.
 - **Identity priority `user_id` → `user_email` → `key_alias`** — the Token Service mints keys with
-  `user_id` = the SSO/Cognito identity (see `lambda/token-service/`), so that field is the stable,
-  human-meaningful one; the others are fallbacks for keys minted outside the Token Service (e.g. a
-  master-key admin test).
+  `user_id` = the **human-readable** caller identity (see `lambda/token-service/`), so that field is the
+  meaningful one; the others are fallbacks for keys minted outside the Token Service (e.g. a master-key
+  admin test). ⚠️ **`user_id` must be human-readable, not an opaque id** (real incident): in
+  `cognito-native` mode the Token Service resolves the identity **email-first** (`email` →
+  `cognito:username` → `sub`) precisely because keying it on Cognito's `sub` UUID made every LiteLLM
+  spend-log / Admin-UI / Langfuse row read `cognito-native:915b9530-…` — unattributable to a human. The
+  immutable `sub` is preserved in the key's `metadata.cognito_sub` for audit/revocation. ⚠️ For `email` to
+  actually reach the Lambda, the client must send the **id_token** (a Cognito access token carries no
+  `email` claim) — so the authorizer sets **no `authorizationScopes`** (see `cdk-stacks.md` AuthStack and
+  `developer-onboarding.md` token helper). Send the access token instead and this falls back to the `sub`
+  UUID — the very incident above. In `org-sso` mode
+  `user_id` is `<account>:<username>` (readable). ⚠️ The Token Service deliberately mints `user_id` with
+  **no auth-source prefix** (bare `email` / `<account>:<username>`, not `cognito-native:…` / `org-sso:…`)
+  so logs read as pure human identity; the auth source stays legible in `key_alias`
+  (`{source}-{user_id}`) and `metadata.auth_mode` instead, so audit/attribution is unaffected. Keep this
+  contract if you change the Token Service: the whole point of the trace hook is a *legible* per-human view.
 - **Never raises + WARNING-level logger** — identical discipline to `cloudwatch_usage` (Section 4): a
   trace-decoration bug must degrade to a log line, not a 500. The explicit stdout handler exists for the
   same reason as in Section 3 (this build swallows module logs otherwise).

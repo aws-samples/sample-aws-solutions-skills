@@ -1,10 +1,13 @@
 # Pattern — Bedrock Mantle in us-east-1 via cross-region VPC peering
 
 Bedrock **Mantle** (OpenAI GPT-5.x via the Responses route, `bedrock_mantle/`) is invoked at
-`https://bedrock-mantle.<region>.api.aws`. Mantle is available in **us-east-1 (Virginia)**, so to keep
-that traffic **private** and pin it to Virginia regardless of where the gateway platform runs
-(`config.awsRegion`, e.g. us-east-2), we reach it over a **cross-region VPC peering** connection to a
-small peer VPC in us-east-1 that holds the `bedrock-mantle` PrivateLink endpoint.
+`https://bedrock-mantle.<region>.api.aws`. This skill pins Mantle to **us-east-1 (Virginia)** — the
+one region where every offered GPT tier is served in-region (per-model availability varies:
+GPT-5.6 Sol/Terra/Luna are in-region in us-east-1/us-east-2, us-west-2 has only Terra/Luna;
+verify per model at Design time). To keep that traffic **private** and pinned regardless of where
+the gateway platform runs (`config.awsRegion`, e.g. us-east-2), we reach it over a **cross-region
+VPC peering** connection to a small peer VPC in us-east-1 that holds the `bedrock-mantle`
+PrivateLink endpoint.
 
 This is two stacks (CfnRoute is regional, so each region's routes live in a same-region stack):
 - **MantleNetworkStack** (us-east-1): peer VPC + `bedrock-mantle` interface endpoint + the peering
@@ -21,8 +24,9 @@ This is two stacks (CfnRoute is regional, so each region's routes live in a same
 > ⚠️ `MANTLE_REGION` is a doc alias only — it is **NOT read** by the provider; relying on it leaves
 > the endpoint at `AWS_REGION` (the gateway region) and the call fails with
 > "Cannot connect to host bedrock-mantle.<gw-region>.api.aws".
-> ⚠️ **Auth is a Bearer token, NOT SigV4.** The `bedrock_mantle` Responses route has no SigV4 path
-> (verified against the installed source). A short-term Bedrock API key is minted at runtime from the
+> ⚠️ **Auth is a Bearer token.** The v1.98.0 `bedrock_mantle` route uses a Bearer when present and only
+> otherwise an upstream-disputed SigV4 fallback (BerriAI/litellm#31475 — not relied on; verified against
+> the installed source). A short-term Bedrock API key is minted at runtime from the
 > Task Role into env `BEDROCK_MANTLE_API_KEY` (never `AWS_BEARER_TOKEN_BEDROCK` — boto3-reserved,
 > breaks Claude) by the `mantle_token_refresh` LiteLLM callback. The Task Role still needs the
 > `bedrock-mantle` actions on `project/*` (+`CallWithBearerToken` on `*`) and `aws-marketplace:Subscribe`.

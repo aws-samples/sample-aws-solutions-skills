@@ -18,7 +18,7 @@
 > Core design principles:
 > - **Cross-stack coupling only via the `*Exports` interfaces (append-only)** — validated at compile time. Cross-region wiring uses `crossRegionReferences: true`.
 > - **Runtime-only wiring (LiteLLM internal URL → Token Service) references the SSM Parameter Store by "name"** (avoids deploy-time cross-refs).
-> - **Claude auth is tokenless (SigV4 Task Role); Mantle (GPT-5.x) is Bearer-token** — its Responses route has no SigV4 path, so a short-term key is minted at runtime from the Task Role into `BEDROCK_MANTLE_API_KEY` (never `AWS_BEARER_TOKEN_BEDROCK`) by a LiteLLM callback (see `litellm-gateway.md`). No long-term secret, no external scheduler.
+> - **Claude auth is tokenless (SigV4 Task Role); Mantle (GPT-5.x) is Bearer-token** — a short-term key is minted at runtime from the Task Role into `BEDROCK_MANTLE_API_KEY` (never `AWS_BEARER_TOKEN_BEDROCK`) by a LiteLLM callback (see `litellm-gateway.md`; the v1.98.0 route's Bearer-less SigV4 fallback is upstream-disputed and bypassed by a present Bearer). No long-term secret, no external scheduler.
 > - **The region is authoritative via `config.awsRegion`** (`bin/app.ts`: `config.awsRegion ?? CDK_DEFAULT_REGION ?? AWS_REGION`). AgentCoreGateway and MantleNetwork are pinned to us-east-1.
 > - **The ALB is the public edge** (always internet-facing: acm = HTTPS:443, http = HTTP:80; SG ingress restricted to `albIngressCidrs`). A separate **internal ALB (:4000)** is kept for the Token Service. CloudFront is removed.
 
@@ -481,8 +481,13 @@ export const MODELS = {
   CLAUDE_SONNET: { litellmName: 'claude-sonnet-5',   backend: 'bedrock/global.anthropic.claude-sonnet-5' },
   CLAUDE_HAIKU:  { litellmName: 'claude-haiku-4-5',  backend: 'bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0' },
   CLAUDE_FABLE:  { litellmName: 'claude-fable-5',    backend: 'bedrock/global.anthropic.claude-fable-5' }, // Mythos-class: requires provider_data_share opt-in (per region) — see constraints.md
-  GPT55: { litellmName: 'gpt-5.5', backend: 'bedrock_mantle/openai.gpt-5.5' }, // responses API, Bearer token auth (not SigV4)
-  GPT54: { litellmName: 'gpt-5.4', backend: 'bedrock_mantle/openai.gpt-5.4' }, // economy tier (~2x cheaper)
+  // GPT-5.6 family — ⛔ requires the post-deploy Codex smoke test before onboarding (constraints.md GPT-5.6 gate)
+  GPT56_SOL:   { litellmName: 'gpt-5.6-sol',   backend: 'bedrock_mantle/openai.gpt-5.6-sol' },   // flagship coding/agentic, 1M context
+  GPT56_TERRA: { litellmName: 'gpt-5.6-terra', backend: 'bedrock_mantle/openai.gpt-5.6-terra' }, // balanced default
+  GPT56_LUNA:  { litellmName: 'gpt-5.6-luna',  backend: 'bedrock_mantle/openai.gpt-5.6-luna' },  // economy/latency tier
+  GPT55: { litellmName: 'gpt-5.5', backend: 'bedrock_mantle/openai.gpt-5.5' }, // proven flagship — fallback if a 5.6 smoke test fails
+  GPT54: { litellmName: 'gpt-5.4', backend: 'bedrock_mantle/openai.gpt-5.4' }, // proven economy tier (~2x cheaper than 5.5)
+  // All GPT entries: responses API, Bearer token auth via the mantle_token_refresh callback (see litellm-gateway.md)
 } as const;
 
 /** Only assumed-role principals from IAM Identity Center are accepted (org-sso mode). */
@@ -996,6 +1001,12 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
         CLAUDE_HAIKU_BACKEND: MODELS.CLAUDE_HAIKU.backend,
         CLAUDE_FABLE_MODEL: MODELS.CLAUDE_FABLE.litellmName,
         CLAUDE_FABLE_BACKEND: MODELS.CLAUDE_FABLE.backend,
+        GPT56_SOL_MODEL: MODELS.GPT56_SOL.litellmName,
+        GPT56_SOL_BACKEND: MODELS.GPT56_SOL.backend,
+        GPT56_TERRA_MODEL: MODELS.GPT56_TERRA.litellmName,
+        GPT56_TERRA_BACKEND: MODELS.GPT56_TERRA.backend,
+        GPT56_LUNA_MODEL: MODELS.GPT56_LUNA.litellmName,
+        GPT56_LUNA_BACKEND: MODELS.GPT56_LUNA.backend,
         GPT55_MODEL: MODELS.GPT55.litellmName,
         GPT55_BACKEND: MODELS.GPT55.backend,
         GPT54_MODEL: MODELS.GPT54.litellmName,
@@ -1058,11 +1069,12 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
     });
 
     // Auth model: Claude (bedrock/) is tokenless SigV4 via the Task Role. Bedrock
-    // Mantle (GPT-5.5/5.4) has NO SigV4 path on its Responses route — it uses a
-    // Bearer token minted at runtime into BEDROCK_MANTLE_API_KEY by the
-    // mantle_token_refresh callback (services/litellm/callbacks/), refreshed
-    // in-process, no long-term secret and no external scheduler. See
-    // constraints.md "LiteLLM image + Mantle Bearer-token auth".
+    // Mantle (GPT-5.x) uses a Bearer token minted at runtime into
+    // BEDROCK_MANTLE_API_KEY by the mantle_token_refresh callback
+    // (services/litellm/callbacks/), refreshed in-process, no long-term secret
+    // and no external scheduler. (v1.98.0 added an upstream-disputed SigV4
+    // fallback on that route; a present Bearer bypasses it — keep the callback.)
+    // See constraints.md "LiteLLM image + Mantle Bearer-token auth".
 
     // ---- ALB(s): the ALB is the edge now (CloudFront/CdnStack removed) --------
     // An INTERNAL ALB (HTTP:4000) always exists so the Token Service reaches LiteLLM
@@ -1202,7 +1214,7 @@ export class LiteLLMStack extends cdk.Stack implements LiteLLMExports {
 ```
 
 **WHY — gateway essentials:**
-- **Two auth models, and the distinction is the heart of the design.** Claude (`bedrock:` Converse + ApplyGuardrail) is **tokenless SigV4** via the Task Role — no key to store/rotate. Mantle (the `bedrock-mantle` actions scoped to `project/*` + `CallWithBearerToken`) has **no SigV4 path**, so a short-term Bearer key is minted at runtime from the same Task Role into `BEDROCK_MANTLE_API_KEY` by the `mantle_token_refresh` callback — still no long-term secret and no external scheduler, but it is a Bearer token, not SigV4. `bedrock-agentcore:InvokeGateway` (Web Search) is SigV4. (Mantle auto-subscribes on first call via `aws-marketplace:Subscribe`.) ⚠️ Never set `AWS_BEARER_TOKEN_BEDROCK` — boto3 would apply it to Claude too and 403 all Claude models.
+- **Two auth models, and the distinction is the heart of the design.** Claude (`bedrock:` Converse + ApplyGuardrail) is **tokenless SigV4** via the Task Role — no key to store/rotate. Mantle (the `bedrock-mantle` actions scoped to `project/*` + `CallWithBearerToken`) authenticates with a **Bearer token**: a short-term key is minted at runtime from the same Task Role into `BEDROCK_MANTLE_API_KEY` by the `mantle_token_refresh` callback — still no long-term secret and no external scheduler (v1.98.0's Bearer-less SigV4 fallback is upstream-disputed and bypassed by a present Bearer). `bedrock-agentcore:InvokeGateway` (Web Search) is SigV4. (Mantle auto-subscribes on first call via `aws-marketplace:Subscribe`.) ⚠️ Never set `AWS_BEARER_TOKEN_BEDROCK` — boto3 would apply it to Claude too and 403 all Claude models.
 - **The `secrets` vs `environment` distinction matters (security):**
   - `secrets` (Secrets Manager injection): `LITELLM_MASTER_KEY`, `DATABASE_PASSWORD/HOST/USER`, **and the Langfuse trace keys (`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` from the shared `data.langfuseSharedSecret`)** — all sensitive values go through `ecs.Secret.fromSecretsManager`. Plaintext is not exposed in the task definition.
   - `environment` (plaintext): only non-sensitive values like model aliases/region/SSM names/guardrail ID/`LANGFUSE_HOST`.
@@ -1713,7 +1725,7 @@ AuthStack fronts a VPC Lambda that returns or issues a LiteLLM virtual key cache
 - `org-sso` (default): API Gateway REST method uses `AuthorizationType.IAM`; Token Lambda trusts `requestContext.identity.userArn`, parses `AWSReservedSSO_...`, and maps permission set name to `team_alias`.
 - `cognito-native`: AuthStack **creates** an Amazon Cognito User Pool (the sole identity source — no external IdP, no IdC), a Hosted UI domain, an app client (Authorization Code + PKCE, loopback redirect), and one **User Pool Group per team**. The API Gateway REST method uses a **Cognito User Pools authorizer**, which validates the JWT before the Lambda runs; the Token Lambda reads the verified `cognito:groups` claim from `requestContext.authorizer.claims` and maps the single matching group name to `team_alias`. **No Identity Store, no `identitystore:*` IAM.**
 
-> ⚠️ Do NOT generate an IdC-federated `account-sso` variant. An IdC account instance cannot host a SAML 2.0 customer-managed application (AWS-confirmed), so Cognito↔IdC federation is impossible; `cognito-native` uses Cognito as the sole store precisely to sidestep that. The API Gateway Cognito authorizer accepts only the **access token** (`token_use=access`); an id_token returns 401.
+> ⚠️ Do NOT generate an IdC-federated `account-sso` variant. An IdC account instance cannot host a SAML 2.0 customer-managed application (AWS-confirmed), so Cognito↔IdC federation is impossible; `cognito-native` uses Cognito as the sole store precisely to sidestep that. The API Gateway Cognito authorizer sets **no `authorizationScopes`**, so it accepts the **ID token** — the client sends the id_token because only it carries the `email` claim the Token Lambda logs as the LiteLLM `user_id` (an access token authenticates but carries no email → the log would show an opaque `sub` UUID). Both tokens carry `cognito:groups`, so team mapping is unaffected.
 
 ```typescript
 export class AuthStack extends cdk.Stack implements AuthExports {
@@ -1838,17 +1850,25 @@ export class AuthStack extends cdk.Stack implements AuthExports {
         authorizationType: apigw.AuthorizationType.IAM,
       });
     } else {
-      // cognito-native: the authorizer validates the Cognito access token
+      // cognito-native: the authorizer validates the Cognito JWT
       // (signature/issuer/audience/expiry) before the Lambda runs, exposing the
-      // verified claims (incl. cognito:groups) at requestContext.authorizer.claims.
+      // verified claims (incl. cognito:groups AND email) at
+      // requestContext.authorizer.claims.
       const authorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'CognitoNativeAuthorizer', {
         cognitoUserPools: [userPool!],
         identitySource: 'method.request.header.Authorization',
       });
+      // WHY no authorizationScopes: OAuth scopes exist only on ACCESS tokens, so
+      // setting them forces the authorizer to accept access tokens only — and a
+      // Cognito access token carries NO `email` claim. The client instead sends
+      // the ID token (which carries both email and cognito:groups); omitting
+      // scopes lets the authorizer accept it, so email reaches the Token Lambda
+      // (logged as the LiteLLM user_id) with zero extra API calls. Team
+      // authorization comes from cognito:groups, not scopes, so dropping them
+      // costs no access control.
       token.addMethod('POST', new apigw.LambdaIntegration(fn), {
         authorizationType: apigw.AuthorizationType.COGNITO,
         authorizer,
-        authorizationScopes: ['openid', 'email', 'profile'],
       });
     }
 

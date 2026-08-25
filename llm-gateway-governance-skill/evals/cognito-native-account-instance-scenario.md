@@ -42,7 +42,7 @@ A partner-owned (payer) account has only an IAM Identity Center **account instan
 - [ ] Must not grant `identitystore:*` or perform any Identity Store lookup in the Token Lambda.
 - [ ] Must not claim IdC issues OIDC JWTs to the native helper — Cognito is the sole issuer.
 - [ ] Must not hard-code group-to-tier `if` branches in the Lambda.
-- [ ] Must not send the id_token to the Cognito authorizer (it 401s; access token only).
+- [ ] Must send the **id_token** (not the access token) to the Cognito authorizer, and must set **no `authorizationScopes`** on it — only the id_token carries the `email` claim logged as the LiteLLM `user_id`; scopes would force access-token-only, yielding an opaque `sub` UUID in logs.
 - [ ] Must not assume CloudFront/CdnStack or a `*.cloudfront.net` base URL (removed — the ALB is the edge), and must not tie `certMode` to `authMode`.
 
 ## Pass criteria
