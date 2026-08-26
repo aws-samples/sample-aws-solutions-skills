@@ -756,6 +756,30 @@ def cmd_setup(cfg_path: Path, _cache_path: Path, outputs_arg) -> None:
     else:
         cfg["awsProfile"] = os.environ.get("AWS_PROFILE_NAME", "llm-gateway")
 
+    # ---- required-field validation: fail loudly, never write a broken config ---
+    # A PARTIAL deploy (cdk deploy <one-stack> --outputs-file outputs.json) silently
+    # replaces outputs.json with only that stack's outputs, so whole stacks' values
+    # go missing (see constraints.md -> "Deploy targeting"). Writing those as empty
+    # strings yields a config that only fails much later and confusingly -- e.g.
+    # authorizationEndpoint "https:///oauth2/authorize" (no host). Real incident.
+    required = ["gatewayUrl", "tokenServiceUrl"]
+    if auth_mode == "cognito-native":
+        required += ["appClientId", "authorizationEndpoint", "tokenEndpoint"]
+    else:
+        required += ["awsProfile"]
+    missing = [k for k in required if not str(cfg.get(k, "")).strip()]
+    # A URL field with no host ("https:///...") is present-but-broken -> treat as missing.
+    missing += [k for k in ("authorizationEndpoint", "tokenEndpoint")
+                if k in cfg and "://" in cfg[k] and not cfg[k].split("://", 1)[1].split("/", 1)[0]]
+    if missing:
+        _log(f"ERROR: incomplete outputs -- missing/empty: {', '.join(sorted(set(missing)))}\n"
+             f"       (read from {outputs_path})\n"
+             "       A partial 'cdk deploy <stack> --outputs-file outputs.json' overwrites the\n"
+             "       file with only that stack's outputs. Repopulate all stacks with:\n"
+             "         cdk deploy --all --exclusively --outputs-file outputs.json\n"
+             "       Refusing to write a broken config.")
+        sys.exit(1)
+
     # ---- install: config + a stable copy of this file (repo-independent path) -
     DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -764,6 +788,17 @@ def cmd_setup(cfg_path: Path, _cache_path: Path, outputs_arg) -> None:
     installed = DEFAULT_CONFIG_DIR / "gateway_auth.py"
     if Path(__file__).resolve() != installed:
         shutil.copyfile(Path(__file__).resolve(), installed)
+    # POSIX only: Codex's auth.command execs this file DIRECTLY, with no shell
+    # (see constraints.md -> "Codex auth.command spawned without a shell"). The
+    # copy above does NOT preserve/grant the executable bit, so without this,
+    # every Codex call fails with "Permission denied (os error 13)" -- a
+    # real-deploy incident, easy to misdiagnose as a network/auth problem
+    # because the error only surfaces deep in Codex's own debug logs, not in
+    # LiteLLM. _restrict_perms() alone is not enough: it sets 0600 (user
+    # read/write, no execute) for confidentiality, which is a DIFFERENT
+    # requirement from "must be executable." Do both, in this order.
+    if os.name != "nt":
+        os.chmod(installed, 0o700)
     # Legacy env file — still read by the POSIX .sh helpers (URLs only, no secrets).
     (DEFAULT_CONFIG_DIR / "env").write_text(f"TOKEN_SERVICE_URL={token_url}\nGATEWAY_URL={gw}\n")
     _restrict_perms(DEFAULT_CONFIG_DIR / "env")
@@ -818,6 +853,10 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
+
+**Required-field validation (in `cmd_setup`'s golden code above — real-deploy incident):** after flattening `outputs.json` and **before** writing `~/.llm-gateway/config.json`, check that every field the client actually needs is non-empty: `gatewayUrl`, `tokenServiceUrl`, and (cognito-native) `appClientId` + the `authorizationEndpoint`/`tokenEndpoint` **host** / (org-sso) the `sso` fields. A partial deploy (see `constraints.md` → "Deploy targeting") can silently produce an `outputs.json` missing entire stacks' outputs, and writing those as empty strings produces a config that only fails much later and confusingly (e.g. a login URL with no host: `https:///oauth2/authorize`). If any required field is empty, **abort `setup` with a clear error** naming the missing field and suggesting `cdk deploy --all --exclusively --outputs-file outputs.json` to repopulate `outputs.json`, instead of writing the broken config silently.
+
+**Executable bit on the installed copy (POSIX — real-deploy incident):** the `shutil.copyfile()` above does not preserve/grant the execute bit, and `_restrict_perms()` sets `0600` (confidentiality — no execute), which is a **different** requirement. Codex execs `~/.llm-gateway/gateway_auth.py` **directly, with no shell**, so without an explicit `os.chmod(installed, 0o700)` every Codex call fails with `Permission denied (os error 13)` — visible only in Codex's own `RUST_LOG=debug` output, never on the LiteLLM side, so it is routinely misdiagnosed as a network/auth problem. Do both, in that order.
 
 **Launchers must resolve their own real path** so they run from any cwd (including a `~/.local/bin` symlink) — do **not** hardcode the repo directory:
 

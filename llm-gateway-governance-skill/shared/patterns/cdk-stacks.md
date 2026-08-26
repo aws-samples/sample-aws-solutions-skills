@@ -644,6 +644,14 @@ export class NetworkStack extends cdk.Stack implements NetworkExports {
     addIf('LogsEndpoint', ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS, vpceSg);
 
     // bedrock-agentcore endpoint (service name may not be in enum across versions).
+    // privateDnsEnabled=false: LiteLLM calls the AgentCore GATEWAY's own public URL
+    // (https://<gateway-id>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp)
+    // directly over the internet with SigV4 -- it never calls the control-plane API
+    // this VPC endpoint fronts. A privateDnsEnabled=true Route53 Private Hosted Zone
+    // for "bedrock-agentcore.<region>.amazonaws.com" is AUTHORITATIVE for that whole
+    // zone inside the VPC, so the per-gateway subdomain (*.gateway.bedrock-agentcore...)
+    // NXDOMAINs instead of falling back to public DNS -- this broke Web Search MCP
+    // in a real deploy ([Errno -2] Name or service not known). See constraints.md.
     new ec2.InterfaceVpcEndpoint(this, 'BedrockAgentCoreEndpoint', {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(
@@ -652,7 +660,7 @@ export class NetworkStack extends cdk.Stack implements NetworkExports {
       ),
       securityGroups: [agentcoreSg],
       subnets: privateSubnets,
-      privateDnsEnabled: true,
+      privateDnsEnabled: false,
     });
 
     new cdk.CfnOutput(this, 'VpcId', { value: vpc.vpcId });
@@ -667,7 +675,7 @@ export class NetworkStack extends cdk.Stack implements NetworkExports {
 - **Beware auto-wiring**: `addTargets()` / `grantConnect()` silently create SG rules "from the ALB SG to the target SG". Keeping ALB SG + service SG in the **same stack** (LiteLLM/Langfuse) keeps that auto-wiring stack-local.
 - **SGs with `allowAllOutbound=false`**: aurora/vpce/agentcore block outbound to narrow the data plane. Lambda is true (outbound required).
 - **Gateway endpoints (S3/DynamoDB) are free**, while Interface endpoints (bedrock-runtime/secrets/ssm/ecr/ecr-docker/logs) are paid but reach the AWS APIs **without traversing the NAT** → a win on both cost and security.
-- **The AgentCore endpoint may not be in the enum**, so the service name is specified directly via `InterfaceVpcEndpointService(com.amazonaws.{region}.bedrock-agentcore)`. A pattern resilient to CDK version differences.
+- **The AgentCore endpoint may not be in the enum**, so the service name is specified directly via `InterfaceVpcEndpointService(com.amazonaws.{region}.bedrock-agentcore)`. A pattern resilient to CDK version differences. AgentCore endpoint uses `privateDnsEnabled: false` — see `constraints.md` for why `true` breaks Web Search MCP.
 - **Cross-layer mapping**: `NetworkExports` exposes the shared-infra SGs + `privateSubnetCidrs`. Data (aurora SG) and Auth (lambda SG) consume them; LiteLLM/Langfuse consume only the VPC + CIDRs and own their SGs.
 
 ---

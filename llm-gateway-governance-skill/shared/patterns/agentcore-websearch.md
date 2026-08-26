@@ -206,3 +206,4 @@ mcp_settings:
 - **`AWS_IAM` inbound** keeps the design tokenless. If you instead pick `CUSTOM_JWT`, you must run an OIDC IdP and have LiteLLM obtain JWTs — avoid unless required.
 - **SLR**: deploy role needs `iam:CreateServiceLinkedRole` for AgentCore.
 - The `InvokeWebSearch` resource ARN uses the literal `aws` account segment: `arn:aws:bedrock-agentcore:us-east-1:aws:tool/web-search.v1`.
+- **VPC endpoint `privateDnsEnabled` must be `false`** — see `shared/reference/constraints.md` → "`privateDnsEnabled: true` … breaks Web Search MCP". The `com.amazonaws.<region>.bedrock-agentcore` interface endpoint (NetworkStack) is only needed for potential future control-plane calls, never for reaching the Gateway itself.
