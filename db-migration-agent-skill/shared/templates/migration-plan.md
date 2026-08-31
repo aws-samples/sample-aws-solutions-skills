@@ -30,7 +30,7 @@
 ## Phase 1 — Discovery answers (GATE 1 sign-off: ▢ {date, by})
 | # | Question | Answer |
 |---|----------|--------|
-| 1 | Source engine/version/location | |
+| 1 | Source engine/version/location **(if not EC2/plain on-prem VM: self-managed w/ OS access, or managed DB product?)** | |
 | 2 | Target service/version | |
 | 3 | DB size / table count | |
 | 4 | Downtime tolerance | |

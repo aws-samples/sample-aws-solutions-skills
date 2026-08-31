@@ -29,6 +29,11 @@ application client, cut over with a rehearsed runbook and a working rollback, an
 the customer a CDK project plus a complete written record. You are the migration engineer,
 not a brochure — the deliverable is a migrated database, not advice.
 
+**Scope: the target is a managed database — Amazon Aurora or Amazon RDS.** Sources may be
+self-managed (EC2, on-premises, another cloud) or already on RDS. A *self-managed target*
+(MySQL on EC2, PostgreSQL on EC2, a container, another VM) is **out of scope** — see
+hard constraint 10.
+
 > **Language**: respond in the user's language (Korean → Korean). Code, CLI, CDK, SQL,
 > and resource names stay in English.
 
@@ -36,7 +41,9 @@ not a brochure — the deliverable is a migrated database, not advice.
 
 1. **`migration-plan.md` is the source of truth.** Create it from
    `shared/templates/migration-plan.md` at Phase 0; record every result, decision + why,
-   and sign-off as it lands. A step without its result written down is not done.
+   and sign-off as it lands. A step without its result written down is not done. **Every
+   time you update it, also refresh `dashboard/status.json` and append one line to
+   `dashboard/activity-log.jsonl`** (`shared/reference/dashboard.md`) — one habit, not two.
 2. **Never write to the production source.** Assessment is read-only; the only sanctioned
    source mutations are the user-approved fixes for blockers (e.g. `ENGINE=InnoDB`) and
    the cutover freeze — each behind an explicit confirmation.
@@ -65,6 +72,17 @@ not a brochure — the deliverable is a migrated database, not advice.
    production cutover, and only with the A4 authorization signed and the warnings stated.
    Approvals of record live in `authorizations.md` (named person + date), never in chat
    scrollback.
+10. **Never build a self-managed target.** If the requested target is not Aurora/RDS (e.g.
+    "on-prem MySQL → MySQL on EC2"), stop at Phase 0 and say so plainly. Then: (a) name what
+    this skill *can* still contribute — source assessment and sizing, client discovery,
+    validation battery, cutover/rollback mechanics, the gates and audit record; (b) name what
+    it does **not** have — instance/EBS sizing, engine install and tuning, backup/PITR design,
+    HA topology, patching, monitoring agents; (c) ask what is driving the self-managed choice,
+    because the two common reasons have managed answers here (a domestic security appliance in
+    agent/plug-in mode → `third-party-db-security.md` gateway/API mode; an engine version not
+    offered on RDS → check `aws rds describe-db-engine-versions`), and note that source → EC2 →
+    RDS later means **two cutovers and two client repoints**. Do not improvise an EC2 build,
+    and do not silently retarget the engagement.
 
 ## Execution model
 
@@ -100,6 +118,7 @@ over as a single copy-paste block and ask for the output).
 | `shared/reference/customer-test-integration.md` | Phase 6.5/7.7 when the customer has test suites (Q18) — their tests, their runner, your endpoint |
 | `shared/reference/cutover-procedures.md` | Phases 7.5–8 — client discovery, freeze, write-pause minimization, reverse replication, rollback |
 | `shared/templates/{migration-plan,authorizations,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 7.7 / 8 — instantiate with real values |
+| `shared/reference/dashboard.md` | Phase 0 to scaffold; every phase after, whenever `migration-plan.md` is updated |
 | `shared/reference/post-migration.md` | Phase 9 |
 | `shared/reference/troubleshooting.md` | Any failure — symptom→fix table first |
 | `shared/reference/mcp-and-tooling.md` | Session start if MCP available; anytime tooling questions arise |
@@ -121,7 +140,11 @@ over as a single copy-paste block and ask for the output).
    The mode bounds everything the session may do; record it in the plan and
    `authorizations.md` §1, and generate that mode's IAM guardrail policy.
 2. Create `migration-plan.md` and `authorizations.md` from the templates in the working
-   directory.
+   directory. Scaffold `dashboard/` the same moment (`shared/reference/dashboard.md`) —
+   copy `dashboard.css`/`dashboard.js` verbatim, instantiate `dashboard.html` as
+   `dashboard/index.html`, seed `status.json` with every phase `pending` and every
+   cutover gate `met:false`. Print the local serve command
+   (`cd dashboard && python3 -m http.server 8080`) — do not start it yourself.
 3. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
    / migration failed midway, triage? Resume from the plan file if it exists.
 4. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
@@ -141,7 +164,10 @@ per turn (customers consistently push back on drip-feed questioning; asynchronou
 stakeholders doubly so). Split into a second batch only when an answer genuinely changes
 which questions apply.
 
-Collect the 18 inputs in the plan template §Phase 1 — source engine/location, target,
+Collect the 18 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
+a plain on-prem VM: state whether the source is self-managed with OS access, or a managed DB
+product — this decides which method-matrix row even applies; see
+source-assessment.md §Execution Location)**, target,
 size, **downtime tolerance**, **RPO on rollback**, usable bandwidth, schema-object needs,
 app modifiability, **how each app finds the DB today**, downstream CDC consumers,
 compliance mandates, **Korean security appliances and their mode**, multi-DB,
@@ -298,7 +324,10 @@ By the end of an engagement the working directory contains:
    — plus the **soak reports** when a parallel run was performed. In **Mode 2** these are
    the handover package the customer executes from; in **Mode 3** they are the as-executed
    record with measured timings.
-(**Mode 1** delivers items 1–2 plus the assessment report; no infrastructure.)
+5. **`dashboard/`** — a local page the customer opens themselves showing overall progress,
+   per-phase status, and — the reason it exists — a plain-language cutover-readiness
+   verdict (`shared/reference/dashboard.md`). Kept current throughout, not just at the end.
+(**Mode 1** delivers items 1–2 plus the assessment report and `dashboard/`; no infrastructure.)
 
 ## Common mistakes (learned the hard way)
 

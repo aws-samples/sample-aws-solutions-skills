@@ -205,6 +205,17 @@ cross-reference the rows.
 
 ### Execution Location — How Will You Reach the Source DB? (Decide First)
 
+🔴 **Before anything else: does this host allow OS/root access, or is it a managed DB product?**
+If the source location is anything other than EC2 or a VM already confirmed to have OS access,
+ask directly — "self-managed on a VM you can install software on" or "a managed database
+product (PaaS/DBaaS) with no OS access"? Do not assume from the cloud name alone: a self-managed
+MySQL VM on NHN Cloud/Naver Cloud/Azure/GCP behaves exactly like on-prem below; that same
+provider's managed MySQL product does not. **If managed and non-AWS, hybrid activation does not
+apply** — there is no OS to install the SSM agent on. Skip straight to
+[method-selection.md](method-selection.md) row 12 (DMS Full Load+CDC) rather than attempting and
+failing hybrid activation live. Get this answer before touching the table below — it decides
+which row of it even applies.
+
 The source DB is almost always in a **private subnet**, and your execution environment (laptop, CloudShell, an automation runner, this skill's host) is frequently **in a different VPC or has no `mysql`/`psql` client installed**. Settle the access path *before* running any assessment query — it determines how every assessment, dump, and cutover command in this skill is invoked.
 
 | Option | When | How |

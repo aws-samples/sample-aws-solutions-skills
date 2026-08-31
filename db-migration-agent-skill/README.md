@@ -5,8 +5,9 @@ database migration engineer. You describe the database you want moved to AWS; th
 plans and executes the migration end to end, and **you approve every decision that
 matters** before it happens.
 
-It moves self-managed databases (on EC2, on-premises, or another cloud) to **Amazon
-Aurora or Amazon RDS**. Supported sources: MySQL, MariaDB, PostgreSQL, Oracle, SQL
+It moves databases to **Amazon Aurora or Amazon RDS** — sources can be self-managed (on
+EC2, on-premises, another cloud) or already on RDS. The destination is always a managed
+service; a self-managed target such as "MySQL on EC2" is out of scope (see below). Supported sources: MySQL, MariaDB, PostgreSQL, Oracle, SQL
 Server, Db2 — plus playbooks for heterogeneous moves (e.g. SQL Server → Aurora
 PostgreSQL) and Korean-market engines and security appliances.
 
@@ -105,7 +106,19 @@ emits `app-remediation-findings.md` (file:line, offending construct, replacement
 handoff for your dev team — or a second agent session opened in your repo with your
 tests. It never asks for access to your source control.
 
-**2. Oracle RAC (and other multi-writer/clustered sources) are NOT supported as
+**2. The target is a managed database — Aurora or RDS.** Sources can be self-managed (EC2,
+on-premises, another cloud) or already on RDS, but the destination is always a managed
+service. "Move our on-prem MySQL onto MySQL on EC2" is **out of scope**: the skill has no
+instance/EBS sizing, engine install and tuning, backup and PITR design, HA topology,
+patching, or monitoring-agent setup — that is an infrastructure and DBA build, not a
+migration. It will say so at Phase 0 rather than improvising, and will tell you which parts
+it *can* still contribute (source assessment, client discovery, validation, cutover and
+rollback mechanics, the approval record). If a self-managed target is being considered
+because a security appliance only runs in agent/plug-in mode, or because a version isn't
+offered on RDS, both have managed answers here — ask, because going source → EC2 → managed
+later costs you **two cutovers and two client repoints**.
+
+**3. Oracle RAC (and other multi-writer/clustered sources) are NOT supported as
 like-for-like migrations.** There is no RAC on RDS or Aurora — a RAC estate cannot be
 "migrated" by this skill; it requires an architecture redesign (single writer + readers)
 that is its own project, owned by your architects. The skill will detect a RAC source
@@ -116,14 +129,14 @@ the data workstream and hands your team the code-conversion findings. For any
 heterogeneous move, remember the app/code conversion — not the data — is usually the
 schedule.
 
-**3. Tight downtime numbers are earned, not promised.** Generous windows (hours) are
+**4. Tight downtime numbers are earned, not promised.** Generous windows (hours) are
 routinely achievable; tight budgets (≤ 60–120 s) depend on details that only a rehearsal
 surfaces — engine-version syntax quirks, connection-pool behavior, per-step dispatch
 latency. The skill's rule: quote a cutover window only from a **measured rehearsal**,
 and treat rehearsal × 2 as the honest budget. If someone needs a guaranteed sub-minute
 cutover with no rehearsal, this skill will refuse to promise it — that's a feature.
 
-**4. It does not cut over your production database unless you choose Mode 3.** The
+**5. It does not cut over your production database unless you choose Mode 3.** The
 default (Mode 2) stops at a rehearsed handover: your team runs the cutover with your own
 tests and change window. And it is never unattended — a named human approves the mode,
 engagement parameters, method, cost, and (in Mode 3) the cutover window, and is reachable
@@ -131,7 +144,7 @@ during it. The skill is designed to *stop and ask*
 when an abort criterion trips mid-cutover rather than decide on its own — which only
 works if someone is there to answer.
 
-**5. Large-scale migrations are planned honestly, not waved through.** The decision
+**6. Large-scale migrations are planned honestly, not waved through.** The decision
 matrix has explicit > 1 TB paths — XtraBackup + S3 physical seed with CDC catch-up
 (MySQL-family), Oracle transportable tablespaces (EE-only, with real preconditions),
 SQL Server full+diff+log chains (≤ 64 TiB per native restore), and an offline-seed
@@ -145,11 +158,11 @@ heterogeneous *combined* is a phased program, not one engagement. The skill will
 you an honest plan and run the data workstream — expect it to tell you things (shipping
 time, multi-week CDC catch-up, phased cutover) that no tool can make disappear.
 
-**6. Some sources have no tooling fast-path.** Tibero, CUBRID, Altibase (no AWS
+**7. Some sources have no tooling fast-path.** Tibero, CUBRID, Altibase (no AWS
 DMS/SCT support): the skill plans a PoC + JDBC extraction path and says so plainly
 rather than implying DMS will "just work".
 
-**7. Not covered at all**: sharded/multi-master topologies as such (Galera,
+**8. Not covered at all**: sharded/multi-master topologies as such (Galera,
 Group Replication — flagged as redesigns), NoSQL sources, data-warehouse migrations
 (Redshift territory), ongoing post-migration DBA operations (that's the `aws-database`
 skills' ground), and BYO-license procurement decisions (it surfaces the LI/BYOL choice;

@@ -16,7 +16,7 @@
 ### Decision Input — Ask the User
 
 1. **Homogeneous or heterogeneous?** Same engine family (MySQL→MySQL/Aurora MySQL, PostgreSQL→PostgreSQL/Aurora PG, MariaDB→MariaDB, **Oracle→RDS Oracle, SQL Server→RDS SQL Server**) = **homogeneous**, stay in this skill (homogeneous path). Engine family *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL, MySQL→PostgreSQL) = **heterogeneous**, go to [heterogeneous-migration.md](heterogeneous-migration.md) first (schema/code conversion), then return for cutover.
-2. **What is your source?** EC2 MySQL / EC2 MariaDB / EC2 PostgreSQL / EC2/on-prem Oracle / EC2/on-prem SQL Server / RDS MySQL / RDS MariaDB / RDS PostgreSQL / On-premises / Other cloud (Azure DB, Cloud SQL)
+2. **What is your source?** EC2 MySQL / EC2 MariaDB / EC2 PostgreSQL / EC2/on-prem Oracle / EC2/on-prem SQL Server / RDS MySQL / RDS MariaDB / RDS PostgreSQL / On-premises (self-managed, OS access) / Other cloud, self-managed on a VM (OS access — treat as on-premises) / Other cloud, managed DB product (no OS access — e.g. Azure DB, Cloud SQL, NHN Cloud/Naver Cloud managed MySQL)
 3. **What is your target?** Aurora MySQL / Aurora PostgreSQL / RDS MySQL / RDS MariaDB / RDS PostgreSQL / **RDS Oracle** / **RDS SQL Server**
 4. **Downtime tolerance?** Zero / Seconds / Minutes / Hours (maintenance window)
 5. **Database size?** < 10 GB / 10-100 GB / 100 GB - 1 TB / > 1 TB
@@ -57,7 +57,7 @@
 | 9 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | < 10 GB | Yes | Yes | **pg_dump / pg_restore** (`-Fd -j`) | Complete (all objects), simple, parallel |
 | 10 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | 10 GB – 1 TB | Yes (hours) | Yes | **pg_dump/restore (parallel)** | No physical-backup S3 path for PG; parallel dump is the bulk tool |
 | 11 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | Any | No (zero/seconds) | Yes | **Native logical replication** (preferred) or **DMS CDC** | PG-native handles more DDL; DMS simpler to operate |
-| 12 | Other cloud (Azure DB for MySQL/PostgreSQL, Cloud SQL) | Aurora / RDS (same family) | Any | No (near-zero) | per estimate | **DMS Full Load + CDC** | No native cross-cloud replica; DMS connects over public/peered endpoint |
+| 12 | Other cloud, **managed DB product — no OS access** (Azure DB for MySQL/PostgreSQL, Cloud SQL, NHN Cloud/Naver Cloud managed MySQL, etc.) | Aurora / RDS (same family) | Any | No (near-zero) | per estimate | **DMS Full Load + CDC** | Only option without OS access — no native cross-cloud replica, no XtraBackup/Data Pump/native backup-restore possible; DMS connects over public/peered endpoint. If instead this is a **self-managed VM on another cloud (OS access confirmed)**, it is not this row — treat as on-prem and use rows 4–11/13–18 per engine. |
 | 13 | EC2/on-prem **Oracle** | **RDS Oracle** | < 1 TB | Yes (hours) | Yes | **Oracle Data Pump** (schema/table mode, via S3 integration) | AWS-recommended logical method; migrates schema + data. No FULL mode. |
 | 14 | EC2/on-prem **Oracle** (EE) | **RDS Oracle** (EE) | > 1 TB | Minimal (minutes) | Yes | **Transportable tablespaces (XTTS via RMAN)** → optional DMS CDC catch-up | Physical, fastest for very large EE DBs; EE-only, no encrypted tablespaces, source not 11g. |
 | 15 | EC2/on-prem **Oracle** | **RDS Oracle** | Any | No (zero/near-zero) | Yes | **Data Pump bulk load → AWS DMS CDC from recorded SCN** (or GoldenGate) | Only near-zero-downtime path; Data Pump seeds, DMS/GoldenGate drains delta. |

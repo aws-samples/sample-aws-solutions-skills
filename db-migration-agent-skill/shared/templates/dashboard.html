@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>마이그레이션 진행 상태 — {prefix}</title>
+<link rel="stylesheet" href="assets/dashboard.css">
+</head>
+<body>
+<header>
+  <div>
+    <div class="eyebrow">DB Migration · Mode {mode}</div>
+    <h1>{prefix} 마이그레이션 진행 상태</h1>
+  </div>
+  <div id="updated"><span id="updated-text">updated —</span><span id="stale-badge">15분 이상 갱신 없음</span></div>
+</header>
+
+<div id="conn-error" style="display:none;background:rgba(224,84,106,.12);border:1px solid rgba(224,84,106,.4);
+  color:#E0546B;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px"></div>
+
+<div class="tiles">
+  <div class="tile">
+    <div class="l">Overall Progress</div>
+    <div class="v"><span id="pct">0</span><small>%</small></div>
+    <div class="pbar"><i id="pct-bar" style="width:0%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="l">Phases</div>
+    <div class="v" id="phase-count">0 / 0</div>
+    <div class="sub" id="phase-remaining"></div>
+  </div>
+  <div class="tile activity">
+    <div class="l">Now Running</div>
+    <div class="v" id="current-activity">—</div>
+    <div class="phasechip" id="current-phase-chip"></div>
+  </div>
+</div>
+
+<div id="cutover" class="cutover notready">
+  <div class="verdict"><span class="dot"></span><span id="verdict-text">확인 중…</span></div>
+  <div class="verdict-sub" id="verdict-sub"></div>
+  <div class="gates" id="gates"></div>
+</div>
+
+<h2>Phases</h2>
+<div id="phases"></div>
+
+<h2>Activity Log <span style="color:var(--muted);font-weight:400;font-size:11px">dashboard/activity-log.jsonl · newest first</span></h2>
+<div id="log"><div id="log-empty">아직 기록된 활동이 없습니다.</div></div>
+
+<footer>db-migration-agent · 로컬 전용 · 5초마다 자동 갱신 · 외부로 전송되지 않습니다</footer>
+
+<script src="assets/dashboard.js"></script>
+</body>
+</html>
