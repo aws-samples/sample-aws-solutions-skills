@@ -83,6 +83,7 @@
 
   async function fetchJSONL(url) {
     const r = await fetch(`${url}?_=${Date.now()}`, { cache: 'no-store' });
+    if (r.status === 404) return [];   // not yet created / not yet appended to — not an error
     if (!r.ok) throw new Error(`${url}: ${r.status}`);
     const text = await r.text();
     return text.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);

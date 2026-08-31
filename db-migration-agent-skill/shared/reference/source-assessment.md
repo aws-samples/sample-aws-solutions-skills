@@ -211,10 +211,12 @@ ask directly — "self-managed on a VM you can install software on" or "a manage
 product (PaaS/DBaaS) with no OS access"? Do not assume from the cloud name alone: a self-managed
 MySQL VM on NHN Cloud/Naver Cloud/Azure/GCP behaves exactly like on-prem below; that same
 provider's managed MySQL product does not. **If managed and non-AWS, hybrid activation does not
-apply** — there is no OS to install the SSM agent on. Skip straight to
-[method-selection.md](method-selection.md) row 12 (DMS Full Load+CDC) rather than attempting and
-failing hybrid activation live. Get this answer before touching the table below — it decides
-which row of it even applies.
+apply** — there is no OS to install the SSM agent on for command execution. That does not
+automatically mean DMS for the *data* path, though: skip straight to
+[method-selection.md](method-selection.md) row 12a/12b — 12a (remote `mysqldump`/`pg_dump`, no
+OS access needed) if the transfer fits the downtime window, 12b (DMS Full Load+CDC) only if
+near-zero downtime is actually required. Get this answer before touching the table below — it
+decides which row even applies.
 
 The source DB is almost always in a **private subnet**, and your execution environment (laptop, CloudShell, an automation runner, this skill's host) is frequently **in a different VPC or has no `mysql`/`psql` client installed**. Settle the access path *before* running any assessment query — it determines how every assessment, dump, and cutover command in this skill is invoked.
 

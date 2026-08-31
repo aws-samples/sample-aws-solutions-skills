@@ -184,7 +184,7 @@ db-migration-agent-skill/
 │   │   ├── preflight-iam-cost.md           Phase 0 — preconditions, IAM roles, cost, monitoring baseline
 │   │   ├── source-assessment.md            Phase 2 — blockers, access paths, credential rules, sizing, Snow branch
 │   │   ├── rds-aurora-limitations.md       Full blocker/adjustment catalog with queries
-│   │   ├── method-selection.md             Phase 3 — 18-row decision matrix, binlog gate, edge cases
+│   │   ├── method-selection.md             Phase 3 — 19-row decision matrix, binlog gate, edge cases
 │   │   ├── heterogeneous-migration.md      SCT / DMS SC / Babelfish; Tibero/CUBRID/Altibase
 │   │   ├── target-provisioning.md          Phase 4 — Aurora vs RDS, immutable settings, RDS Proxy, TLS gate
 │   │   ├── execution-runbooks.md           Phase 6 — per-method procedures, schema objects, rehearsal

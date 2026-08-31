@@ -105,7 +105,7 @@ over as a single copy-paste block and ask for the output).
 | `shared/reference/preflight-iam-cost.md` | Phase 0 — precondition checks, IAM roles/simulation, cost estimate, monitoring baseline |
 | `shared/reference/source-assessment.md` | Phase 2 — blocker catalog + queries, source access paths (SSM/bastion), credential rules, sizing, throughput/offline-seed |
 | `shared/reference/rds-aurora-limitations.md` | Phase 2 — full per-limitation detail behind the blocker tables |
-| `shared/reference/method-selection.md` | Phase 3 — the 18-row decision matrix, binlog gate, multi-DB/cross-region/cross-account edges |
+| `shared/reference/method-selection.md` | Phase 3 — the 19-row decision matrix, binlog gate, multi-DB/cross-region/cross-account edges |
 | `shared/reference/heterogeneous-migration.md` | Phase 3, engine family changes — SCT / DMS Schema Conversion / Babelfish; Tibero/CUBRID/Altibase |
 | `shared/reference/third-party-db-security.md` + `regulatory-compliance.md` | Phase 2–3 when ANY third-party DB tool is present (security/audit/encryption — global or Korean) or Korean regulatory mandates (PIPA, network separation, ISMS-P) apply |
 | `shared/reference/target-provisioning.md` | Phase 4 — Aurora vs RDS, settings immutable at creation, option groups, RDS Proxy, TLS gate |
@@ -143,7 +143,8 @@ over as a single copy-paste block and ask for the output).
    directory. Scaffold `dashboard/` the same moment (`shared/reference/dashboard.md`) —
    copy `dashboard.css`/`dashboard.js` verbatim, instantiate `dashboard.html` as
    `dashboard/index.html`, seed `status.json` with every phase `pending` and every
-   cutover gate `met:false`. Print the local serve command
+   cutover gate `met:false`, and **create an empty `activity-log.jsonl`** — the page
+   fetches both files together and a missing one fails the whole render. Print the local serve command
    (`cd dashboard && python3 -m http.server 8080`) — do not start it yourself.
 3. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
    / migration failed midway, triage? Resume from the plan file if it exists.

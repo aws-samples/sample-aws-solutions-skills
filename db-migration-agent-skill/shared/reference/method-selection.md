@@ -57,7 +57,15 @@
 | 9 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | < 10 GB | Yes | Yes | **pg_dump / pg_restore** (`-Fd -j`) | Complete (all objects), simple, parallel |
 | 10 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | 10 GB – 1 TB | Yes (hours) | Yes | **pg_dump/restore (parallel)** | No physical-backup S3 path for PG; parallel dump is the bulk tool |
 | 11 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | Any | No (zero/seconds) | Yes | **Native logical replication** (preferred) or **DMS CDC** | PG-native handles more DDL; DMS simpler to operate |
-| 12 | Other cloud, **managed DB product — no OS access** (Azure DB for MySQL/PostgreSQL, Cloud SQL, NHN Cloud/Naver Cloud managed MySQL, etc.) | Aurora / RDS (same family) | Any | No (near-zero) | per estimate | **DMS Full Load + CDC** | Only option without OS access — no native cross-cloud replica, no XtraBackup/Data Pump/native backup-restore possible; DMS connects over public/peered endpoint. If instead this is a **self-managed VM on another cloud (OS access confirmed)**, it is not this row — treat as on-prem and use rows 4–11/13–18 per engine. |
+| 12a | Other cloud, **managed DB product — no OS access** (Azure DB for MySQL/PostgreSQL, Cloud SQL, NHN Cloud/Naver Cloud managed MySQL, etc.), MySQL/MariaDB/PostgreSQL family | Aurora / RDS (same family) | Fits transfer window | Yes (hours) | Yes | **Remote `mysqldump`/`pg_dump`** against the provider's endpoint from a reachable migration host | No OS access is needed for a logical dump — only database + network access, run from *your* side, not the source host. Cheaper and simpler than DMS when downtime is acceptable; do not default to DMS just because the source is managed. |
+| 12b | Same as 12a | Aurora / RDS (same family) | Any | No (near-zero) | per estimate | **DMS Full Load + CDC** | The near-zero-downtime path for a managed source — DMS connects over the provider's public/peered endpoint; requires the provider's binlog/WAL retention to support CDC (confirm before committing). |
+
+If the transfer does not fit the window (12a) and near-zero downtime isn't required either, there
+is no physical-seed fallback for a managed source (no file-level access to offline-seed from) —
+stop and assess the provider's own export/snapshot/connectivity options with the customer rather
+than forcing a row that doesn't apply. If instead this is a **self-managed VM on another cloud
+(OS access confirmed)**, none of 12a/12b apply — treat as on-prem and use rows 4–11/13–18 per
+engine.
 | 13 | EC2/on-prem **Oracle** | **RDS Oracle** | < 1 TB | Yes (hours) | Yes | **Oracle Data Pump** (schema/table mode, via S3 integration) | AWS-recommended logical method; migrates schema + data. No FULL mode. |
 | 14 | EC2/on-prem **Oracle** (EE) | **RDS Oracle** (EE) | > 1 TB | Minimal (minutes) | Yes | **Transportable tablespaces (XTTS via RMAN)** → optional DMS CDC catch-up | Physical, fastest for very large EE DBs; EE-only, no encrypted tablespaces, source not 11g. |
 | 15 | EC2/on-prem **Oracle** | **RDS Oracle** | Any | No (zero/near-zero) | Yes | **Data Pump bulk load → AWS DMS CDC from recorded SCN** (or GoldenGate) | Only near-zero-downtime path; Data Pump seeds, DMS/GoldenGate drains delta. |

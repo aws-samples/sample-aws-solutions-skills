@@ -15,7 +15,14 @@ mkdir -p dashboard/assets
 cp <skill>/shared/assets/dashboard.css dashboard/assets/
 cp <skill>/shared/assets/dashboard.js  dashboard/assets/
 cp <skill>/shared/templates/dashboard.html dashboard/index.html   # then fill {prefix}/{mode}
+: > dashboard/activity-log.jsonl                                  # must exist, even empty
 ```
+
+🔴 **Both data files must exist from the first moment, not just `status.json`.**
+`dashboard.js` fetches `status.json` and `activity-log.jsonl` together in one `Promise.all` — if
+the log file is missing, that 404 fails the *entire* render, including the parts (progress,
+cutover gates) that were otherwise fine. Create the empty file at scaffold time even before the
+first activity line exists.
 
 Seed `dashboard/status.json` with the phase list populated (all `pending`, `done:0`) and
 `cutover_gates` populated (all `met:false`) the moment the plan is created — never leave the
@@ -61,12 +68,12 @@ If it was worth a line in the plan, it is worth updating both dashboard files.
     {"id": "9",   "name": "사후 정리",          "status": "pending",     "done": 0, "total": 3}
   ],
   "cutover_gates": [
-    {"key": "client_inventory", "label": "클라이언트 인벤토리 100%",     "met": false, "detail": "4/6 확인 (Phase 7.5, 하드 제약 6)"},
-    {"key": "validation",       "label": "검증 완료 (GATE 3)",          "met": true,  "detail": "행 수·체크섬·스키마 객체 일치"},
-    {"key": "soak",             "label": "병행 가동 N일 연속 Green",     "met": false, "detail": "3/7일 (Phase 7.7)"},
-    {"key": "rehearsal",        "label": "컷오버 리허설 완료",           "met": false, "detail": "미실시"},
-    {"key": "runbook",          "label": "런북 · 롤백 준비",             "met": false, "detail": "생성 대기"},
-    {"key": "approvals",        "label": "필요 승인 서명",               "met": true,  "detail": "GATE 1·2 완료 (authorizations.md)"}
+    {"key": "client_inventory", "label": "클라이언트 인벤토리 100%",   "met": false, "detail": "4/6 확인 (Phase 7.5, 하드 제약 6)"},
+    {"key": "validation",       "label": "검증 요건 충족 (GATE 3)",    "met": true,  "detail": "행 수·체크섬·스키마 객체 일치 — 선택된 심층 검증 없음"},
+    {"key": "soak",             "label": "병행 가동 요건 충족",        "met": false, "detail": "3/7일 연속 green, 종료 서명 전 (Phase 7.7)"},
+    {"key": "rehearsal",        "label": "리허설 요건 충족",           "met": false, "detail": "미실시 — 클론 리허설 1회 예정"},
+    {"key": "runbook",          "label": "런북 · 롤백 준비",           "met": false, "detail": "생성 대기"},
+    {"key": "approvals",        "label": "필요 승인 서명",             "met": false, "detail": "GATE 1·2 완료, A4b 인수인계 승인 대기 (authorizations.md)"}
   ],
   "cutover_ready": false
 }
@@ -79,7 +86,22 @@ Field notes:
 - `cutover_gates[]` — exactly the six keys above, every engagement, every mode. In Mode 1
   every gate stays `met:false` (there is no target to be ready) and `cutover_ready` stays
   `false` — the dashboard is still valid to show, it just reports nothing is gate-eligible.
-  In Mode 2, `approvals` includes A4b once signed; in Mode 3 it includes A4.
+
+**When each gate is allowed to flip to `met:true`** — a gate is a *requirement being resolved*,
+not necessarily *work being performed*: a customer-signed, dated waiver for a skipped or
+shortened step satisfies the gate exactly as completing the step would, because
+`engagement-safety.md`'s waiver protocol is itself a valid way to close a requirement. Never
+mark a gate `met:true` for either reason without one of these:
+
+| key | `met:true` only when | never mark true just because |
+|---|---|---|
+| `client_inventory` | Phase 7.5 table has every client at ✅✅ (hard constraint 6) | most clients are done — this is all-or-nothing |
+| `validation` | GATE 3 evidence signed **and**, if the chosen validation depth includes a customer test suite (Q18), its final pre-cutover sign-off is also in (`customer-test-integration.md`) | row counts/checksums pass but the customer's own suite hasn't run its final pass |
+| `soak` | the chosen parallel-run parameter is satisfied: N consecutive greens **and** the soak-exit row signed (`SKILL.md` Phase 7.7 requires both) — **or** a dated waiver in `authorizations.md` for skipping/shortening it | N greens reached but soak-exit isn't signed yet; also applies to Mode 2 handover depth (b), where the customer runs the soak themselves — stays `false` until they report it done or sign the skip waiver |
+| `rehearsal` | the chosen rehearsal parameter is satisfied (one clone rehearsal done, or repeat-until-converged reached) — **or** a dated waiver for rehearsal `none` | a rehearsal is scheduled but hasn't produced measured timings yet |
+| `runbook` | `cutover-runbook.md` + `rollback-runbook.md` exist with zero placeholders **and** (reverse replication created + connection-tested, **or** the alternative rollback strategy + RPO acknowledgment is signed) — hard constraint 6's rollback-path requirement | the runbook file exists but reverse replication hasn't been connection-tested |
+| `approvals` | every applicable `authorizations.md` row for this point is signed: GATE 1, GATE 2, GATE 3, **and** — Mode 2: **A4b** handover acceptance; Mode 3: **A4** cutover authorization | GATE 1/2 are signed but A4b/A4 (which happens at Phase 8, near the end) is still pending — this is why `approvals` is usually the last gate to flip, not an early one |
+
 - `cutover_ready` — **you compute this** as a plain boolean AND over `cutover_gates[].met`.
   The page never recomputes it and never infers readiness from `overall_progress_pct` — a
   94% progress bar next to one unmet gate must still show "아직 컷오버 불가." Never derive
