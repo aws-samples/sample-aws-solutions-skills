@@ -102,7 +102,7 @@ recommended default; every deviation from a default is a recorded waiver.
 | Parameter | Options | Default |
 |-----------|---------|---------|
 | **Rehearsal** | none / one clone rehearsal / repeat until the measured window converges (< 20% delta between runs) | **One clone rehearsal.** Repeat-until-converged when the write-pause budget is tight (≤ 60 s) or the estimate is business-critical |
-| **Parallel-run length** | not run / N consecutive green periods (days, or hours for compressed engagements) | **7 consecutive green days** for a production-serving database; N ≥ 3 if the customer needs to move faster |
+| **Parallel-run length** | not run / N consecutive green periods (days, or hours for compressed engagements) | **Risk-tiered — see table below.** Not a flat number: the default the agent proposes is derived from discovery input #4 (`method-selection.md`), not copied from the previous engagement. |
 | **Validation depth** | counts + checksums + smoke test / + app-level & version-gap battery / + domain reconciliation aggregates | **counts + checksums + app-level checks**, plus the **customer's own test suite** whenever one exists (discovery Q18) |
 | **Rollback strategy** | snapshot/PITR restore (with acknowledged RPO) / reverse replication (zero RPO) / write-log replay | **Reverse replication** when the engines support it; otherwise state the RPO plainly and get it acknowledged |
 | **Approver(s)** | named person per action class; for Mode 3 also "present during the window" | Named in `authorizations.md` before any production-touching step |
@@ -112,6 +112,26 @@ an hour would stop revenue or reach customers, take the full rehearsal, a 7-day 
 run, and reverse replication. If nobody would notice until Monday, a single rehearsal and
 a short parallel run is proportionate."* — that's advice, not a classification the agent
 enforces.
+
+### Risk-tiered parallel-run (soak) default
+
+A flat default makes every low-risk engagement negotiate the same number down from an
+over-conservative starting point, every time. Propose the tier below instead, from
+discovery input #4 (`method-selection.md`) plus whatever Phase 2 assessment has already
+shown (e.g. a live client already found reading/writing during assessment overrides a
+"non-production" self-report):
+
+| Tier | Signal | Default parallel-run length |
+|------|--------|------------------------------|
+| **Low** | Non-production (dev/test/staging), no live production traffic, ample downtime tolerance (hours) | **1 day** |
+| **Moderate** | Some live traffic, or downtime tolerance is minutes rather than hours, or the customer is unsure which tier applies | **3 days** |
+| **High** | Production-serving with live write traffic today, zero/seconds downtime tolerance, or an explicit RPO requirement | **7 consecutive green days** (unchanged ceiling) |
+
+This is still a **proposed default, not a rule** — the named approver can move it either
+direction at GATE 1, and every deviation from the tier's default is recorded as a waiver
+exactly as before (§Waiver protocol). The tier itself, and the signal that produced it,
+gets recorded alongside the parameter in `authorizations.md` so a later reader can see
+*why* N was what it was, not just the number.
 
 ## Waiver protocol
 

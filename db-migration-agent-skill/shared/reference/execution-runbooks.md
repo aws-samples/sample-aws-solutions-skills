@@ -74,6 +74,37 @@ See [dms-best-practices.md](dms-best-practices.md) for complete DMS configuratio
 - MySQL/MariaDB: `binlog_format=ROW`, `binlog_row_image=FULL`, `log_bin=ON`
 - PostgreSQL: `wal_level=logical`, available replication slots
 
+### CDC Proof Probe (any CDC-based method — required before GATE 3, pre-authorized at GATE 2)
+
+A CDC task showing `running` with zero insert/update/delete counters proves the plumbing
+is connected, not that it works — an all-zeros state is indistinguishable from "no changes
+have happened yet" and "changes aren't actually propagating." This is common on a
+just-migrated non-production database where nothing has written since the data was
+generated/loaded. Don't sign GATE 3 on an unproven CDC path.
+
+Approving a CDC-based method at GATE 2 pre-authorizes this probe — do not ask again here:
+
+1. Create one throwaway object the CDC task will replicate — a scratch table
+   (`<schema>._cdc_probe`, or the engine's equivalent) is cleaner than touching a real
+   application table. Never use an existing table for this.
+2. Exercise all three change paths against it: one INSERT, one UPDATE, one DELETE.
+   UPDATE and DELETE specifically exercise primary-key mapping on the target, which INSERT
+   alone does not.
+3. Confirm each lands on the target and measure latency per operation — this produces the
+   first genuine CDC-latency datapoints, which a zero-traffic parallel-run soak otherwise
+   never generates on its own.
+4. Drop the probe object on the source. **Verify it is also gone on the target** — some
+   CDC mechanisms replicate DDL asymmetrically (DMS: CREATE TABLE replicates, DROP TABLE
+   under a task's default settings may not) — don't assume a source-side drop cleaned up
+   the target; check.
+5. Record the measured latencies and the confirmation in the plan as the GATE 3 evidence
+   for "CDC proven," distinct from "CDC running."
+
+Scope stays tight: one throwaway object, created and dropped by the agent as part of
+validation, never a real application table, never left behind. If DDL asymmetry is found
+in step 4, log it as a pre-cutover schema-drift check for the runbook — any real schema
+change during the migration window needs the same "verify both sides" discipline.
+
 ### If XtraBackup Seed + Binlog/DMS CDC Catch-up (large MySQL, minimal downtime — matrix row 6)
 
 Combine the two procedures above: the physical copy does the bulk, CDC closes the delta.
@@ -456,6 +487,14 @@ ALTER USER [appuser] WITH LOGIN = [appuser];
 > timing measurement. The canonical failure this prevents: an untested
 > `SHOW BINARY LOG STATUS` (MySQL 8.4 syntax) against Aurora 8.0, discovered mid-freeze,
 > turning a 40-second window into a 5-minute one.
+
+**Run the rehearsal concurrently with the parallel-run soak, not after it.** They verify
+different things and have no dependency on each other — rehearsal measures the cutover
+*procedure itself* (on a clone), soak measures *replication durability over time* (on the
+real target). Nothing about the rehearsal needs the soak clock to finish, and nothing
+about the soak needs the rehearsal to finish first. Serializing them (waiting for N green
+days before even starting the rehearsal) burns calendar time for no safety benefit — start
+the rehearsal as soon as it's schedulable, in parallel with the soak already running.
 
 Before executing against production, perform a full dry-run:
 

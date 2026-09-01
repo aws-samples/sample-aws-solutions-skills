@@ -247,7 +247,13 @@ return here for data movement. Prepare the **cost estimate**
 (`shared/reference/preflight-iam-cost.md` §3).
 
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
-rollback strategy, itemized cost, target architecture (Mermaid). User approves.
+rollback strategy, itemized cost, target architecture (Mermaid). User approves. **If the
+chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
+replication), this approval also **pre-authorizes the CDC-proof probe** described in
+`execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a
+change is not optional at GATE 3, and asking for it as a separate mid-validation approval
+just adds a round-trip for something already implied by choosing a CDC method. No separate
+authorization needed when Phase 7 reaches it.
 
 ### Phase 4–5: Provision the target
 
@@ -298,7 +304,9 @@ customer; any RED period resets the consecutive-green counter. Client discovery 
 alongside. Invite the customer to point read-only test traffic or load tests at the target
 during this window. Cutover readiness unlocks only at **N consecutive greens + the signed
 soak-exit row** in `authorizations.md`. Shortening or skipping is a waiver
-(engagement-safety.md §Waiver protocol).
+(engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
+concurrently with this soak, not after it** — they test different things and don't depend
+on each other; don't serialize two independent waits.
 
 ### Phase 8: Cutover — handover (Mode 2) or execution (Mode 3)
 
