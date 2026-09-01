@@ -31,6 +31,14 @@ migration → monitoring. Tag everything via `Tags.of(app).add(...)` from consta
 ## network-stack.ts — import, don't create
 
 The source's VPC already exists. Look it up; never create a new VPC for a migration.
+This applies to the **target's** VPC too, whether or not the source is EC2-hosted: when
+the source is in AWS (same account/VPC as the target), `VPC_ID` is naturally that VPC.
+When the source is external (on-prem/another cloud — nothing called "the source's VPC"
+exists in AWS at all), `VPC_ID` still comes from discovery, not from the agent deciding
+to provision one — it's whatever existing target VPC the customer confirmed in Phase 1
+discovery input #2 (`target-provisioning.md` §Network Placement). Only synthesize a new
+VPC/subnet group when the customer has explicitly confirmed there's no existing target
+infrastructure to reuse (greenfield/PoC).
 
 ```typescript
 const vpc = ec2.Vpc.fromLookup(this, 'Vpc', { vpcId: constants.VPC_ID });

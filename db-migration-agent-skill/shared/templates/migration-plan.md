@@ -31,7 +31,7 @@
 | # | Question | Answer |
 |---|----------|--------|
 | 1 | Source engine/version/location **(if not EC2/plain on-prem VM: self-managed w/ OS access, or managed DB product?)** | |
-| 2 | Target service/version | |
+| 2 | Target service/version **and network placement** — existing VPC/subnet group/SGs/KMS key to reuse, or provision new networking? | |
 | 3 | DB size / table count | |
 | 4 | Downtime tolerance | |
 | 5 | RPO if rollback | |

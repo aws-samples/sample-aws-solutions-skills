@@ -188,7 +188,10 @@ which questions apply.
 Collect the 18 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
 a plain on-prem VM: state whether the source is self-managed with OS access, or a managed DB
 product — this decides which method-matrix row even applies; see
-source-assessment.md §Execution Location)**, target,
+source-assessment.md §Execution Location)**, target **(service/version, and its network
+placement — does an existing VPC/subnet group/security groups/KMS key already exist for
+this instance to reuse, or is fresh networking being provisioned? See
+target-provisioning.md §Network Placement)**,
 size, **downtime tolerance**, **RPO on rollback**, usable bandwidth, schema-object needs,
 app modifiability, **how each app finds the DB today**, downstream CDC consumers,
 compliance mandates, **Korean security appliances and their mode**, multi-DB,

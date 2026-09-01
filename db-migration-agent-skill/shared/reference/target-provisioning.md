@@ -1,4 +1,4 @@
-# Target Provisioning — Aurora vs RDS, Immutable Settings, RDS Proxy, TLS Gate
+# Target Provisioning — Network Placement, Aurora vs RDS, Immutable Settings, RDS Proxy, TLS Gate
 
 > Read this during **Phase 4 (Provision Target)**. Wrong choices here are the #1 cause of
 > "recreate the whole instance" rework — several settings are fixed at creation.
@@ -7,6 +7,32 @@
 ---
 
 ## Target Provisioning
+
+### Network Placement — ask before assuming you'll provision new networking
+
+Never default to "the agent creates a new VPC/subnet group" without asking. Most
+customers past the PoC stage already have a landing-zone VPC, subnet layout, security
+groups, and a KMS/CMK convention the new instance is expected to live in — provisioning
+parallel, disconnected networking instead of reusing theirs is the kind of rework that
+gets a migration rejected at review.
+
+Ask directly in Phase 1 discovery input #2: does an existing target VPC/subnet
+group/security groups/KMS key already exist for this instance, or should new networking
+be provisioned as part of this engagement (genuinely greenfield/PoC accounts, or a
+customer who explicitly wants isolated migration infrastructure)?
+
+- **Existing infra confirmed** → capture VPC ID, subnet IDs (≥2 AZs) or subnet group name,
+  security group(s) to reuse or reference, and KMS key ARN if there's a CMK convention.
+  `network-stack.ts` looks these up (`ec2.Vpc.fromLookup`) — see
+  [../patterns/cdk-stacks.md](../patterns/cdk-stacks.md) §network-stack.ts.
+- **No existing infra / explicit greenfield** → provision fresh VPC/subnet/SG/KMS
+  resources via CDK, and record in `migration-plan.md` that this was a deliberate choice,
+  not a default.
+
+This is independent of the source-side VPC question (`source-assessment.md` §Execution
+Location) — when the source is external (on-prem/another cloud), there is no "the
+source's VPC" in AWS at all, so the target's network placement is its own decision, not
+inherited from anywhere.
 
 ### Aurora vs RDS Selection
 
