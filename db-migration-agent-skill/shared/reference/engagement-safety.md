@@ -134,6 +134,29 @@ and waiver lives in **`authorizations.md`** (template in `shared/templates/`), w
 named person and date. `migration-plan.md` gate rows point at the corresponding
 authorization row. The customer can hand the file to an auditor.
 
+## Surfacing what's needed from the user
+
+Every message that ends waiting on the user — a GATE, an A2/A3/A4 authorization, a missing
+named approver, any open question — must end with a standalone checklist block, after all
+narrative and analysis, so a skimming reader never has to hunt for what's blocking:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔲 ACTION NEEDED — GATE 2: Method approval
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. [ ] Named approver for authorizations.md (required before any A2/A3 action)
+2. [ ] Approve DMS as a recorded deviation from the matrix (row 4 would be the default)
+3. [ ] Approve dms.t3.small sizing
+4. [ ] Approve the ≈$3.25 one-time / ≈$50/mo cost estimate
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+Rules: last thing in the message, nothing above it; one scannable sentence per item, no
+justification inline (that belongs in the narrative above — the checklist is purely "what
+do you need to do"); numbered so the user can reply "approve 1, 3, 4, need clarification on
+2"; every open item enumerated, none left implicit. Distinct from the phase banners in hard
+constraint 11 — those report progress, this requests a decision.
+
 Action classes requiring a row **before** first execution:
 1. Read-only source access (assessment)
 2. Source writes (blocker fixes, migration user creation — each listed individually)

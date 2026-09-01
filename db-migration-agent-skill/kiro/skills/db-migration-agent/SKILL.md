@@ -92,6 +92,12 @@ hard constraint 10.
     -m http.server 8080)` to every completion banner after it. A customer stakeholder
     skimming the chat should be able to tell what's happening — and that a dashboard
     exists — without reading the whole transcript.
+12. **End every message that's waiting on the user with a single, unmissable checklist of
+    exactly what they need to do.** Long analysis is fine above it, but a user skimming
+    must never have to hunt through prose to find what's blocking — every pending approval,
+    open question, or missing named-approver row goes in this list, nothing blocking exists
+    only in prose. Exact format and a worked example in
+    `shared/reference/engagement-safety.md` §Surfacing what's needed from the user.
 
 ## Execution model
 
