@@ -334,7 +334,7 @@ If you used DMS, binlog replication, or S3 import — schema objects must be mig
 
 ```bash
 # MySQL: Export schema objects only (no data)
-mysqldump --routines --triggers --events --no-data --no-create-info \
+mysqldump --routines --triggers --events --no-data --skip-lock-tables \
   -h $SOURCE -u admin -p your_db > schema_objects.sql
 
 # Remove DEFINER clauses (they break on Aurora)
@@ -343,6 +343,47 @@ sed -i 's/DEFINER=[^*]*\*/\*/g' schema_objects.sql
 # Import to target
 mysql -h $TARGET -u admin -p your_db < schema_objects.sql
 ```
+
+Two gotchas, both confirmed against a live MySQL 8.0 source:
+- **Do not add `--no-create-info`.** It silently drops views with no error — mysqldump
+  emits a view via a temporary placeholder `CREATE TABLE` + a later `CREATE VIEW`
+  replacement, and `--no-create-info` suppresses both halves of that mechanism. Triggers
+  and procedures are unaffected; only views vanish. The placeholder
+  `DROP TABLE IF EXISTS`/`CREATE TABLE` pair that appears per view in the output is
+  expected and harmless on import — there's no real base table by that name to collide
+  with. If you want to avoid the mechanism entirely, `SHOW CREATE VIEW <name>` is a clean
+  explicit alternative with the same minimal privileges.
+- **`--skip-lock-tables` is required against a genuinely read-only account** (SELECT +
+  SHOW VIEW + TRIGGER + EVENT, no LOCK TABLES) — exactly what a managed-DB provider or a
+  cautious customer typically hands out. Without it, mysqldump fails outright with
+  `Access denied ... when using LOCK TABLES`, even for a `--no-data` dump. Safe here since
+  there's no data being read for consistency to worry about.
+
+### Load Order — Tables, Then Data, Then Views/Procs, Then Triggers Last
+
+Don't apply `schema_objects.sql` in one shot alongside the table structure. Sequence it:
+
+1. **Create base tables** on the target — structure only, no triggers yet.
+2. **Bulk-load the data** (DMS Full Load, mysqldump restore, or physical backup restore).
+   No triggers exist on the target yet, so there's no per-row trigger overhead during the
+   load and no risk of triggers double-processing logic the source side already applied
+   before the data was captured.
+3. **Once the data load completes** (and, if running CDC, once it's caught up to
+   near-real-time) — create views, procedures, functions, and events. These don't touch
+   existing rows; they only need the table structure to exist, which it already does.
+4. **Create triggers last, immediately before cutover** — not "create then disable."
+   MySQL triggers have no native enable/disable toggle; the only way to keep one inactive
+   during the load is to defer its creation entirely until you're ready for it to be live.
+5. **At cutover**, triggers are now active, so genuinely new application writes (i.e.,
+   ones that happen after cutover) get the trigger logic applied fresh — matching how they
+   behaved on the source.
+
+Concretely: a `BEFORE INSERT` trigger that defaults a NULL column (or, more generally, any
+trigger with side effects — audit logging, counters, notifications) would otherwise fire
+on every single bulk-loaded historical row during Full Load. That's both a performance
+cost (millions of trigger invocations for data that's just being copied, not created) and
+a correctness risk (replaying migration-time bulk data through logic that was written for
+live application traffic, not backfill).
 
 ```bash
 # PostgreSQL: Functions, triggers, views, types
