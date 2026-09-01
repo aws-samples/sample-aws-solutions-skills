@@ -91,6 +91,34 @@ h2{font-size:14px;font-weight:800;margin:26px 0 10px;color:var(--ink)}
 .phase-count{font-family:var(--mono);font-size:11.5px;color:var(--ink-s);flex:none}
 .phase .pbar{margin-top:8px}
 
+/* ── migration objects (tables/views/procs/triggers/events detail) ── */
+#objects{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:10px}
+.obj-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+.obj-card-wide{grid-column:1/-1}
+.obj-card-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
+.obj-title{font-weight:800;font-size:12.5px;letter-spacing:.01em}
+.obj-count{font-family:var(--mono);font-size:11px;color:var(--ink-s)}
+.obj-items{display:flex;flex-direction:column;gap:6px}
+.obj-item{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+.obj-item.obj-empty{color:var(--muted)}
+.obj-note{color:var(--muted);font-size:10.5px}
+.obj-badge{flex:none;font-size:9px;font-weight:800;letter-spacing:.03em;padding:2px 7px;
+  border-radius:100px;font-family:var(--mono);white-space:nowrap}
+.obj-badge.validated,.obj-badge.created{background:rgba(16,185,129,.16);color:var(--good)}
+.obj-badge.loaded,.obj-badge.loading{background:rgba(224,145,59,.16);color:var(--warn)}
+.obj-badge.pending{background:rgba(111,138,128,.14);color:var(--pending)}
+.obj-badge.deferred{background:rgba(139,123,232,.16);color:var(--violet)}
+.obj-table{width:100%;border-collapse:collapse;font-size:12px}
+.obj-table th{text-align:left;font-size:10.5px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.04em;font-weight:700;padding:6px 8px;border-bottom:1px solid var(--border)}
+.obj-table td{padding:7px 8px;border-bottom:1px solid var(--border2)}
+.obj-table td.num{text-align:right}
+.obj-table tr:last-child td{border-bottom:none}
+.obj-table tr.row-mismatch{background:rgba(224,84,106,.08)}
+.cs-ok{color:var(--good);font-weight:700;font-size:11.5px}
+.cs-bad{color:var(--crit);font-weight:700;font-size:11.5px}
+.cs-pending{color:var(--muted);font-size:11.5px}
+
 /* ── activity log ── */
 #log{display:flex;flex-direction:column;gap:0}
 .entry{display:flex;gap:12px;padding:11px 4px;border-bottom:1px solid var(--border2)}

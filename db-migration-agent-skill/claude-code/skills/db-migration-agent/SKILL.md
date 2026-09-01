@@ -158,8 +158,10 @@ over as a single copy-paste block and ask for the output).
 3. Create `migration-plan.md` and `authorizations.md` from the templates in the working
    directory. Scaffold `dashboard/` the same moment (`shared/reference/dashboard.md`) —
    copy `dashboard.css`/`dashboard.js` verbatim, instantiate `dashboard.html` as
-   `dashboard/index.html`, seed `status.json` with every phase `pending` and every
-   cutover gate `met:false`, and **create an empty `activity-log.jsonl`** — the page
+   `dashboard/index.html`, seed `status.json` with every phase `pending`, every
+   cutover gate `met:false`, and `migration_objects` present with `total:0` per type
+   (filled in once Phase 2 discovers the real counts — `shared/reference/dashboard.md`),
+   and **create an empty `activity-log.jsonl`** — the page
    fetches both files together and a missing one fails the whole render. The moment it
    exists, surface it as its own callout — never bury it in a list of created files:
    "📊 **Live progress dashboard ready** — from this directory: `cd dashboard && python3 -m

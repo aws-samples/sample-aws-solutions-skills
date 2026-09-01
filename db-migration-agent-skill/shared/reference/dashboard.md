@@ -75,7 +75,23 @@ If it was worth a line in the plan, it is worth updating both dashboard files.
     {"key": "runbook",          "label": "런북 · 롤백 준비",           "met": false, "detail": "생성 대기"},
     {"key": "approvals",        "label": "필요 승인 서명",             "met": false, "detail": "GATE 1·2 완료, A4b 인수인계 승인 대기 (authorizations.md)"}
   ],
-  "cutover_ready": false
+  "cutover_ready": false,
+  "migration_objects": {
+    "tables": {
+      "total": 4, "loaded": 4, "validated": 3,
+      "items": [
+        {"name": "customers",    "rows_source": 200000,  "rows_target": 200000,  "checksum_match": true,  "status": "validated"},
+        {"name": "orders",       "rows_source": 800000,  "rows_target": 800000,  "checksum_match": true,  "status": "validated"},
+        {"name": "order_items",  "rows_source": 2000000, "rows_target": 2000000, "checksum_match": true,  "status": "validated"},
+        {"name": "seed_numbers", "rows_source": 1000,    "rows_target": 1000,    "checksum_match": null,  "status": "loaded"}
+      ]
+    },
+    "views":      {"total": 1, "created": 1, "items": [{"name": "v_customer_order_totals", "status": "created"}]},
+    "procedures": {"total": 1, "created": 1, "items": [{"name": "sp_recent_orders",         "status": "created"}]},
+    "functions":  {"total": 0, "created": 0, "items": []},
+    "triggers":   {"total": 1, "created": 0, "items": [{"name": "trg_orders_default_status", "status": "deferred", "note": "created last, immediately before cutover — execution-runbooks.md load order"}]},
+    "events":     {"total": 0, "created": 0, "items": []}
+  }
 }
 ```
 
@@ -109,6 +125,27 @@ mark a gate `met:true` for either reason without one of these:
 - `overall_progress_pct` is informational only — sum of `done` across all phases ÷ sum of
   `total`, or your own reasonable estimate early on. It is deliberately **not** part of the
   cutover decision.
+- `migration_objects` — the detail behind the phase percentages: exactly how many of each
+  schema-object type exist, how many are done, and per-item evidence (row counts, checksum
+  match) rather than just a rollup number. One key per object type your source actually has
+  (`tables`, `views`, `procedures`, `functions`, `triggers`, `events` — omit a type entirely
+  if the source has zero of it, don't pad with empty totals). Populate progressively, not
+  all at once:
+  - **Phase 2** (assessment): set every `total` from the discovered object inventory, all
+    `items` at `status:"pending"`, no row counts yet.
+  - **Phase 6** (data load): as each table finishes loading, set its `rows_target` and
+    `status:"loaded"`.
+  - **Phase 7** (validation, GATE 3): as each table's checksum is confirmed, set
+    `checksum_match` and `status:"validated"`. A table with `checksum_match:false` is a
+    validation failure, not a display state — it blocks the `validation` cutover gate.
+  - **Views/procedures/functions/events**: `status:"created"` the moment their DDL is
+    applied on the target — this generally happens once, right after the data load
+    (`execution-runbooks.md` load order).
+  - **Triggers**: stay at `status:"deferred"` (not `"pending"` — this is the *expected*
+    state, not something stuck) until immediately before cutover, per the same load-order
+    guidance. Only flip to `"created"` as part of the cutover sequence itself.
+  - This section updates on the same "whenever `migration-plan.md` changes" trigger as
+    everything else on this page — no separate habit to remember.
 
 ## `activity-log.jsonl` — JSON Lines, APPEND ONLY, never rewritten
 

@@ -60,6 +60,67 @@
     }).join('');
   }
 
+  const OBJ_TYPE_LABEL = { tables: 'Tables', views: 'Views', procedures: 'Procedures',
+    functions: 'Functions', triggers: 'Triggers', events: 'Events' };
+  const OBJ_STATUS_BADGE = { pending: '대기', loading: '적재중', loaded: '적재완료',
+    validated: '검증완료', created: '생성완료', deferred: '컷오버 시 생성' };
+  const fmtNum = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString();
+
+  function renderTableRows(items) {
+    return items.map(it => {
+      const mismatch = it.checksum_match === false;
+      const cs = it.checksum_match === true ? '<span class="cs-ok">✓ 일치</span>'
+        : it.checksum_match === false ? '<span class="cs-bad">✗ 불일치</span>'
+        : '<span class="cs-pending">—</span>';
+      return `<tr class="${mismatch ? 'row-mismatch' : ''}">
+        <td class="mono">${esc(it.name)}</td>
+        <td class="num mono">${fmtNum(it.rows_source)}</td>
+        <td class="num mono">${fmtNum(it.rows_target)}</td>
+        <td>${cs}</td>
+        <td><span class="obj-badge ${esc(it.status)}">${OBJ_STATUS_BADGE[it.status] || esc(it.status)}</span></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderObjectCard(typeKey, o) {
+    const label = OBJ_TYPE_LABEL[typeKey] || typeKey;
+    const doneCount = (o.validated ?? o.created ?? o.loaded ?? 0);
+    if (typeKey === 'tables') {
+      return `<div class="obj-card obj-card-wide">
+        <div class="obj-card-head"><span class="obj-title">${label}</span>
+          <span class="obj-count">${doneCount}/${o.total} validated</span></div>
+        <table class="obj-table">
+          <thead><tr><th>Table</th><th>Source rows</th><th>Target rows</th><th>Checksum</th><th>Status</th></tr></thead>
+          <tbody>${renderTableRows(o.items || [])}</tbody>
+        </table>
+      </div>`;
+    }
+    const items = (o.items || []).map(it => {
+      const name = typeof it === 'string' ? it : it.name;
+      const status = typeof it === 'string' ? 'created' : it.status;
+      const note = typeof it === 'string' ? '' : (it.note || '');
+      return `<div class="obj-item">
+        <span class="obj-badge ${esc(status)}">${OBJ_STATUS_BADGE[status] || esc(status)}</span>
+        <span class="mono">${esc(name)}</span>
+        ${note ? `<span class="obj-note">${esc(note)}</span>` : ''}
+      </div>`;
+    }).join('') || '<div class="obj-item obj-empty">—</div>';
+    return `<div class="obj-card">
+      <div class="obj-card-head"><span class="obj-title">${label}</span>
+        <span class="obj-count">${doneCount}/${o.total}</span></div>
+      <div class="obj-items">${items}</div>
+    </div>`;
+  }
+
+  function renderObjects(s) {
+    const mo = s.migration_objects;
+    const box = $('#objects');
+    if (!mo || !Object.keys(mo).length) { box.innerHTML = '<div id="log-empty">아직 스키마 객체 인벤토리가 없습니다 (Phase 2 이후 채워집니다).</div>'; return; }
+    const order = ['tables', 'views', 'procedures', 'functions', 'triggers', 'events'];
+    const html = order.filter(k => mo[k] && mo[k].total > 0).map(k => renderObjectCard(k, mo[k])).join('');
+    box.innerHTML = html || '<div id="log-empty">이 소스에는 테이블 외 스키마 객체가 없습니다.</div>';
+  }
+
   function renderLog(lines) {
     if (!lines.length) { $('#log').innerHTML = '<div id="log-empty">아직 기록된 활동이 없습니다.</div>'; return; }
     const rows = lines.slice().reverse().map(e => `
@@ -95,6 +156,7 @@
       renderTiles(status);
       renderCutover(status);
       renderPhases(status);
+      renderObjects(status);
       if (log.length !== lastLogCount) { renderLog(log); lastLogCount = log.length; }
       $('#updated-text').innerHTML = `updated <b>${fmtTime(status.updated_at)}</b>`;
       const stale = status.updated_at && (Date.now() - new Date(status.updated_at).getTime() > 15 * 60 * 1000);
