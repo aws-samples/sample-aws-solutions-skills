@@ -92,6 +92,7 @@ hard constraint 10.
     -m http.server 8080)` to every completion banner after it. A customer stakeholder
     skimming the chat should be able to tell what's happening — and that a dashboard
     exists — without reading the whole transcript.
+    (The quoted wording below and in Phase 0 is a format template, not a fixed string — translate it into the user's conversation language per the Language rule above; keep the emoji/banner punctuation as-is.)
 12. **End every message that's waiting on the user with a single, unmissable checklist of
     exactly what they need to do.** Long analysis is fine above it, but a user skimming
     must never have to hunt through prose to find what's blocking — every pending approval,
@@ -149,6 +150,7 @@ over as a single copy-paste block and ask for the output).
    `authorizations.md`, a local progress dashboard) in this directory. Proceed?" This is a
    lightweight courtesy check-in (hard constraint 11), not one of GATES 1–4 — don't ask it
    like a real gate, just get a clear "yes" before running anything.
+   (Translate this into the user's conversation language — see the Language rule; the quote above is the English form of the template, not a literal string.)
 2. Ask the **mode question** (`shared/reference/engagement-safety.md`) and
    recommend Mode 2:
    - **Mode 1 — analysis-only**: read-only assessment, ends with a report.
@@ -168,8 +170,13 @@ over as a single copy-paste block and ask for the output).
    cutover gate `met:false`, and `migration_objects` present with `total:0` per type
    (filled in once Phase 2 discovers the real counts — `shared/reference/dashboard.md`),
    and **create an empty `activity-log.jsonl`** — the page
-   fetches both files together and a missing one fails the whole render. The moment it
-   exists, surface it as its own callout — never bury it in a list of created files:
+   fetches both files together and a missing one fails the whole render. Set `status.json`'s
+   `lang` field to match the conversation language you're actually operating in (`"ko"`,
+   `"en"`, etc. — `shared/reference/dashboard.md`); the dashboard's own UI chrome (section
+   headers, badges, table columns) renders from this field, separately from the phase
+   names/labels you write in prose. The moment the dashboard exists, surface it as its own
+   callout — never bury it in a list of created files (translate this callout too, same
+   template-not-literal rule as above):
    "📊 **Live progress dashboard ready** — from this directory: `cd dashboard && python3 -m
    http.server 8080` then open http://localhost:8080. This tracks phase progress and the 6
    cutover-readiness gates separately — share this URL with any stakeholder who wants to

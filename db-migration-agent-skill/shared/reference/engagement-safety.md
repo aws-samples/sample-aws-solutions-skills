@@ -155,7 +155,10 @@ Rules: last thing in the message, nothing above it; one scannable sentence per i
 justification inline (that belongs in the narrative above — the checklist is purely "what
 do you need to do"); numbered so the user can reply "approve 1, 3, 4, need clarification on
 2"; every open item enumerated, none left implicit. Distinct from the phase banners in hard
-constraint 11 — those report progress, this requests a decision.
+constraint 11 — those report progress, this requests a decision. The block above is the
+English form of the template — translate the header and every item into the user's
+conversation language (the Language rule in `SKILL.md` applies here too); keep the box
+characters, emoji, and `[ ]`/numbering exactly as shown.
 
 Action classes requiring a row **before** first execution:
 1. Read-only source access (assessment)

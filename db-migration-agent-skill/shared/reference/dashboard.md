@@ -14,7 +14,7 @@
 mkdir -p dashboard/assets
 cp <skill>/shared/assets/dashboard.css dashboard/assets/
 cp <skill>/shared/assets/dashboard.js  dashboard/assets/
-cp <skill>/shared/templates/dashboard.html dashboard/index.html   # then fill {prefix}/{mode}
+cp <skill>/shared/templates/dashboard.html dashboard/index.html   # verbatim, no edits needed
 : > dashboard/activity-log.jsonl                                  # must exist, even empty
 ```
 
@@ -51,6 +51,7 @@ If it was worth a line in the plan, it is worth updating both dashboard files.
   "engagement": "{prefix}",
   "updated_at": "2026-08-31T14:59:37+09:00",
   "mode": "2",
+  "lang": "ko",
   "overall_progress_pct": 62,
   "current_phase": "7.7",
   "current_activity": "병행 가동 — Day 3 리포트 생성 중",
@@ -96,6 +97,15 @@ If it was worth a line in the plan, it is worth updating both dashboard files.
 ```
 
 Field notes:
+- `lang` — an ISO 639-1 code (`"ko"`, `"en"`, ...) for the **page's own static UI chrome**
+  (tile labels, section headers, table column headers, badges, empty-state and
+  connection-error messages) — separate from the phase names/gate labels/activity text you
+  write yourself, which already follow the Language rule naturally since you write them
+  fresh each time. `dashboard.js` ships an `en`/`ko` label dictionary and defaults to `en`
+  if `lang` is absent (so a status.json written before this field existed still renders
+  correctly, just in English rather than the engagement's language). Set this once at
+  Phase 0 scaffold time to match the conversation language you're actually operating in —
+  don't leave it defaulted to `en` for a Korean-language engagement.
 - `phases[]` — one entry per `SKILL.md` phase (`0,1,2,3,4-5,6,7,7.5,7.7,8,9`). `status` is
   exactly one of `done|in_progress|pending` (a phase you have not started is `pending`, not
   omitted — the page always shows all 11 rows).
