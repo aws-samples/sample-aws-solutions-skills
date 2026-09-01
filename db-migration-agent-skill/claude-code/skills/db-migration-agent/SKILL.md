@@ -83,6 +83,15 @@ hard constraint 10.
     offered on RDS → check `aws rds describe-db-engine-versions`), and note that source → EC2 →
     RDS later means **two cutovers and two client repoints**. Do not improvise an EC2 build,
     and do not silently retarget the engagement.
+11. **Announce activation before touching anything, and keep phase progress visible in
+    chat.** Before Phase 0's first action, announce that the skill is activating and get a
+    lightweight go-ahead — exact wording and the dashboard-ready callout are in Phase 0
+    below; this is a courtesy check-in, not one of GATES 1–4. Then bracket every phase with
+    a one-line banner, `▶ Phase N: <name> — starting` / `✅ Phase N: <name> — complete`, and
+    once the dashboard exists (end of Phase 0), append `(dashboard: cd dashboard && python3
+    -m http.server 8080)` to every completion banner after it. A customer stakeholder
+    skimming the chat should be able to tell what's happening — and that a dashboard
+    exists — without reading the whole transcript.
 
 ## Execution model
 
@@ -127,7 +136,14 @@ over as a single copy-paste block and ask for the output).
 
 ### Phase 0: Preflight
 
-1. Ask the **mode question first** (`shared/reference/engagement-safety.md`) and
+1. **Announce activation and wait for a go-ahead — before anything else, before even the
+   mode question below.** Output: "🔧 **DB Migration Agent skill activated.** I'm about to
+   run read-only preflight checks (AWS account/region/quota sanity — nothing touches your
+   source database) and scaffold engagement tracking files (`migration-plan.md`,
+   `authorizations.md`, a local progress dashboard) in this directory. Proceed?" This is a
+   lightweight courtesy check-in (hard constraint 11), not one of GATES 1–4 — don't ask it
+   like a real gate, just get a clear "yes" before running anything.
+2. Ask the **mode question** (`shared/reference/engagement-safety.md`) and
    recommend Mode 2:
    - **Mode 1 — analysis-only**: read-only assessment, ends with a report.
    - **Mode 2 — migration-ready (recommended default)**: the full migration *except* the
@@ -139,19 +155,23 @@ over as a single copy-paste block and ask for the output).
      warnings and never propose it as the default.
    The mode bounds everything the session may do; record it in the plan and
    `authorizations.md` §1, and generate that mode's IAM guardrail policy.
-2. Create `migration-plan.md` and `authorizations.md` from the templates in the working
+3. Create `migration-plan.md` and `authorizations.md` from the templates in the working
    directory. Scaffold `dashboard/` the same moment (`shared/reference/dashboard.md`) —
    copy `dashboard.css`/`dashboard.js` verbatim, instantiate `dashboard.html` as
    `dashboard/index.html`, seed `status.json` with every phase `pending` and every
    cutover gate `met:false`, and **create an empty `activity-log.jsonl`** — the page
-   fetches both files together and a missing one fails the whole render. Print the local serve command
-   (`cd dashboard && python3 -m http.server 8080`) — do not start it yourself.
-3. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
+   fetches both files together and a missing one fails the whole render. The moment it
+   exists, surface it as its own callout — never bury it in a list of created files:
+   "📊 **Live progress dashboard ready** — from this directory: `cd dashboard && python3 -m
+   http.server 8080` then open http://localhost:8080. This tracks phase progress and the 6
+   cutover-readiness gates separately — share this URL with any stakeholder who wants to
+   watch progress without reading chat transcripts." Do not start the server yourself.
+4. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
    / migration failed midway, triage? Resume from the plan file if it exists.
-4. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
+5. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
    account, region, source reachability, engine-version availability, quotas, IAM
    simulation. Report ✅/❌ table. **STOP on ❌ and wait.**
-5. Note which MCP servers are connected (`shared/reference/mcp-and-tooling.md`).
+6. Note which MCP servers are connected (`shared/reference/mcp-and-tooling.md`).
    Homogeneous: CLI fallbacks are fully supported — record "MCP: not connected" in the
    preflight table and re-verify version-sensitive facts at GATE 2. **Heterogeneous: the
    Agent Toolkit (AWS MCP Server) is a prerequisite** — its absence is a Phase 0 blocker
