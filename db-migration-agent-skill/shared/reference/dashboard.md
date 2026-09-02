@@ -111,6 +111,7 @@ distinct ids, no id repeated.
     "n_total": 3,
     "consecutive_green": 2,
     "state": "active",
+    "last_checked_at": "2026-09-02T09:00:11+00:00",
     "days": [
       {"date": "2026-09-01", "overall": "green", "needs_agent_review": true,
        "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": null, "customer_test_suite": null},
@@ -163,8 +164,12 @@ mark a gate `met:true` for either reason without one of these:
   `total`, or your own reasonable estimate early on. It is deliberately **not** part of the
   cutover decision.
 - `soak` — rendered as its own prominent dashboard section, not folded into the phases
-  list, because this is the one gate stakeholders ask about most. `n_total` and
-  `consecutive_green` drive the "Day k / N" counter; `days[]` is append-only, one entry per
+  list, because this is the one gate stakeholders ask about most. `last_checked_at` is set
+  by `soak_check.py` on every run, and the dashboard flags it if more than 36 hours pass
+  without an update — a missed scheduled run (host down, cron didn't fire) otherwise looks
+  identical to "waiting for tomorrow." This is separate from the 15-minute chat-staleness
+  badge, which assumes an active session and would misfire on a normal once-daily cadence.
+  `n_total` and `consecutive_green` drive the "Day k / N" counter; `days[]` is append-only, one entry per
   period, each with the 8-check result set from `shared/templates/soak-report.md` (`null`
   for a check nothing autonomous can measure — `replication_lag` and
   `customer_test_suite` — never guess these, leave them `null` until you or the customer's

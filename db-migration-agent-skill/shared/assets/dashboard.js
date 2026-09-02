@@ -54,6 +54,7 @@
       soakCounterOf: (n) => `/ ${n} consecutive green`,
       soakDayLabel: (n) => `Day ${n}`,
       soakReviewBanner: (n) => `Day ${n} needs review — ask the agent to look at this before continuing`,
+      soakOverdueBanner: (hrs) => `No soak check in ${hrs}h — the scheduled run may have been missed (host down, cron didn't fire, script crashed). Verify it's still running.`,
       soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
       soakEmpty: 'Not started yet — begins once the target is current and validation is green.',
       soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', customer_test_suite: 'Customer test suite' },
@@ -97,6 +98,7 @@
       soakCounterOf: (n) => `/ ${n}일 연속 green`,
       soakDayLabel: (n) => `${n}일차`,
       soakReviewBanner: (n) => `${n}일차 확인 필요 — 계속하기 전에 에이전트에게 검토를 요청하세요`,
+      soakOverdueBanner: (hrs) => `${hrs}시간 동안 소크 점검이 실행되지 않았습니다 — 예약된 실행이 누락되었을 수 있습니다 (호스트 다운, cron 미실행, 스크립트 오류). 정상 동작 중인지 확인하세요.`,
       soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
       soakEmpty: '아직 시작되지 않았습니다 — 타깃이 최신 상태이고 검증이 green이 되면 시작됩니다.',
       soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', customer_test_suite: '고객 테스트' },
@@ -250,6 +252,12 @@
     const consecutive = soak.consecutive_green || 0;
     const needsReview = days.some(d => d.needs_agent_review);
     const lastReviewDay = days.map((d, i) => ({ d, i })).filter(x => x.d.needs_agent_review).pop();
+    // Distinct from the 15-min chat-staleness badge, which assumes an active session —
+    // a soak check runs roughly daily, so "overdue" means missing a run, not missing
+    // a few minutes. 36h gives one day's cadence a buffer before flagging.
+    const overdueHrs = soak.state === 'active' && soak.last_checked_at
+      ? (Date.now() - new Date(soak.last_checked_at).getTime()) / 3600000 : 0;
+    const isOverdue = overdueHrs > 36;
 
     const dayCells = days.map((d, i) => {
       const cls = d.overall === 'green' ? 'green' : 'red';
@@ -265,6 +273,7 @@
 
     box.innerHTML = `
       <div class="soak-explain">${esc(l.soakExplain(nTotal))}</div>
+      ${isOverdue ? `<div class="soak-review-banner">${esc(l.soakOverdueBanner(Math.floor(overdueHrs)))}</div>` : ''}
       ${needsReview ? `<div class="soak-review-banner">${esc(l.soakReviewBanner(lastReviewDay.i + 1))}</div>` : ''}
       <div class="soak-counter"><span class="n">${consecutive}</span><span class="of">${esc(l.soakCounterOf(nTotal))}</span></div>
       <div class="soak-days">${dayCells}</div>`;

@@ -133,27 +133,45 @@ script has no CDC-metric or external-test-suite access, and must never guess tho
 
 Setup: write a `dashboard/soak-config.json` (engine, source/target connection info,
 tables to spot-check, CloudWatch alarm names, target DB instance ID) once, per the schema
-in the script's own docstring. Two ways to schedule it — offer both, let the customer pick,
-and get their approval before creating either (a scheduled task or a Lambda is
-infrastructure, not something to set up invisibly):
+in the script's own docstring. Get the customer's approval before creating either
+scheduling option below — a scheduled task or a Lambda is infrastructure, not something
+to set up invisibly.
+
+**Never schedule this on a personal laptop or workstation for anything beyond a same-day
+check.** A multi-day soak window needs something running the whole time, and a laptop
+doesn't qualify — it sleeps, gets its lid closed, gets rebooted for an OS update, and a
+missed day produces no report and triggers no alert. Nobody notices until someone happens
+to look at the dashboard and sees an unexplained gap days later.
 
 ```bash
-# Option A — cron, from the customer's own machine or a bastion they control:
+# Default choice — cron, on the migration bastion (not a personal machine). The bastion
+# is already part of this engagement's standard setup, already reachable to both source
+# and target, and is going to be running for the duration anyway — no new infrastructure
+# needed for a typical short engagement:
 # 0 9 * * * cd /path/to/engagement && python3 shared/scripts/soak_check.py --config dashboard/soak-config.json >> soak.log 2>&1
 ```
 
 ```bash
-# Option B — EventBridge Scheduler + Lambda, for a fully AWS-native, hands-off setup:
-# package soak_check.py (stdlib + `aws` CLI available in the Lambda runtime, or boto3
-# equivalents for the CloudWatch/RDS calls) into a Lambda, trigger daily via
-# EventBridge Scheduler, write status.json/activity-log.jsonl to the same S3-backed or
-# EFS-mounted location the dashboard reads from.
+# More robust alternative — EventBridge Scheduler + Lambda: pure AWS-managed, nothing to
+# keep alive at all. More setup than the bastion cron, but worth it for a longer-running
+# or more critical soak window: package soak_check.py (stdlib + `aws` CLI available in
+# the Lambda runtime, or boto3 equivalents for the CloudWatch/RDS calls) into a Lambda,
+# trigger daily via EventBridge Scheduler, write status.json/activity-log.jsonl to the
+# same S3-backed or EFS-mounted location the dashboard reads from.
 ```
 
 Exit code 0 = clean day, no review needed. Exit code 2 = `needs_agent_review: true` was
 set (any check false, or a check came back null unexpectedly) — treat this exactly like a
 RED day until a human or the agent has actually looked at it, even if the script's own
 `overall` verdict happened to read green.
+
+**Whichever host runs it, a missed run needs to be visible on its own** — a silently
+skipped day looks identical to "waiting for tomorrow" otherwise. `soak_check.py` writes
+`soak.last_checked_at` on every run; the dashboard flags it directly if more than 36 hours
+pass without an update (a dedicated check, not the existing 15-minute chat-staleness
+badge — that one assumes an active session, and would falsely flag every normal day of a
+once-daily cadence). Confirm this banner is actually visible on the dashboard before
+walking away from a multi-day soak.
 
 ### If XtraBackup Seed + Binlog/DMS CDC Catch-up (large MySQL, minimal downtime — matrix row 6)
 

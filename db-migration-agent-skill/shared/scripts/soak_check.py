@@ -155,6 +155,10 @@ def update_status_json(status_path, day_result, n_total):
     soak["days"].append(day_result)
     soak["consecutive_green"] = 0 if day_result["overall"] != "green" else soak["consecutive_green"] + 1
     soak["n_total"] = n_total
+    # Lets the dashboard flag a silently-missed run (host was down, cron didn't fire,
+    # script crashed) — a stale soak.days[] entry looks identical to "waiting for
+    # tomorrow" unless something records when the last run actually happened.
+    soak["last_checked_at"] = datetime.datetime.now().astimezone().isoformat()
     soak["state"] = "complete" if soak["consecutive_green"] >= n_total else "active"
     status["soak"] = soak
     status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False))
