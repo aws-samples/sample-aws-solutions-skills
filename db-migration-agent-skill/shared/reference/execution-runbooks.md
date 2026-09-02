@@ -115,6 +115,46 @@ validation, never a real application table, never left behind. If DDL asymmetry 
 in step 4, log it as a pre-cutover schema-drift check for the runbook — any real schema
 change during the migration window needs the same "verify both sides" discipline.
 
+### Soak automation (Phase 7.7 — optional, offer it, don't set it up silently)
+
+The 8-check soak-report checklist (`shared/templates/soak-report.md`) has two kinds of
+check: native CloudWatch alarms (latency/CPU/memory/connections) already run unattended,
+but row-count/checksum/schema-drift/storage-headroom don't — nothing autonomous runs them
+today unless you set something up. Without automation, a daily soak report only gets
+produced when a human re-invokes the agent that day, which is easy to forget across a
+multi-day window.
+
+`shared/scripts/soak_check.py` runs the mechanical half of the checklist standalone — row
+count, checksum, schema drift, alarm state, storage headroom — against source and target
+directly, no LLM involvement needed for the routine all-green case, and writes the results
+straight into `dashboard/status.json`'s `soak` object (schema: `dashboard.md` §soak) plus
+that day's report file. `replication_lag` and `customer_test_suite` stay `null` — this
+script has no CDC-metric or external-test-suite access, and must never guess those.
+
+Setup: write a `dashboard/soak-config.json` (engine, source/target connection info,
+tables to spot-check, CloudWatch alarm names, target DB instance ID) once, per the schema
+in the script's own docstring. Two ways to schedule it — offer both, let the customer pick,
+and get their approval before creating either (a scheduled task or a Lambda is
+infrastructure, not something to set up invisibly):
+
+```bash
+# Option A — cron, from the customer's own machine or a bastion they control:
+# 0 9 * * * cd /path/to/engagement && python3 shared/scripts/soak_check.py --config dashboard/soak-config.json >> soak.log 2>&1
+```
+
+```bash
+# Option B — EventBridge Scheduler + Lambda, for a fully AWS-native, hands-off setup:
+# package soak_check.py (stdlib + `aws` CLI available in the Lambda runtime, or boto3
+# equivalents for the CloudWatch/RDS calls) into a Lambda, trigger daily via
+# EventBridge Scheduler, write status.json/activity-log.jsonl to the same S3-backed or
+# EFS-mounted location the dashboard reads from.
+```
+
+Exit code 0 = clean day, no review needed. Exit code 2 = `needs_agent_review: true` was
+set (any check false, or a check came back null unexpectedly) — treat this exactly like a
+RED day until a human or the agent has actually looked at it, even if the script's own
+`overall` verdict happened to read green.
+
 ### If XtraBackup Seed + Binlog/DMS CDC Catch-up (large MySQL, minimal downtime — matrix row 6)
 
 Combine the two procedures above: the physical copy does the bulk, CDC closes the delta.

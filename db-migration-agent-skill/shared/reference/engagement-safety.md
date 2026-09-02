@@ -133,6 +133,33 @@ exactly as before (§Waiver protocol). The tier itself, and the signal that prod
 gets recorded alongside the parameter in `authorizations.md` so a later reader can see
 *why* N was what it was, not just the number.
 
+### Soak decision script
+
+Never let the parallel-run parameter arrive as a bare number inside the engagement-parameters
+list. When discovery reaches it, say something like this (translate into the customer's
+language; keep the structure, not the exact words):
+
+> A parallel run (soak) means: your old database keeps running production traffic exactly
+> as it does today — nothing is at risk yet. The new database just sits alongside it,
+> receiving every change in real time. We watch that pipeline for [N] day(s) before we
+> ever recommend the actual switch.
+>
+> Why bother, if the data already checked out? Because a one-time check can only see what's
+> true *right now*. It can't see a job that only runs at 2 AM, or once a week — and that's
+> not hypothetical: exactly this (a cron job invisible to a point-in-time connection check)
+> is a real thing this same kind of migration has caught. A [N]-day window is what turns
+> "looked fine when we checked" into "actually keeps working."
+>
+> For your case, the signal is [state the tier's signal — e.g. "non-production, no live
+> write traffic, hours of downtime tolerance"], so the proposed length is **[N] day(s)**.
+> Do you want to keep that, shorten it, or skip it entirely? Either way I'll record which
+> and why.
+
+Record the answer **and the stated reasoning** in `authorizations.md` — "waived, customer
+accepted the risk because X" or "kept at 3 days because Y," never just the number. This is
+a default the agent proposes proactively; it is never framed as something the customer has
+to think to ask for.
+
 ## Waiver protocol
 
 When the customer declines a recommended parameter (rehearsal, parallel-run length,

@@ -219,7 +219,14 @@ compliance mandates, **Korean security appliances and their mode**, multi-DB,
 cross-region/account, KMS key type, the **engagement parameters** (#16 — rehearsal,
 parallel-run length N, validation depth, rollback strategy, approver names; defaults and
 the "if this DB is wrong for an hour" sizing guidance are in engagement-safety.md
-§Engagement parameters — and in Mode 2 also the **handover depth**: (a) full preparation
+§Engagement parameters. **The parallel-run (soak) item specifically is never just a number
+in this list** — present it as its own explicit decision, per engagement-safety.md §Soak
+decision script: explain plainly what it is, why it exists (the concrete failure class a
+one-time validation can't see), the proposed length and the signal behind it, then ask the
+customer to keep / shorten / waive it — and record whichever they choose, with their
+stated reasoning, not just the resulting number. This is a default proposal, never an
+opt-in — do not present soak as something that only happens if asked for. — and in Mode 2
+also the **handover depth**: (a) full preparation
 with CDC kept current + clone-rehearsed timings, or (b) light preparation where the
 customer starts replication themselves), **third-party tools on or in front of the DB**
 (#17 — security, backup,

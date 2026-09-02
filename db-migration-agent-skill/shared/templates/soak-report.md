@@ -9,7 +9,7 @@
 
 | Check | Threshold | Today | Pass |
 |-------|-----------|-------|:---:|
-| Replication lag (max over day) | < {5}s | {…} | ▢ |
+| Replication lag (max over day) | < {30}s (matches the CDCLatencySource/Target warning threshold elsewhere in this skill — AWS gives no CDC latency SLA, so this is a soft, tunable gate, not a hard number) | {…} | ▢ |
 | Replication errors | 0 | {…} | ▢ |
 | Row-count spot check ({3-5 tables}, at a freeze-consistent instant) | exact match | {…} | ▢ |
 | Checksum spot check ({1-2 static tables}) | identical | {…} | ▢ |

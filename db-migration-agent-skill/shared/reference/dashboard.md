@@ -106,6 +106,19 @@ distinct ids, no id repeated.
     "functions":  {"total": 0, "created": 0, "items": []},
     "triggers":   {"total": 1, "created": 0, "items": [{"name": "trg_orders_default_status", "status": "deferred", "note": "created last, immediately before cutover — execution-runbooks.md load order"}]},
     "events":     {"total": 0, "created": 0, "items": []}
+  },
+  "soak": {
+    "n_total": 3,
+    "consecutive_green": 2,
+    "state": "active",
+    "days": [
+      {"date": "2026-09-01", "overall": "green", "needs_agent_review": true,
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": null, "customer_test_suite": null},
+       "detail": {}},
+      {"date": "2026-09-02", "overall": "green", "needs_agent_review": false,
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": true, "customer_test_suite": true},
+       "detail": {}}
+    ]
   }
 }
 ```
@@ -149,6 +162,22 @@ mark a gate `met:true` for either reason without one of these:
 - `overall_progress_pct` is informational only — sum of `done` across all phases ÷ sum of
   `total`, or your own reasonable estimate early on. It is deliberately **not** part of the
   cutover decision.
+- `soak` — rendered as its own prominent dashboard section, not folded into the phases
+  list, because this is the one gate stakeholders ask about most. `n_total` and
+  `consecutive_green` drive the "Day k / N" counter; `days[]` is append-only, one entry per
+  period, each with the 8-check result set from `shared/templates/soak-report.md` (`null`
+  for a check nothing autonomous can measure — `replication_lag` and
+  `customer_test_suite` — never guess these, leave them `null` until you or the customer's
+  test run actually supplies a value). `shared/scripts/soak_check.py` is a standalone
+  script that runs the mechanical checks (row count, checksum, schema drift, alarm state,
+  storage headroom) against source and target directly and writes this object itself, no
+  agent invocation needed for the routine all-green case — see
+  `execution-runbooks.md` §Soak automation for how to configure and schedule it. A day it
+  writes with `needs_agent_review: true` (any RED, or either null check) must get you to
+  actually look at it before the next period — the dashboard surfaces this as a standalone
+  banner, not just a colored cell. If soak is waived, set `{"waived": true, "waived_reason": "..."}`
+  instead of the fields above — the page renders the waiver reason plainly rather than an
+  empty section.
 - `migration_objects` — the detail behind the phase percentages: exactly how many of each
   schema-object type exist, how many are done, and per-item evidence (row counts, checksum
   match) rather than just a rollup number. One key per object type your source actually has

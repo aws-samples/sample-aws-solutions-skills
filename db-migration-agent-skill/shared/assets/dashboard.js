@@ -48,6 +48,16 @@
       objStatusBadge: { pending: 'pending', loading: 'loading', loaded: 'loaded', validated: 'validated', created: 'created', deferred: 'deferred to cutover' },
       phaseBadge: { done: 'done', in_progress: 'in progress', pending: 'pending', blocked: 'blocked' },
       objectsCountSuffix: 'validated',
+      soakH2: 'Parallel-Run Soak',
+      soakSub: 'observation window before cutover is recommended',
+      soakExplain: (n) => `The old database stays live and authoritative; the new one just receives replicated changes in the background — nothing is at risk yet. We watch it for ${n} consecutive green day(s) before recommending cutover, because a one-time check can only see what's true right now — it can't catch something like a job that only runs at 2am, which a snapshot check would simply never observe.`,
+      soakCounterOf: (n) => `/ ${n} consecutive green`,
+      soakDayLabel: (n) => `Day ${n}`,
+      soakReviewBanner: (n) => `Day ${n} needs review — ask the agent to look at this before continuing`,
+      soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
+      soakEmpty: 'Not started yet — begins once the target is current and validation is green.',
+      soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', customer_test_suite: 'Customer test suite' },
+      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?',
     },
     ko: {
       pageTitle: '마이그레이션 진행 상태',
@@ -81,6 +91,16 @@
       objStatusBadge: { pending: '대기', loading: '적재중', loaded: '적재완료', validated: '검증완료', created: '생성완료', deferred: '컷오버 시 생성' },
       phaseBadge: { done: '완료', in_progress: '진행중', pending: '대기', blocked: '중단' },
       objectsCountSuffix: '검증완료',
+      soakH2: '병행 가동 (Soak)',
+      soakSub: '컷오버 권고 전 관찰 기간',
+      soakExplain: (n) => `기존 DB는 그대로 라이브 상태를 유지하고, 새 DB는 백그라운드로 변경분만 복제받습니다 — 아직 아무 위험도 없습니다. 컷오버를 권고하기 전까지 ${n}일 연속 green을 확인합니다. 한 번의 점검으로는 "지금 이 순간" 사실만 알 수 있고, 새벽 2시에만 실행되는 작업처럼 스냅샷 점검으로는 절대 볼 수 없는 것들이 있기 때문입니다.`,
+      soakCounterOf: (n) => `/ ${n}일 연속 green`,
+      soakDayLabel: (n) => `${n}일차`,
+      soakReviewBanner: (n) => `${n}일차 확인 필요 — 계속하기 전에 에이전트에게 검토를 요청하세요`,
+      soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
+      soakEmpty: '아직 시작되지 않았습니다 — 타깃이 최신 상태이고 검증이 green이 되면 시작됩니다.',
+      soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', customer_test_suite: '고객 테스트' },
+      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?',
     },
   };
 
@@ -109,6 +129,7 @@
     $('#lbl-now-running').textContent = l.nowRunning;
     $('#lbl-phases-h2').textContent = l.phasesH2;
     $('#lbl-objects-h2').innerHTML = `${esc(l.objectsH2)} <span style="color:var(--muted);font-weight:400;font-size:11px">${esc(l.objectsSub)}</span>`;
+    $('#lbl-soak-h2').innerHTML = `${esc(l.soakH2)} <span style="color:var(--muted);font-weight:400;font-size:11px">${esc(l.soakSub)}</span>`;
     $('#lbl-log-h2').innerHTML = `${esc(l.logH2)} <span style="color:var(--muted);font-weight:400;font-size:11px">${esc(l.logSub)}</span>`;
     $('#footer-text').textContent = l.footer;
   }
@@ -214,6 +235,41 @@
     box.innerHTML = html || `<div id="log-empty">${esc(l.objectsNone)}</div>`;
   }
 
+  function renderSoak(s) {
+    const l = L();
+    const box = $('#soak');
+    const soak = s.soak;
+    if (!soak || soak.waived) {
+      box.innerHTML = soak && soak.waived
+        ? `<div class="soak-waived">${esc(l.soakWaived(soak.waived_reason))}</div>`
+        : `<div id="soak-empty">${esc(l.soakEmpty)}</div>`;
+      return;
+    }
+    const nTotal = soak.n_total || 0;
+    const days = soak.days || [];
+    const consecutive = soak.consecutive_green || 0;
+    const needsReview = days.some(d => d.needs_agent_review);
+    const lastReviewDay = days.map((d, i) => ({ d, i })).filter(x => x.d.needs_agent_review).pop();
+
+    const dayCells = days.map((d, i) => {
+      const cls = d.overall === 'green' ? 'green' : 'red';
+      const checksHtml = Object.entries(d.checks || {}).map(([k, v]) => {
+        const mark = v === true ? l.soakCheckPass : v === false ? l.soakCheckFail : l.soakCheckUnknown;
+        return `<div><span>${esc(l.soakCheckLabel[k] || k)}</span><span>${mark}</span></div>`;
+      }).join('');
+      return `<div class="soak-day ${cls}">${i + 1}
+        <div class="soak-day-detail"><b>${esc(l.soakDayLabel(i + 1))} · ${esc(d.date || '')}</b>${checksHtml}</div>
+      </div>`;
+    }).join('') + Array.from({ length: Math.max(0, nTotal - days.length) }).map(() =>
+      `<div class="soak-day pending">·</div>`).join('');
+
+    box.innerHTML = `
+      <div class="soak-explain">${esc(l.soakExplain(nTotal))}</div>
+      ${needsReview ? `<div class="soak-review-banner">${esc(l.soakReviewBanner(lastReviewDay.i + 1))}</div>` : ''}
+      <div class="soak-counter"><span class="n">${consecutive}</span><span class="of">${esc(l.soakCounterOf(nTotal))}</span></div>
+      <div class="soak-days">${dayCells}</div>`;
+  }
+
   function renderLog(lines) {
     const l = L();
     if (!lines.length) { $('#log').innerHTML = `<div id="log-empty">${esc(l.logEmpty)}</div>`; return; }
@@ -252,6 +308,7 @@
       renderCutover(status);
       renderPhases(status);
       renderObjects(status);
+      renderSoak(status);
       if (log.length !== lastLogCount) { renderLog(log); lastLogCount = log.length; }
       $('#updated-text').innerHTML = `${esc(L().updatedPrefix)} <b>${fmtTime(status.updated_at)}</b>`;
       const stale = status.updated_at && (Date.now() - new Date(status.updated_at).getTime() > 15 * 60 * 1000);
