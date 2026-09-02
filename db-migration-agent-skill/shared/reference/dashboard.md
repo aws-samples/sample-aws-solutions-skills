@@ -178,11 +178,11 @@ distinct ids, no id repeated.
     "state": "active",
     "last_checked_at": "2026-09-02T09:00:11+00:00",
     "days": [
-      {"date": "2026-09-01", "overall": "green", "needs_agent_review": true,
-       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": null, "customer_test_suite": null},
+      {"date": "2026-09-01", "overall": "red", "needs_agent_review": true,
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": false, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable"},
        "detail": {}},
       {"date": "2026-09-02", "overall": "green", "needs_agent_review": false,
-       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": true, "customer_test_suite": true},
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": true, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable"},
        "detail": {}}
     ]
   }
@@ -234,22 +234,43 @@ mark a gate `met:true` for either reason without one of these:
   without an update — a missed scheduled run (host down, cron didn't fire) otherwise looks
   identical to "waiting for tomorrow." This is separate from the 15-minute chat-staleness
   badge, which assumes an active session and would misfire on a normal once-daily cadence.
-  `n_total` and `consecutive_green` drive the "Day k / N" counter; `days[]` is append-only, one entry per
-  period, each with the 8-check result set from `shared/templates/soak-report.md` (`null`
-  for a check nothing autonomous can measure — `replication_lag` and
-  `customer_test_suite` — never guess these, leave them `null` until you or the customer's
-  test run actually supplies a value). `shared/scripts/soak_check.py` (reference
-  implementation, run by hand) and `shared/scripts/soak_check_lambda.py` (the production
-  path — VPC-attached Lambda on an EventBridge Scheduler cadence, writing straight into
-  this bucket) both run the mechanical checks (row count, checksum, schema drift, alarm
-  state, storage headroom) against source and target directly and write this object
-  themselves, no agent invocation needed for the routine all-green case — see
-  `execution-runbooks.md` §Soak automation for how to configure and deploy either. A day it
-  writes with `needs_agent_review: true` (any RED, or either null check) must get you to
-  actually look at it before the next period — the dashboard surfaces this as a standalone
-  banner, not just a colored cell. If soak is waived, set `{"waived": true, "waived_reason": "..."}`
-  instead of the fields above — the page renders the waiver reason plainly rather than an
-  empty section.
+  `n_total` and `consecutive_green` drive the "Day k / N" counter; `days[]` holds one entry
+  per period, each with the 8-check result set from `shared/templates/soak-report.md`.
+  Each check value is one of **four** states, not just true/false:
+  - `true`/`false` — actually measured, passed or failed.
+  - `null` — something IS configured for this check on this engagement but the data came
+    back missing/unreachable/`INSUFFICIENT_DATA` this run — counts as
+    `needs_agent_review`, **never** a silent pass. This is the state that used to be
+    permanently stuck for `replication_lag`/`customer_test_suite` before both scripts
+    measured/gated them properly — see below.
+  - `"not_applicable"` — genuinely nothing configured for this check on this engagement
+    (no DMS task in play, no customer test suite per discovery Q18). Excluded from
+    **both** the green calculation and `needs_agent_review` — this is what actually lets
+    a clean engagement reach `soak.state: "complete"` instead of being stuck forever on a
+    check that was never going to apply.
+  `replication_lag` is measured from CloudWatch `CDCLatencySource`/`CDCLatencyTarget`
+  when a DMS task is configured, or `SHOW REPLICA STATUS`/a PostgreSQL replay-lag query
+  for non-DMS replication — `"not_applicable"` only when this engagement has no
+  replication mechanism wired in at all. `replication_errors` pulls DMS task stats
+  (`TablesErrored`, task status, last failure message) when a DMS task is configured,
+  `"not_applicable"` otherwise. `customer_test_suite` can never be measured
+  automatically (it needs the customer's own external test run) — it's `"not_applicable"`
+  unless a suite was actually documented as provided at discovery Q18, in which case it
+  stays `null` (a real, intentional "needs review" — waiting on that result) until the
+  agent or the customer supplies `true`/`false`. Never guess any of these three.
+  `shared/scripts/soak_check.py` (reference implementation, run by hand) and
+  `shared/scripts/soak_check_lambda.py` (the production path — VPC-attached Lambda on an
+  EventBridge Scheduler cadence, writing straight into this bucket) both run every
+  mechanical check (row count, checksum, schema drift, alarm state, storage headroom,
+  replication lag, replication errors) against source and target directly, using a
+  dedicated SELECT-only credential — never the admin/master secret — and write this
+  object themselves, no agent invocation needed for the routine all-green case; see
+  `execution-runbooks.md` §Soak automation for how to configure and deploy either. A day
+  it writes with `needs_agent_review: true` (any RED, or any check that came back `null`)
+  must get you to actually look at it before the next period — the dashboard surfaces
+  this as a standalone banner, not just a colored cell. If soak is waived, set
+  `{"waived": true, "waived_reason": "..."}` instead of the fields above — the page
+  renders the waiver reason plainly rather than an empty section.
 - `migration_objects` — the detail behind the phase percentages: exactly how many of each
   schema-object type exist, how many are done, and per-item evidence (row counts, checksum
   match) rather than just a rollup number. One key per object type your source actually has
@@ -280,9 +301,24 @@ One line per event, oldest first in the file (the page reverses it for display):
 {"time": "2026-08-31T14:42:05+09:00", "phase": "7.7", "title": "병행 가동 Day 3 리포트", "action": "표본 3개 테이블 행수·체크섬 재확인, 복제 지연 1.8s", "result": "success", "detail": "연속 3/7 green", "files": ["dashboard/../soak-report-day3.md"]}
 ```
 
-`result` is one of `success|in_progress|blocked` (maps to the page's icon/color — blocked is
-reserved for an actual abort/rollback trigger, not a normal in-progress step). `files` is
-optional, an array of paths relative to the engagement root.
+`result` is one of `success|in_progress|blocked` for hand-written entries (maps to the
+page's icon/color — blocked is reserved for an actual abort/rollback trigger, not a normal
+in-progress step). The automated soak-check scripts (`soak_check.py`/
+`soak_check_lambda.py`) write their own daily verdict here too, mapped onto the same
+vocabulary — `green`→`success`, `red`→`blocked` — never the raw `green`/`red` strings
+themselves (those belong to `status.json`'s `soak.days[].overall`, a separate field with
+its own vocabulary; `dashboard.js` also recognizes `green`/`red` defensively in `result`
+so a log line written by an older version of those scripts still renders with the correct
+icon/color instead of silently defaulting to a green checkmark). `files` is optional, an
+array of paths relative to the engagement root.
+
+**Idempotent per calendar day.** EventBridge Scheduler retries are at-least-once, and a
+human can re-run `soak_check.py` by hand for a day already checked — both scripts detect
+an existing `activity-log.jsonl` line for the same date (matched on `phase:"7.7"` +
+`date`) and overwrite it in place rather than appending a duplicate; `status.json`'s
+`soak.days[]` gets the same treatment, and `consecutive_green` is always recomputed from
+`days[]` itself (the trailing run of green entries), never incremented — so a retry can
+never double-count or drift.
 
 **Why JSON Lines instead of reading `migration-plan.md` directly**: the page must never
 regex-parse prose tables — fragile the moment wording drifts. Two small structured files,

@@ -26,10 +26,21 @@ actually stops working the moment the underlying STS session expires — with a 
 SignatureDoesNotMatch/ExpiredToken, not a clean "expired" message. The only credential type
 that genuinely supports the full SigV4 604800s (7-day) ceiling is a long-term IAM user
 access key. For any 3- or 7-day soak tier:
-  1. Create a throwaway IAM user scoped to `s3:GetObject` on this bucket only, no console
-     access, at soak start.
-  2. Run this script authenticated AS that user (`--profile`/env vars pointing at its
-     access key), not as your own role/SSO session.
+  1. Create a throwaway IAM user scoped to `s3:GetObject` AND `s3:PutObject` on this
+     bucket only (never wider — no console access, no other bucket), at soak start. Both
+     actions are genuinely required: this script presigns GETs for the customer's link,
+     but it also RE-UPLOADS (`PutObject`) the rewritten `index.html` itself (see
+     `materialize_index_html` below) — a user scoped to `GetObject` only can presign the
+     sub-resource URLs but the script's own final `put_object` call for `index.html` will
+     fail with AccessDenied. This is a real, minimum-necessary requirement, not scope
+     creep — don't narrow it back to `GetObject`-only to look more least-privilege; that
+     just breaks the script.
+  2. Run this script authenticated AS that user — boto3 (and this script) reads
+     credentials from the environment via the standard chain, e.g.
+     `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...`, or
+     `export AWS_PROFILE=<throwaway-user-profile>` if saved as a named profile in
+     `~/.aws/credentials` — not as your own role/SSO session. (There is no `--profile`
+     flag on this script itself — set the environment before invoking it.)
   3. Keep the key alive for the entire soak window — the permission AND the key's
      existence are both checked live on every GET, not frozen at signing time.
   4. Deactivate/delete the key right after soak-exit (Phase 7.7 sign-off), as part of the

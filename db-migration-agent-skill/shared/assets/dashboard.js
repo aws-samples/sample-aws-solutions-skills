@@ -67,8 +67,8 @@
       soakOverdueBanner: (hrs) => `No soak check in ${hrs}h — the scheduled run may have been missed (host down, cron didn't fire, script crashed). Verify it's still running.`,
       soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
       soakEmpty: 'Not started yet — begins once the target is current and validation is green.',
-      soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', customer_test_suite: 'Customer test suite' },
-      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?',
+      soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', replication_errors: 'Replication errors', customer_test_suite: 'Customer test suite' },
+      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
     },
     ko: {
       pageTitle: '마이그레이션 진행 상태',
@@ -111,12 +111,20 @@
       soakOverdueBanner: (hrs) => `${hrs}시간 동안 소크 점검이 실행되지 않았습니다 — 예약된 실행이 누락되었을 수 있습니다 (호스트 다운, cron 미실행, 스크립트 오류). 정상 동작 중인지 확인하세요.`,
       soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
       soakEmpty: '아직 시작되지 않았습니다 — 타깃이 최신 상태이고 검증이 green이 되면 시작됩니다.',
-      soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', customer_test_suite: '고객 테스트' },
-      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?',
+      soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', replication_errors: '복제 오류', customer_test_suite: '고객 테스트' },
+      soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
     },
   };
 
-  const ENTRY_ICON = { success: '✓', in_progress: '…', blocked: '!' };
+  // "success"/"in_progress"/"blocked" is the documented activity-log.jsonl vocabulary
+  // (dashboard.md), written by the agent by hand. The automated soak-check scripts
+  // (soak_check.py / soak_check_lambda.py) write their own day verdict here too, mapped
+  // onto that same vocabulary (green->success, red->blocked) — but recognize the raw
+  // "green"/"red" strings too so a log file written by an older, unfixed version of
+  // those scripts still renders correctly instead of silently defaulting every entry to
+  // a green checkmark regardless of its actual result.
+  const ENTRY_ICON = { success: '✓', in_progress: '…', blocked: '!', green: '✓', red: '✗' };
+  const ENTRY_CLASS = { success: 'success', in_progress: 'in_progress', blocked: 'blocked', green: 'success', red: 'blocked' };
   const fmtNum = (n) => (n === null || n === undefined) ? '—' : Number(n).toLocaleString();
 
   function fmtTime(iso) {
@@ -272,7 +280,8 @@
     const dayCells = days.map((d, i) => {
       const cls = d.overall === 'green' ? 'green' : 'red';
       const checksHtml = Object.entries(d.checks || {}).map(([k, v]) => {
-        const mark = v === true ? l.soakCheckPass : v === false ? l.soakCheckFail : l.soakCheckUnknown;
+        const mark = v === true ? l.soakCheckPass : v === false ? l.soakCheckFail
+          : v === 'not_applicable' ? l.soakCheckNotApplicable : l.soakCheckUnknown;
         return `<div><span>${esc(l.soakCheckLabel[k] || k)}</span><span>${mark}</span></div>`;
       }).join('');
       return `<div class="soak-day ${cls}">${i + 1}
@@ -293,7 +302,7 @@
     const l = L();
     if (!lines.length) { $('#log').innerHTML = `<div id="log-empty">${esc(l.logEmpty)}</div>`; return; }
     const rows = lines.slice().reverse().map(e => `
-      <div class="entry ${e.result || 'success'}">
+      <div class="entry ${ENTRY_CLASS[e.result] || 'success'}">
         <span class="icon">${ENTRY_ICON[e.result] || '✓'}</span>
         <div class="body">
           <div class="title">${esc(e.title)} <span class="time">${fmtTime(e.time)}</span></div>
@@ -336,7 +345,16 @@
       renderSoak(status);
       if (log.length !== lastLogCount) { renderLog(log); lastLogCount = log.length; }
       $('#updated-text').innerHTML = `${esc(L().updatedPrefix)} <b>${fmtTime(status.updated_at)}</b>`;
-      const stale = status.updated_at && (Date.now() - new Date(status.updated_at).getTime() > 15 * 60 * 1000);
+      // The 15-minute staleness badge assumes an active interactive session — correct
+      // outside the soak window, but during an active soak (once-a-day cadence by
+      // design) `updated_at` legitimately doesn't move for ~24h between runs, which
+      // would otherwise make this badge show constantly for the entire soak window.
+      // Suppress it during an active soak; the soak section's own 36-hour overdue
+      // banner (renderSoak) already covers "a scheduled run may have been missed" for
+      // that period specifically.
+      const soakActive = status.soak && !status.soak.waived && status.soak.state === 'active';
+      const stale = !soakActive && status.updated_at
+        && (Date.now() - new Date(status.updated_at).getTime() > 15 * 60 * 1000);
       $('#stale-badge').style.display = stale ? 'inline' : 'none';
       $('#conn-error').style.display = 'none';
     } catch (err) {

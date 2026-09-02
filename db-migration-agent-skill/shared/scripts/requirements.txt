@@ -1,0 +1,10 @@
+# Runtime dependencies for shared/scripts/soak_check_lambda.py, bundled into the Lambda
+# asset by cdk-stacks.md §soak-stack.ts's `pip install -r requirements.txt -t
+# /asset-output` bundling step. Pinned, not left floating — a soak window runs
+# unattended for up to 7 days and must not pick up a different dependency version
+# mid-engagement just because someone redeploys.
+#
+# Both are pure-Python (no compiled extension), so they install the same way regardless
+# of build host architecture and need no manylinux wheel for the Lambda's arm64 runtime.
+pymysql==1.1.1
+pg8000==1.31.2

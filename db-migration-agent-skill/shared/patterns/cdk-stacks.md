@@ -180,21 +180,60 @@ dashboard with source-vs-target panels during the migration window, all → one 
 
 Generated when the customer approves automating the Phase 7.7 checklist (see
 [../reference/execution-runbooks.md](../reference/execution-runbooks.md) §Soak automation —
-get approval before creating this, it's infrastructure like everything else here). Three
-pieces: an S3 bucket that becomes the soak window's single source of truth for the
-dashboard, a VPC-attached Lambda that ports `shared/scripts/soak_check_lambda.py`'s logic,
-and an EventBridge Scheduler rule that invokes it daily. `shared/scripts/soak_check.py`
-stays the reference implementation for running the same checks by hand from any machine
-that can reach the databases directly — this stack is the unattended production path.
+get approval before creating this, it's infrastructure like everything else here). Pieces:
+an S3 bucket that becomes the soak window's single source of truth for the dashboard, a
+VPC-attached Lambda that ports `shared/scripts/soak_check_lambda.py`'s logic, an
+EventBridge Scheduler rule that invokes it daily, and CloudWatch alarms (on Lambda errors,
+on a missed/exhausted invocation, and on `needs_agent_review`) feeding the monitoring
+SNS topic this skill already uses elsewhere. `shared/scripts/soak_check.py` stays the
+reference implementation for running the same checks by hand from any machine that can
+reach the databases directly — this stack is the unattended production path.
+
+🔴 **Verify VPC/NAT reachability before deploying, not after the first missed run.** The
+Lambda has no reachability of its own beyond what it inherits from the imported bastion
+subnets/SG — run `scripts/01-precondition-check.sh`'s connectivity checks (or a one-off
+`aws lambda invoke` against a throwaway test function in the same subnets) against BOTH
+the source and target endpoints before wiring the real schedule; a VPC/NAT/SG mistake here
+fails silently as a Lambda timeout, indistinguishable at a glance from a slow query.
+
+### Dedicated read-only DB credentials — never the admin/master secret
+
+Create a SELECT-only user on **both** source and target for this Lambda specifically (see
+[../reference/execution-runbooks.md](../reference/execution-runbooks.md) §Dedicated
+read-only credential for the exact `GRANT` statements) — `cluster.secret!` is the
+cluster's generated **admin** secret and must never be handed to this function. Run the
+`CREATE USER`/`GRANT` once (via the bastion, same as any other one-off SQL setup step in
+this skill — not a CDK resource, CDK cannot run SQL), then store each credential in its
+own secret:
+
+```typescript
+const sourceReadOnlySecret = new sm.Secret(this, 'SourceSoakReadOnlySecret', {
+  secretName: `${constants.PREFIX}/soak/source-readonly`,
+  generateSecretString: { secretStringTemplate: JSON.stringify({ username: 'soak_ro' }),
+                           generateStringKey: 'password', excludePunctuation: true },
+});
+const targetReadOnlySecret = new sm.Secret(this, 'TargetSoakReadOnlySecret', {
+  secretName: `${constants.PREFIX}/soak/target-readonly`,
+  generateSecretString: { secretStringTemplate: JSON.stringify({ username: 'soak_ro' }),
+                           generateStringKey: 'password', excludePunctuation: true },
+});
+// After deploy: read each generated password back out and run the CREATE USER/GRANT
+// above with it, from the bastion — the secret exists first so the password is never
+// typed by a human, but CDK itself never touches the database.
+```
 
 ```typescript
 // ── S3 bucket: single source of truth for dashboard/ during the soak window ──
 const dashboardBucket = new s3.Bucket(this, 'DashboardBucket', {
   bucketName: `${constants.PREFIX}-soak-dashboard`,
   encryption: s3.BucketEncryption.S3_MANAGED,           // SSE-S3; use KMS if the plan needs a CMK
+  enforceSSL: true,                                     // reject any non-TLS S3 API call outright
   blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,    // no bucket policy public-read, ever —
   publicReadAccess: false,                              // presigned URLs are the ONLY access path
   versioned: true,
+  serverAccessLogsBucket: accessLogsBucket,             // this account's existing centralized
+  serverAccessLogsPrefix: `${constants.PREFIX}-soak-dashboard/`,  // access-log bucket — every
+                                                         // GET against a presigned URL is logged
   removalPolicy: RemovalPolicy.RETAIN, autoDeleteObjects: false,
   cors: [{
     allowedMethods: [s3.HttpMethods.GET],
@@ -205,6 +244,17 @@ const dashboardBucket = new s3.Bucket(this, 'DashboardBucket', {
 });
 ```
 
+Scaffold the asset directory once, before first synth — the bundling command below
+depends on `requirements.txt` actually being present next to the handler, which is the
+gap that used to make this bundling command reference a file that didn't exist anywhere
+in the generated project:
+
+```bash
+mkdir -p lambda/soak-check
+cp <skill>/shared/scripts/soak_check_lambda.py lambda/soak-check/
+cp <skill>/shared/scripts/requirements.txt     lambda/soak-check/
+```
+
 ```typescript
 // ── Lambda: VPC-attached into the SAME private subnets + SG the migration bastion already
 // uses — identical reachability to the source over the existing VPN/DX path, no new
@@ -212,9 +262,9 @@ const dashboardBucket = new s3.Bucket(this, 'DashboardBucket', {
 const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
   runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
   handler: 'soak_check_lambda.handler',
-  code: lambda.Code.fromAsset('lambda/soak-check', {   // shared/scripts/soak_check_lambda.py
-    bundling: {                                         // copied in here + pymysql (+ pg8000
-      image: lambda.Runtime.PYTHON_3_12.bundlingImage,  // for a PostgreSQL source/target)
+  code: lambda.Code.fromAsset('lambda/soak-check', {   // shared/scripts/soak_check_lambda.py +
+    bundling: {                                         // shared/scripts/requirements.txt copied
+      image: lambda.Runtime.PYTHON_3_12.bundlingImage,  // in here (pins pymysql + pg8000)
       command: ['bash', '-c',
         'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
     },
@@ -225,24 +275,53 @@ const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
   securityGroups: [ec2.SecurityGroup.fromSecurityGroupId(   // import the bastion's SG read-only
     this, 'ImportedBastionSg', constants.BASTION_SG_ID, { mutable: false })],  // (mutable:false —
   environment: {                                          // never add ingress from here; the
-    ENGINE: constants.SOURCE_ENGINE,                       // bastion's SG already has everything
-    SOURCE_HOST: constants.SOURCE_HOST, SOURCE_PORT: `${constants.DB_PORT}`,
-    SOURCE_DB: constants.DB_NAME, SOURCE_SECRET_ARN: sourceReadOnlySecret.secretArn,
-    TARGET_HOST: cluster.clusterEndpoint.hostname, TARGET_PORT: `${constants.DB_PORT}`,
-    TARGET_DB: constants.DB_NAME, TARGET_SECRET_ARN: cluster.secret!.secretArn,
+    // Engine, port, and db name are INDEPENDENT per side — never point both SOURCE_* and
+    // TARGET_* at one shared constant (the confirmed bug: reusing constants.DB_PORT/
+    // DB_NAME/SOURCE_ENGINE for both sides silently breaks a cross-version or
+    // differently-named-database engagement). Both engines must still normalize to the
+    // same MySQL-family-or-Postgres-family — heterogeneous soak-checking across families
+    // is not yet supported (soak_check_lambda.py raises clearly if they don't match).
+    SOURCE_ENGINE: constants.SOURCE_ENGINE, TARGET_ENGINE: constants.TARGET_ENGINE,
+    SOURCE_HOST: constants.SOURCE_HOST, SOURCE_PORT: `${constants.SOURCE_DB_PORT}`,
+    SOURCE_DB: constants.SOURCE_DB_NAME, SOURCE_SECRET_ARN: sourceReadOnlySecret.secretArn,
+    TARGET_HOST: cluster.clusterEndpoint.hostname, TARGET_PORT: `${constants.TARGET_DB_PORT}`,
+    TARGET_DB: constants.TARGET_DB_NAME, TARGET_SECRET_ARN: targetReadOnlySecret.secretArn,
     TABLES: JSON.stringify(constants.SOAK_TABLES),
+    CHECKSUM_TABLES: JSON.stringify(constants.SOAK_CHECKSUM_TABLES),  // explicit, not left to
+                                                                        // the tables[:2] default
     ALARM_NAMES: JSON.stringify(constants.SOAK_ALARM_NAMES),
     TARGET_DB_INSTANCE_ID: constants.TARGET_DB_INSTANCE_ID,
+    // Set the ones that apply to THIS engagement's replication mechanism, leave the rest
+    // unset — see execution-runbooks.md §Soak automation for the full soak-config.json/
+    // env-var schema and the "not_applicable" semantics of leaving all of them unset.
+    DMS_TASK_ID: constants.SOAK_DMS_TASK_ID, DMS_REPLICATION_INSTANCE_ID: constants.SOAK_DMS_REPLICATION_INSTANCE_ID,
+    DMS_TASK_ARN: constants.SOAK_DMS_TASK_ARN,
+    CUSTOMER_TEST_SUITE_PROVIDED: `${constants.CUSTOMER_TEST_SUITE_PROVIDED}`,  // Q18 answer
+    // Independent per side — an on-prem/legacy source and an RDS/Aurora target almost
+    // always have DIFFERENT trust anchors. Leave either *_SSL_CA_PATH unset to fall
+    // back to the platform default trust store for that side (still full TLS, just not
+    // CA-pinned). *_TLS_SKIP_VERIFY is a THIRD, explicit-opt-in-only tier (encrypts but
+    // skips verification) for a self-signed source cert whose actual CA file can't be
+    // retrieved at all — see execution-runbooks.md §Soak automation for when this is
+    // actually the right call vs. just being lazy about CA pinning.
+    TARGET_SSL_CA_PATH: '/var/task/rds-ca-bundle.pem',   // bundled into the asset; see bundling note below
+    // SOURCE_SSL_CA_PATH: only if the source needs a pinned self-signed/private-CA cert
+    // AND that cert (not just any certificate the peer presents) is actually available.
+    // SOURCE_TLS_SKIP_VERIFY: 'true' — only if it genuinely isn't.
     N_TOTAL: `${constants.SOAK_N_TOTAL}`,          // the risk-tiered default from engagement-safety.md
     DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
   },
 });
-dashboardBucket.grantReadWrite(soakFn);
+dashboardBucket.grantRead(soakFn);
+dashboardBucket.grantPut(soakFn);   // explicit GetObject+PutObject — NOT grantReadWrite(), which
+                                     // also hands out DeleteObject/multipart-abort this function
+                                     // never needs (least-privilege, not "works either way").
 sourceReadOnlySecret.grantRead(soakFn);
-cluster.secret!.grantRead(soakFn);
+targetReadOnlySecret.grantRead(soakFn);
 soakFn.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricStatistics', 'rds:DescribeDBInstances'],
-  resources: ['*'],   // these three are describe/read-only and don't support resource-level scoping
+  actions: ['cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricStatistics', 'rds:DescribeDBInstances',
+            'dms:DescribeReplicationTasks'],
+  resources: ['*'],   // these four are describe/read-only and don't support resource-level scoping
 }));
 ```
 
@@ -256,14 +335,32 @@ false })`) — never create a new SG and add it as an extra ingress rule on the
 source/target DB security groups; that's new networking, which the whole point of this
 design is to avoid. `pymysql`/`pg8000` are both pure-Python (no compiled extension), so the
 Docker bundling step above works unmodified across host architectures — no manylinux wheel
-concerns.
+concerns. If the account needs strict CA pinning rather than the platform default trust
+store (RDS/Aurora endpoints already verify fine against the default trust store without
+this — it's for pinning a specific bundle anyway), bundle the
+[Amazon RDS CA bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem)
+into `lambda/soak-check/rds-ca-bundle.pem` before the `cp -au` step and leave
+`TARGET_SSL_CA_PATH` set as above; omit both the file and the env var to fall back to the
+platform default trust store for that side (still full TLS, just not CA-pinned). If the
+SOURCE is an on-prem/legacy host with a self-signed certificate, bundle THAT certificate
+instead and point `SOURCE_SSL_CA_PATH` at it — `soak_check_lambda.py`'s `_tls_context`
+treats a configured CA path as a pinned trust anchor (still fully encrypted and verified
+against it) and skips hostname verification in that case specifically, since on-prem
+certs frequently carry no SAN matching the IP/hostname actually used to reach them.
 
 ```typescript
-// ── EventBridge Scheduler: daily invocation, pure AWS-managed, nothing to keep alive ──
+// ── EventBridge Scheduler: daily invocation, pure AWS-managed, nothing to keep alive.
+// A DLQ on the target means an invocation that exhausts BOTH retries is still visible
+// (an alarm on the DLQ's depth below), not just silently dropped. ──
 const schedulerRole = new iam.Role(this, 'SoakSchedulerRole', {
   assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
 });
 soakFn.grantInvoke(schedulerRole);
+
+const soakDlq = new sqs.Queue(this, 'SoakScheduleDlq', {
+  retentionPeriod: Duration.days(14), enforceSSL: true,
+});
+soakDlq.grantSendMessages(schedulerRole);
 
 new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
   flexibleTimeWindow: { mode: 'OFF' },
@@ -272,9 +369,51 @@ new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
     arn: soakFn.functionArn,
     roleArn: schedulerRole.roleArn,
     retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 3600 },
+    deadLetterConfig: { arn: soakDlq.queueArn },
   },
 });
 ```
+
+### Alerting — real, not just a dashboard banner nobody may be looking at
+
+Three alarms, all feeding the **same SNS topic this skill's monitoring baseline already
+uses** ([../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4) — not
+a second, disconnected channel:
+
+```typescript
+// 1. The Lambda itself erroring (bad config, connection refused, an unhandled exception —
+//    NOT a normal RED/needs-review day, which is logged at WARNING and returned
+//    normally specifically so it does NOT trip this metric).
+new cloudwatch.Alarm(this, 'SoakFnErrorsAlarm', {
+  metric: soakFn.metricErrors({ period: Duration.days(1) }),
+  threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+
+// 2. The scheduled invocation never happening at all, or exhausting both retries — the
+//    DLQ above catches the second case; this alarm covers both by watching the DLQ depth.
+new cloudwatch.Alarm(this, 'SoakScheduleDlqAlarm', {
+  metric: soakDlq.metricApproximateNumberOfMessagesVisible(),
+  threshold: 1, evaluationPeriods: 1,
+}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+
+// 3. A day the Lambda ran but flagged needs_agent_review=true (any RED, or a check that
+//    came back null) — a metric filter on the literal log line, not a re-parse of S3.
+const needsReviewFilter = new logs.MetricFilter(this, 'SoakNeedsReviewFilter', {
+  logGroup: soakFn.logGroup, metricNamespace: `${constants.PREFIX}/Soak`,
+  metricName: 'NeedsAgentReview', metricValue: '1',
+  filterPattern: logs.FilterPattern.literal('"needs_agent_review=true"'),
+});
+new cloudwatch.Alarm(this, 'SoakNeedsReviewAlarm', {
+  metric: needsReviewFilter.metric({ statistic: 'Sum', period: Duration.days(1) }),
+  threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+```
+
+`alertTopic` is the same `sns.ITopic` monitoring-stack.ts already creates for the
+migration-window alarm set — pass it into `SoakStack`'s constructor rather than creating a
+second topic; an engagement that deploys soak-stack without a monitoring-stack (unusual,
+but not impossible for a very light Mode-1-adjacent check) creates its own topic instead,
+with a subscription confirmed at the same time the customer's monitoring contacts are set up.
 
 **Presigned URLs — a one-time step, not part of this stack.** Run
 `shared/scripts/generate_presigned_urls.py` once, right after this stack deploys and the
@@ -286,14 +425,34 @@ relative-path version silently 403s). It is deliberately not a CDK resource or a
 Lambda-invoked-at-deploy custom resource — read that script's credential-longevity caveat
 before running it: for a 3- or 7-day soak, sign with a throwaway IAM user's long-term
 access key, not the deploying operator's own temporary/SSO session, or the URLs stop
-working when that session expires, long before the `Expires` value they carry claims.
+working when that session expires, long before the `Expires` value they carry claims. Sign
+for slightly UNDER the tier's nominal length, not exactly the SigV4 ceiling — e.g.
+`--expires-seconds 561600` (6.5 days) for the 7-day tier, not `604800` — so the link is
+never the thing that expires first if soak-exit slips by a few hours past the nominal
+window; re-running the script (safe — see its docstring) extends it if the soak genuinely
+runs long.
+
+**Ending soak — pull the reports back, don't leave them only in S3.** Before tearing down
+or letting the bucket's presigned URLs lapse, sync the bucket's final contents (now
+holding every day's `soak-report-day*.md`, the final `status.json`/`activity-log.jsonl`)
+back into the engagement working directory so `migration-plan.md` and the rest of the
+engagement stay consistent with what actually happened:
+
+```bash
+aws s3 sync s3://<dashboard-bucket-name>/ dashboard/ --exclude "index.html"
+# index.html excluded deliberately — the bucket's copy is the presigned-URL-materialized
+# one (see generate_presigned_urls.py); keep the clean shared/templates/dashboard.html
+# copy locally instead of pulling back a copy full of soon-to-expire presigned URLs.
+```
 
 **IAM summary for this stack:** `soakFn`'s role = `secretsmanager:GetSecretValue` on
-exactly the source-read-only and target secrets (never `*`), `cloudwatch:DescribeAlarms`/
-`GetMetricStatistics` + `rds:DescribeDBInstances` (read-only, no resource-level scoping
-available), `s3:GetObject`/`PutObject` scoped to `dashboardBucket` only, plus the VPC ENI
-permissions from `AWSLambdaVPCAccessExecutionRole`. No `Create*`/`Modify*`/`Delete*`
-anywhere — this function only ever reads the databases and writes to one bucket.
+exactly the two dedicated read-only secrets (never the admin/master secret, never `*`),
+`cloudwatch:DescribeAlarms`/`GetMetricStatistics` + `rds:DescribeDBInstances` +
+`dms:DescribeReplicationTasks` (read-only, no resource-level scoping available),
+`s3:GetObject`/`PutObject` (explicitly, not `grantReadWrite`) scoped to `dashboardBucket`
+only, plus the VPC ENI permissions from `AWSLambdaVPCAccessExecutionRole`. No
+`Create*`/`Modify*`/`Delete*` anywhere — this function only ever reads the databases and
+writes to one bucket.
 
 **Fallback — bastion cron, for someone who really doesn't want to stand up Lambda.** Simpler
 to set up, but weaker: the bastion has to stay running and reachable for the entire soak
