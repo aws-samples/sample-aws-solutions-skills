@@ -50,6 +50,7 @@ Before choosing a migration method or target, assess whether the source workload
 |----------|-------|-------------|------------|
 | **Privileges** | Code uses SUPER privilege | Will fail on RDS/Aurora | Use `rds_superuser_role` (RDS) or session-level alternatives |
 | **Privileges** | DEFINER clauses in stored procs/views | Fails if definer user doesn't exist | Strip DEFINER or recreate user on target |
+| **Privileges (PostgreSQL)** | `pg_dump`/`pg_restore` OWNER TO + GRANT statements reference source role names; also, `SECURITY DEFINER` functions and (PG < 15, or PG 15+ with `security_invoker` unset) views run with the **object owner's** privileges, not the caller's — PostgreSQL's DEFINER-clause equivalent | If those roles don't exist on the target, `pg_restore` logs non-fatal errors and skips the ownership/grant — objects load with the WRONG owner (usually the restoring admin) and missing grants; for a `SECURITY DEFINER` function this can silently change *whose* privileges the function executes with post-migration | Pre-create every role referenced by ownership/grants on the target before restore (query below); rehearse the restore and check for `ERROR: role "..." does not exist` in the log even though `pg_restore`'s exit code may still look clean. Only use `--no-owner --no-privileges` when you intend to re-grant explicitly with target-side roles — it doesn't remove the risk, it just changes where you have to redo the work |
 | **File I/O** | `LOAD DATA INFILE` (server-side) | Blocked on RDS/Aurora | Use `LOAD DATA LOCAL INFILE` (client-side) or S3 import |
 | **File I/O** | `SELECT INTO OUTFILE` | Blocked | Use `SELECT ... INTO` with S3 (Aurora) or client-side export |
 | **Replication** | Multi-source replication | Only on RDS MySQL 8.0.35+, NOT Aurora | Redesign consolidation approach |
@@ -99,6 +100,20 @@ SELECT * FROM mysql.func;  -- Lists all installed UDFs
 SELECT extname, extversion FROM pg_extension;
 -- Compare against Aurora's available extensions:
 SELECT name FROM pg_available_extensions ORDER BY name;
+```
+
+**Check PostgreSQL role dependencies (the DEFINER-clause equivalent) — every distinct role
+here must exist on the target before restore, or ownership/grants silently don't apply:**
+```sql
+-- Object owners (tables, views, sequences, functions)
+SELECT DISTINCT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE relnamespace = 'public'::regnamespace
+UNION SELECT DISTINCT pg_get_userbyid(proowner) FROM pg_proc WHERE pronamespace = 'public'::regnamespace;
+-- SECURITY DEFINER functions — flag these specifically: the owner's privileges are what
+-- the function runs with post-migration, not just a load-time detail
+SELECT proname, pg_get_userbyid(proowner) AS runs_as_owner FROM pg_proc
+WHERE pronamespace = 'public'::regnamespace AND prosecdef;
+-- Grantees on public-schema objects (roles the dump's GRANT statements will target)
+SELECT DISTINCT grantee FROM information_schema.role_table_grants WHERE table_schema = 'public';
 ```
 
 ### 1.4 Oracle → RDS for Oracle — Blockers & Compatibility Checks

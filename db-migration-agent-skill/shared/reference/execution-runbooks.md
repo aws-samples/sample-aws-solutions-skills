@@ -28,6 +28,16 @@ pg_dump -Fd -j 8 -h $SOURCE_HOST -U postgres -d your_db -f /backup/
 pg_restore -Fd -j 8 -h $AURORA_ENDPOINT -U postgres -d your_db /backup/
 ```
 
+> **Check the restore log for role errors, not just the exit code.** This form preserves
+> object ownership and grants (unlike the `--no-owner --no-privileges` schema-only variant
+> below) — but `ALTER ... OWNER TO`/`GRANT` statements target the SOURCE's role names, and
+> `pg_restore` treats a missing target-side role as non-fatal: it logs `role "..." does not
+> exist` and moves on, so a clean-looking exit code can still mean an object landed
+> owned-by-the-wrong-user with grants silently dropped. Pre-create every role from the
+> `source-assessment.md` §Check PostgreSQL role dependencies query on the target *before*
+> restoring — this is PostgreSQL's DEFINER-clause equivalent, and the rehearsal (§Migration
+> Rehearsal below) is where it should surface if skipped.
+
 ### If Percona XtraBackup + S3 (large MySQL, physical)
 
 ```bash
