@@ -189,6 +189,32 @@ Action classes requiring a row **before** first execution:
 5. Rollback execution (pre-authorized criteria vs ad-hoc)
 6. Decommission (exact resource list)
 
+## Verify resource identity before scoping any action
+
+A shared AWS account accumulates infrastructure from other engagements — other
+customers, other environments, a previous dry run. Naming conventions collide: two
+unrelated engagements can both have a database called `ordersys`, both name their DMS
+task `<db>-fullload-cdc`, both use the same schema. **Never infer that a discovered
+resource belongs to this engagement from its name, its type, or a metric that "looks
+about right."** Resolve its actual identity — the endpoint's real host/IP, the secret
+ARN it authenticates with, the instance's tags, the account/region it's paired with —
+against *this engagement's confirmed source and target* before characterizing it,
+proposing anything about it, or folding it into cost/architecture/GATE 2
+recommendations.
+
+This applies with extra force before any A2/A3 action (source write, infrastructure
+change) against something you didn't provision yourself this session: **stopping,
+discarding, modifying, or cleaning up someone else's live resource because it appeared
+relevant is not a lesser mistake than doing it to your own** — it can destroy another
+engagement's in-flight work. A row-count mismatch, an "incomplete load," or any other
+symptom is not proof of *whose* resource it is; it's only proof something is
+unexplained. Root-cause it (resolve the connection details) before drawing a conclusion
+about it, not after proposing the fix.
+
+If a discovered resource cannot be positively tied to this engagement's own confirmed
+source/target, treat it as out of scope by default — leave it running, untouched,
+uncosted — and say so plainly rather than folding it into the plan.
+
 ## IAM guardrails
 
 Generate a **session policy** for the operator role per engagement and record it in the
