@@ -251,6 +251,32 @@ No `INSERT`/`UPDATE`/`DELETE`/`CREATE`/`DROP` — verify this by attempting a th
 write with the new credential and confirming it's denied before wiring it into the
 Lambda/config.
 
+**Provisioning this needs a privileged credential on that side — a DB-privilege
+requirement, not an OS one.** The `CREATE USER`/`GRANT` statements above are plain SQL
+over the normal DB connection (no shell on the DB host, no AWS control-plane access —
+same as any other query in this skill), but the credential *running* them still needs
+`CREATE USER` + `GRANT OPTION` (MySQL/MariaDB) or role-creation privilege (PostgreSQL).
+Confirmed live against a real externally-managed MySQL DBaaS source where the only
+credential available was the Phase 2 assessment user (scoped to `SELECT` +
+`REPLICATION SLAVE`/`CLIENT` only, per this skill's own least-privilege guidance for that
+credential): `CREATE USER 'soak_ro'@'%' ...` failed with `ERROR 1227 (42000): Access
+denied; you need (at least one of) the CREATE USER privilege(s) for this operation` — a
+privilege denial, not an "OS/no-shell-access" one, and it happens identically whether the
+source is a managed RDS instance or a true external DBaaS/PaaS with zero AWS
+control-plane access (this skill's flagship no-OS-access case — see method-selection.md
+row 12a/12b). **Do not** ask the customer to hand over admin/master credentials, or to
+permanently widen the read-only assessment credential's grants, just to mint one more
+read-only user — instead, if that existing read-only credential is already SELECT-only
+with no mutating privileges (the same throwaway-write-denial check above proves it), it
+already satisfies everything this section requires: **reuse it directly** as that side's
+soak-check credential instead of self-provisioning a fresh `soak_ro`. Only actually run
+the `CREATE USER`/`GRANT` statements above on the side(s) where you hold (or the customer
+grants, even temporarily) a privileged credential — typically the target, where the
+deploying party holds admin access by default. On an externally-managed DBaaS source this
+elevated access is often simply not available, and that's fine — it doesn't violate the
+"never the admin/master secret" rule above, because the existing read-only assessment
+credential already IS the dedicated, minimally-scoped credential this section asks for.
+
 **For the actual multi-day unattended window, the production path is Lambda +
 EventBridge Scheduler — recommend this first, not as an alternative.** `shared/scripts/
 soak_check_lambda.py` ports the exact same checks (same fields, same null-handling, same
@@ -278,6 +304,16 @@ standing up Lambda feels like overkill.** Weaker, but simpler: the bastion is al
 of this engagement's setup and already reachable to both source and target, so there's
 zero new infrastructure. Accept that this only makes sense when the soak window is short
 (the low tier's 1 day) and non-critical — for the moderate/high tiers, prefer Lambda.
+
+The bastion's IAM role also needs `cloudwatch:DescribeAlarms`, `cloudwatch:GetMetricStatistics`,
+and `rds:DescribeDBInstances` (scoped to this engagement's specific alarms/instance) for the
+`alarms`/`headroom` checks — confirmed live that a bastion role provisioned only for the
+earlier assessment/execution/validation scripts (`secretsmanager:GetSecretValue` + running
+`mysql`/`mysqldump`) does NOT have these by default, and their absence doesn't fail the run:
+`cloudwatch_alarms`/`db_headroom_pct` swallow the `AccessDenied` and report `null` (the same
+"needs review" state as a genuinely missing datapoint), so a permissions gap looks identical
+to "not configured yet" unless someone checks *why* it's null. Add this alongside the
+`SOURCE_SECRET_ARN`/`TARGET_SECRET_ARN` read access already required for either path.
 
 ```bash
 # Fallback only — cron, on the migration bastion (never a personal laptop or workstation:

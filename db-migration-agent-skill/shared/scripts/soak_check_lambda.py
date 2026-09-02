@@ -341,9 +341,14 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
         # Column position (not name) is the portable way to read this across the
         # SHOW REPLICA/SLAVE STATUS renames between MySQL versions.
         row = rows[0]
-        # Seconds_Behind_Source (8.0.22+) / Seconds_Behind_Master (older) is column 32
-        # (1-indexed) in both forms; guard against a shorter row defensively.
-        idx = 31
+        # Seconds_Behind_Source (8.0.22+) / Seconds_Behind_Master (older) is column 33
+        # (1-indexed) in both forms, i.e. index 32 in a 0-indexed row — confirmed live
+        # against a real RDS MySQL 8.0 replica's full 60-column SHOW REPLICA STATUS
+        # output (counted field-by-field); index 31 lands one column early, on the empty
+        # Source_SSL_Key column, which silently made this always report None/needs-review
+        # even with a healthy, zero-lag replication pipe. Guard against a shorter row
+        # defensively.
+        idx = 32
         val = row[idx] if len(row) > idx else None
         return (float(val), "mysql_replica_status") if val is not None else (None, "mysql_replica_status")
 
