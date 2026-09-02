@@ -44,6 +44,20 @@ already have: every GATE sign-off, every phase completion, every soak-report day
 client-inventory row confirmed, rehearsal completion, runbook generation, A4b/A4 signature.
 If it was worth a line in the plan, it is worth updating both dashboard files.
 
+🔴 **`phases[]` must stay at exactly 11 entries, one per id, every time you overwrite
+`status.json` — never 10, never 12.** The failure mode seen in practice: advancing several
+phases in one turn and hand-authoring the new JSON, which re-adds the phases you just
+completed near the top but leaves the original `pending` placeholder for those same ids
+sitting further down, unremoved — the array now has 16 entries with `4-5`/`6`/`7` etc.
+appearing twice (once `done`, once still `pending`). `dashboard.js` does not dedup by id;
+it renders the raw array, so the customer sees each duplicated phase listed twice with
+contradictory status, and the phase-count tile (`done ÷ length`) is thrown off by the extra
+entries. Load the current file, mutate the `status`/`done`/`total` fields **in place** on
+the existing objects for whichever phase(s) changed, and write back the same 11 objects —
+never compose the array from scratch or insert a fresh object for a phase id that already
+has one. Before moving on, re-open the file you just wrote and confirm: 11 entries, 11
+distinct ids, no id repeated.
+
 ## `status.json` — full snapshot, OVERWRITTEN every time (never appended)
 
 ```json
