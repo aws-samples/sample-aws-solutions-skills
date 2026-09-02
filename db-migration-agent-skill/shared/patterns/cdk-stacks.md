@@ -64,23 +64,18 @@ env-agnostic synth); DMS needs its own SG allowed **into both** the source SG an
 ```typescript
 const key = new kms.Key(this, 'DbKey', { enableKeyRotation: true,
   alias: `${constants.PREFIX}-db`, removalPolicy: RemovalPolicy.RETAIN });
-
-// Secret holds the FULL connection contract — host/port/dbname/engine, not just creds.
-// Phase 7.5 discovers whether the app's existing secret has `host`; this one always does.
-const dbSecret = new secretsmanager.Secret(this, 'DbSecret', {
-  secretName: `${constants.PREFIX}/db-credentials`,
-  generateSecretString: {
-    secretStringTemplate: JSON.stringify({ username: 'admin', dbname: constants.DB_NAME,
-      engine: constants.ENGINE_FAMILY, port: constants.DB_PORT }),
-    generateStringKey: 'password', excludeCharacters: '"@/\\\'',
-  }, encryptionKey: key,
-});
 ```
 
 Also here: the service roles from
 [../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §2 that the plan
 needs (aurora-s3-import-role for XtraBackup, `dms-vpc-role` — exact name, only if absent
 in the account — rds-proxy-secrets-role, rds-monitoring-role).
+
+**Do NOT create the DB credentials secret here.** Only the KMS key belongs in
+security-stack. Generate the secret *inside* database-stack via
+`Credentials.fromGeneratedSecret()` (see below) — creating it in security-stack and
+attaching it to the instance from database-stack via `Credentials.fromSecret()` is a
+confirmed cyclic-dependency trap (next section).
 
 ## database-stack.ts — the immutability trap lives here
 
@@ -107,7 +102,13 @@ const productionParams = new rds.ParameterGroup(this, 'ProductionParams', { engi
   }});
 
 const cluster = new rds.DatabaseCluster(this, 'Cluster', {
-  engine, credentials: rds.Credentials.fromSecret(dbSecret),
+  // Generate the secret HERE, not in security-stack — see pitfall below.
+  // Full connection contract (host/port/dbname/engine) comes from secretStringTemplate;
+  // Phase 7.5 discovers whether the app's existing secret has `host`; this one always does.
+  engine, credentials: rds.Credentials.fromGeneratedSecret('admin', {
+    secretName: `${constants.PREFIX}/db-credentials`,
+    encryptionKey: key,   // security-stack's KMS key — one-way reference, no cycle
+  }),
   writer: rds.ClusterInstance.provisioned('writer', {
     instanceType: constants.MIGRATION_INSTANCE_TYPE,   // sized UP for import
     enablePerformanceInsights: true }),
@@ -127,6 +128,17 @@ data the moment CDC starts. XtraBackup path uses `restore-db-cluster-from-s3` (n
 — run it from `scripts/03-execute-migration.sh`, then adopt monitoring around it; don't
 fight CDK into importing it mid-migration. RDS (non-Aurora) targets: `rds.DatabaseInstance`
 with `multiAz: true` — same parameter-group pair pattern.
+
+**Pitfall — cyclic cross-stack dependency (confirmed live, not theoretical):** never create
+the Secret in security-stack and hand it to database-stack via
+`credentials: rds.Credentials.fromSecret(dbSecret)`. RDS's L2 construct attaches the
+secret to the instance/cluster ARN, which forces security-stack (owner of the Secret) to
+depend on database-stack (for the instance ref) — while database-stack already depends on
+security-stack for the KMS key. CDK throws `Adding this dependency ... would create a
+cyclic reference` on synth. Fix: generate the secret *inside* database-stack with
+`Credentials.fromGeneratedSecret('admin', { secretName, encryptionKey: key })` as shown
+above — the KMS key reference still flows one-way (security → database), so there's no
+cycle. `key` is the only thing security-stack should export.
 
 ## migration-stack.ts (conditional — DMS paths)
 
