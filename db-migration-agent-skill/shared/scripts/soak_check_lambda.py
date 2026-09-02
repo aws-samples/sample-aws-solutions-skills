@@ -44,6 +44,7 @@ import os
 import random
 import ssl
 import time
+from pathlib import Path
 
 import boto3
 import pymysql
@@ -59,6 +60,19 @@ except ImportError:  # not needed for a MySQL-only deployment; kept optional to 
 # gate, not an AWS-blessed hard number.
 LAG_THRESHOLD_S = 30
 HEADROOM_THRESHOLD_PCT = 30
+
+# Confirmed LIVE against a real RDS PostgreSQL instance and a real Aurora PostgreSQL
+# cluster (us-east-1, postgres/aurora-postgresql 16.13): ssl.create_default_context()'s
+# platform default trust store does NOT contain the current Amazon RDS root ("Amazon RDS
+# <region> Root CA RSA2048 G1") on Amazon Linux 2023 — only the unrelated generic "Amazon
+# Root CA 1-4" (ACM/Trust Services roots) and legacy Starfield roots. Tier 1 (no ca_path)
+# therefore pins this bundled copy of the official AWS RDS/Aurora CA bundle
+# (https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem, covers every
+# region/algorithm generation) instead of the OS default — see _tls_context. Packaged as
+# a sibling file of this handler in the Lambda deployment asset (see cdk-stacks.md
+# §soak-stack.ts bundling step) — NOT shared/assets/ (this file gets flat-copied into
+# lambda/soak-check/, unlike soak_check.py which runs in place from the skill tree).
+_DEFAULT_CA_BUNDLE = str(Path(__file__).resolve().parent / "rds-global-bundle.pem")
 
 _secrets = boto3.client("secretsmanager")
 _cloudwatch = boto3.client("cloudwatch")
@@ -103,9 +117,12 @@ def _get_secret(secret_arn):
 def _tls_context(ca_path=None, insecure=False):
     """Always negotiate TLS, never allow a silent plaintext fallback. Three tiers:
     1. No ca_path, insecure=False (the common case: an RDS/Aurora endpoint with an
-       Amazon-issued cert) — full sslmode=verify-full equivalent: the platform default
-       trust store (already trusts the public roots those certs chain to) PLUS hostname
-       verification.
+       Amazon-issued cert) — full sslmode=verify-full equivalent: pins the bundled AWS
+       RDS/Aurora CA bundle (`_DEFAULT_CA_BUNDLE`) PLUS hostname verification. NOT the
+       platform default trust store — confirmed live that the OS store lacks the current
+       RDS root (see `_DEFAULT_CA_BUNDLE`'s module-level comment); a genuinely non-AWS
+       Postgres/MySQL source signed by a public WebPKI CA should pass its own ca_path
+       (tier 2) rather than rely on this default.
     2. ca_path given — pins that specific CA certificate as the trust anchor; still
        CERT_REQUIRED (fully encrypted and chain-verified against it), hostname
        verification skipped (pinning the exact CA already achieves the security goal,
@@ -129,7 +146,7 @@ def _tls_context(ca_path=None, insecure=False):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-    ctx = ssl.create_default_context(cafile=ca_path) if ca_path else ssl.create_default_context()
+    ctx = ssl.create_default_context(cafile=ca_path or _DEFAULT_CA_BUNDLE)
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.check_hostname = ca_path is None
     return ctx
@@ -246,11 +263,18 @@ def cloudwatch_alarms(alarm_names):
 
 def db_headroom_pct(db_instance_id):
     """FreeStorageSpace as % of AllocatedStorage — a proxy for storage headroom. Returns
-    None on ANY failure to get a real, current datapoint (missing instance, missing
-    metric, INSUFFICIENT_DATA) — the caller decides whether that means "not configured"
-    (excluded) or "needs review" (missing data must never look like a silent pass, and
-    must never crash the whole invocation either — DBInstanceNotFound is exactly the
-    kind of thing that should surface as "needs review", not an unhandled exception)."""
+    "not_applicable" for an Aurora-family instance — confirmed live against a real Aurora
+    PostgreSQL writer that Aurora instances report a placeholder AllocatedStorage
+    (observed: 1) and publish NO FreeStorageSpace datapoints at all (Aurora storage
+    auto-scales; there is no fixed allocation to measure headroom against), which used to
+    make this permanently return None (needs_agent_review) for every Aurora target — the
+    skill's primary target engine — keeping state stuck at "active" forever instead of
+    ever reaching "complete". Returns None on any OTHER failure to get a real, current
+    datapoint (missing instance, missing metric, INSUFFICIENT_DATA) — the caller decides
+    whether that means "not configured" (excluded) or "needs review" (missing data must
+    never look like a silent pass, and must never crash the whole invocation either —
+    DBInstanceNotFound is exactly the kind of thing that should surface as "needs
+    review", not an unhandled exception)."""
     try:
         desc = _rds.describe_db_instances(DBInstanceIdentifier=db_instance_id)
     except ClientError:
@@ -258,6 +282,9 @@ def db_headroom_pct(db_instance_id):
     instances = desc.get("DBInstances", [])
     if not instances:
         return None
+    engine = instances[0].get("Engine") or ""
+    if engine.lower().startswith("aurora"):
+        return "not_applicable"
     allocated_gb = instances[0].get("AllocatedStorage")
     if not allocated_gb:
         return None
@@ -425,7 +452,10 @@ def run_day(cfg, source_conn, target_conn):
         headroom_check, headroom = "not_applicable", None
     else:
         headroom = db_headroom_pct(target_db_instance_id)
-        headroom_check = None if headroom is None else (headroom > HEADROOM_THRESHOLD_PCT)
+        if headroom == "not_applicable":
+            headroom_check, headroom = "not_applicable", None
+        else:
+            headroom_check = None if headroom is None else (headroom > HEADROOM_THRESHOLD_PCT)
 
     if lag_mechanism is None:
         lag_check = "not_applicable"
@@ -680,8 +710,10 @@ def handler(event, context):
     # Source and target very often have DIFFERENT trust anchors — an on-prem/legacy
     # source with a self-signed or private-CA certificate vs. an RDS/Aurora target with
     # an Amazon-issued one — so these are two independent, optional settings, never one
-    # shared path. Leaving either unset falls back to the platform default trust store
-    # (still full TLS, just not pinned to a specific CA) for that side.
+    # shared path. Leaving either unset falls back to the bundled AWS RDS/Aurora CA
+    # bundle for that side (still full TLS, chain-verified — see _tls_context/
+    # _DEFAULT_CA_BUNDLE — NOT the platform default trust store, which is confirmed live
+    # to lack the current RDS root).
     source_ssl_ca_path = os.environ.get("SOURCE_SSL_CA_PATH")
     target_ssl_ca_path = os.environ.get("TARGET_SSL_CA_PATH")
     # Explicit, per-side, opt-in-only "encrypt but don't verify" fallback — see

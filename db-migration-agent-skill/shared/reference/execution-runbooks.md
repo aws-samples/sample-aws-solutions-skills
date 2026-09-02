@@ -196,9 +196,17 @@ engagement has no replication mechanism to measure, and the check reports
 **TLS — three tiers per side, chosen independently for `source`/`target`, never a
 silent plaintext fallback:**
 1. Neither `ssl_ca` nor `ssl_insecure` set (the default, and the right choice for an
-   RDS/Aurora endpoint) — full verify-full/VERIFY_IDENTITY: the platform/system default
-   trust store, which already trusts the public roots those certs chain to, plus
-   hostname verification.
+   RDS/Aurora endpoint) — full verify-full/VERIFY_IDENTITY, chain-verified against the
+   [Amazon RDS CA bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem)
+   bundled with this skill (`shared/assets/rds-global-bundle.pem` for `soak_check.py`; a
+   sibling file of the handler in the Lambda asset for `soak_check_lambda.py` — see
+   cdk-stacks.md §soak-stack.ts), plus hostname verification. **Not** the platform/OS
+   default trust store — confirmed live against a real RDS PostgreSQL instance and a real
+   Aurora PostgreSQL cluster that the OS default store does NOT contain the current Amazon
+   RDS root CA (only the unrelated generic "Amazon Root CA 1-4" and legacy Starfield
+   roots), so relying on it fails chain validation outright. A genuinely non-AWS
+   source/target signed by a public WebPKI CA should use tier 2 (`ssl_ca`) instead of
+   relying on this default.
 2. `ssl_ca` — pins that specific CA certificate as the trust anchor (encrypted +
    chain-verified against it, no hostname check). **Must be the actual CA certificate**,
    not merely a certificate the peer happens to present — confirmed live while building

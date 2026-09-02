@@ -253,6 +253,11 @@ in the generated project:
 mkdir -p lambda/soak-check
 cp <skill>/shared/scripts/soak_check_lambda.py lambda/soak-check/
 cp <skill>/shared/scripts/requirements.txt     lambda/soak-check/
+# Tier-1 (no *_SSL_CA_PATH set) default trust anchor — confirmed live that the platform
+# default trust store does NOT contain the current Amazon RDS root CA, so this file must
+# ship every time, not just when "strict CA pinning" is wanted (see the pitfalls note
+# below `_tls_context` treats it as the default, not an opt-in).
+cp <skill>/shared/assets/rds-global-bundle.pem lambda/soak-check/
 ```
 
 🔴 **Fail at `cdk synth`, not at the first scheduled invocation.** `SOURCE_ENGINE`/
@@ -326,13 +331,18 @@ const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
     DMS_TASK_ARN: constants.SOAK_DMS_TASK_ARN,
     CUSTOMER_TEST_SUITE_PROVIDED: `${constants.CUSTOMER_TEST_SUITE_PROVIDED}`,  // Q18 answer
     // Independent per side — an on-prem/legacy source and an RDS/Aurora target almost
-    // always have DIFFERENT trust anchors. Leave either *_SSL_CA_PATH unset to fall
-    // back to the platform default trust store for that side (still full TLS, just not
-    // CA-pinned). *_TLS_SKIP_VERIFY is a THIRD, explicit-opt-in-only tier (encrypts but
+    // always have DIFFERENT trust anchors. Leaving either *_SSL_CA_PATH unset now falls
+    // back to the bundled AWS RDS/Aurora CA bundle for that side (still full TLS,
+    // chain-verified — see _tls_context/_DEFAULT_CA_BUNDLE), NOT the platform default
+    // trust store — confirmed live that the OS store lacks the current RDS root CA, so
+    // that used to fail outright for the common case this comment used to call "just not
+    // CA-pinned". *_TLS_SKIP_VERIFY is a THIRD, explicit-opt-in-only tier (encrypts but
     // skips verification) for a self-signed source cert whose actual CA file can't be
     // retrieved at all — see execution-runbooks.md §Soak automation for when this is
     // actually the right call vs. just being lazy about CA pinning.
-    TARGET_SSL_CA_PATH: '/var/task/rds-ca-bundle.pem',   // bundled into the asset; see bundling note below
+    // TARGET_SSL_CA_PATH: leave unset for a real RDS/Aurora target — the bundled default
+    // above already covers it; only set this to something else for a target signed by a
+    // public WebPKI CA instead (not an RDS/Aurora endpoint).
     // SOURCE_SSL_CA_PATH: only if the source needs a pinned self-signed/private-CA cert
     // AND that cert (not just any certificate the peer presents) is actually available.
     // SOURCE_TLS_SKIP_VERIFY: 'true' — only if it genuinely isn't.
@@ -363,18 +373,20 @@ false })`) — never create a new SG and add it as an extra ingress rule on the
 source/target DB security groups; that's new networking, which the whole point of this
 design is to avoid. `pymysql`/`pg8000` are both pure-Python (no compiled extension), so the
 Docker bundling step above works unmodified across host architectures — no manylinux wheel
-concerns. If the account needs strict CA pinning rather than the platform default trust
-store (RDS/Aurora endpoints already verify fine against the default trust store without
-this — it's for pinning a specific bundle anyway), bundle the
-[Amazon RDS CA bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem)
-into `lambda/soak-check/rds-ca-bundle.pem` before the `cp -au` step and leave
-`TARGET_SSL_CA_PATH` set as above; omit both the file and the env var to fall back to the
-platform default trust store for that side (still full TLS, just not CA-pinned). If the
-SOURCE is an on-prem/legacy host with a self-signed certificate, bundle THAT certificate
-instead and point `SOURCE_SSL_CA_PATH` at it — `soak_check_lambda.py`'s `_tls_context`
-treats a configured CA path as a pinned trust anchor (still fully encrypted and verified
-against it) and skips hostname verification in that case specifically, since on-prem
-certs frequently carry no SAN matching the IP/hostname actually used to reach them.
+concerns. 🔴 **The `rds-global-bundle.pem` copy in the scaffolding step above is not
+optional strict-pinning nicety — confirmed live against a real RDS PostgreSQL instance and
+a real Aurora PostgreSQL cluster that the platform default trust store does NOT contain the
+current Amazon RDS root CA** (only the unrelated generic "Amazon Root CA 1-4" and legacy
+Starfield roots), so a deployment missing that file and relying on tier 1 (no
+`*_SSL_CA_PATH` set) fails chain validation on its very first invocation, against the
+overwhelmingly common RDS/Aurora case this skill exists for. If the TARGET (or SOURCE) is
+instead signed by a public WebPKI CA — not an RDS/Aurora endpoint — point that side's
+`*_SSL_CA_PATH` at whatever CA actually covers it instead of relying on the bundled
+default. If the SOURCE is an on-prem/legacy host with a self-signed certificate, bundle
+THAT certificate instead and point `SOURCE_SSL_CA_PATH` at it — `soak_check_lambda.py`'s
+`_tls_context` treats a configured CA path as a pinned trust anchor (still fully encrypted
+and verified against it) and skips hostname verification in that case specifically, since
+on-prem certs frequently carry no SAN matching the IP/hostname actually used to reach them.
 
 ```typescript
 // ── EventBridge Scheduler: daily invocation, pure AWS-managed, nothing to keep alive.

@@ -36,6 +36,23 @@ LAG_THRESHOLD_S = 30
 HEADROOM_THRESHOLD_PCT = 30
 _SPLIT = "___SOAK_CHECK_SPLIT___"
 
+# Confirmed LIVE against a real RDS PostgreSQL instance and a real Aurora PostgreSQL
+# cluster (both us-east-1, aurora-postgresql/postgres 16.13): the platform/OS default CA
+# trust store does NOT contain the current Amazon RDS root ("Amazon RDS <region> Root CA
+# RSA2048 G1") — only the unrelated generic "Amazon Root CA 1-4" (ACM/Trust Services)
+# and legacy Starfield roots. `sslmode=verify-full` with no `sslrootcert` therefore fails
+# outright (libpq falls back to the compiled-in `~/.postgresql/root.crt`, which normally
+# doesn't exist), and even `sslrootcert=system` (explicit OS-store opt-in) still fails
+# chain validation for exactly this reason. The tier-1 "neither ssl_ca nor ssl_insecure"
+# default below pins this bundled copy of the official AWS RDS/Aurora CA bundle
+# (https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem, covers every
+# region/algorithm generation) instead of trusting the OS store — this is what actually
+# makes the documented "just works against RDS/Aurora" default true. A genuinely
+# non-AWS Postgres source signed by a public WebPKI CA should use the explicit `ssl_ca`
+# tier instead (point it at that CA, or at the OS store's own file if that's really what
+# you need) rather than relying on this tier-1 default.
+_DEFAULT_CA_BUNDLE = Path(__file__).resolve().parent.parent / "assets" / "rds-global-bundle.pem"
+
 MYSQL_FAMILY = {"mysql", "mariadb", "aurora-mysql"}
 POSTGRES_FAMILY = {"postgres", "postgresql", "aurora-postgresql"}
 
@@ -103,19 +120,33 @@ def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insec
     return chunks
 
 
-def run_psql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False):
+def run_psql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False, port=None):
     """Postgres equivalent of run_mysql_batch — one psql session, one BEGIN ISOLATION
     LEVEL REPEATABLE READ covering every statement. Same three TLS tiers as
-    run_mysql_batch (verify-ca pinned / require insecure-opt-in / verify-full default) —
-    never plaintext."""
+    run_mysql_batch, EXCEPT the "neither" (tier 1) default pins the bundled AWS RDS/Aurora
+    CA bundle (`_DEFAULT_CA_BUNDLE`), not the OS trust store — confirmed live that the OS
+    store lacks the current RDS root; see `_DEFAULT_CA_BUNDLE`'s module-level comment.
+    Never plaintext.
+    `port`: confirmed live that without an explicit `-p`, psql silently defaults to 5432 —
+    connecting to the wrong endpoint (or nothing) instead of erroring clearly, for the
+    extremely common case of reaching the DB through an SSM/bastion port-forward tunnel on
+    a non-default local port (this skill's own documented Phase 2 access path). `None`
+    keeps psql's own 5432 default for a direct, default-port connection."""
     script = "; ".join(f"{sql}; SELECT '{_SPLIT}'" for sql in sqls)
     if ssl_ca:
         env = {"PGPASSWORD": password, "PGSSLMODE": "verify-ca", "PGSSLROOTCERT": ssl_ca}
     elif ssl_insecure:
         env = {"PGPASSWORD": password, "PGSSLMODE": "require"}
     else:
-        env = {"PGPASSWORD": password, "PGSSLMODE": "verify-full"}
-    cmd = ["psql", "-h", host, "-U", user, "-d", database, "-t", "-A", "-c", script]
+        env = {"PGPASSWORD": password, "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(_DEFAULT_CA_BUNDLE)}
+    cmd = ["psql", "-h", host]
+    if port:
+        cmd += ["-p", str(port)]
+    cmd += ["-U", user, "-d", database, "-t", "-A", "-c", script]
+    # env= replaces the child's whole environment (not merged) — PATH must be carried over
+    # explicitly or a bare "psql" argv[0] can fail to resolve on some shells/PATH configs.
+    import os as _os
+    env["PATH"] = _os.environ.get("PATH", "")
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env).stdout
     chunks, current = [], []
     for line in out.splitlines():
@@ -134,6 +165,16 @@ def run_batch(family, conn, sqls):
                  if k in ("host", "user", "password", "database", "ssl_ca", "ssl_insecure")}
     if family == "mysql":
         return run_mysql_batch(sqls=sqls, **conn_args)
+    # soak-config.json's documented schema (execution-runbooks.md §Soak automation)
+    # includes "port" per side — confirmed live that dropping it here made run_psql_batch
+    # silently default to 5432 regardless of what's configured, connecting to the wrong
+    # endpoint (or nothing) instead of erroring clearly for the extremely common case of
+    # reaching the DB through an SSM/bastion port-forward tunnel on a non-default local
+    # port. Threaded through only for postgres here (not added to the shared allowlist
+    # above / run_mysql_batch's signature) to stay isolated from that function while it's
+    # being edited concurrently elsewhere in this file for an unrelated MySQL-client fix.
+    if "port" in conn:
+        conn_args["port"] = conn["port"]
     return run_psql_batch(sqls=sqls, **conn_args)
 
 
@@ -162,12 +203,27 @@ def cloudwatch_alarms(alarm_names, region):
 
 
 def db_headroom_pct(db_instance_id, region):
-    """FreeStorageSpace as % of AllocatedStorage. Returns None on ANY failure to get a
-    real, current datapoint — the caller decides "not configured" vs "needs review"."""
+    """FreeStorageSpace as % of AllocatedStorage. Returns "not_applicable" for an
+    Aurora-family instance — confirmed live against a real Aurora PostgreSQL writer that
+    Aurora instances report a placeholder AllocatedStorage (observed: 1) and publish NO
+    FreeStorageSpace datapoints at all (Aurora storage auto-scales; there is no fixed
+    allocation to measure headroom against), which used to make this permanently return
+    None (needs_agent_review) for every Aurora target — the skill's primary target engine
+    — keeping state stuck at "active" forever instead of ever reaching "complete". Returns
+    None on any OTHER failure to get a real, current datapoint — the caller decides
+    "not configured" vs "needs review" for that case."""
     cmd = ["aws", "rds", "describe-db-instances", "--db-instance-identifier", db_instance_id,
-           "--region", region, "--query", "DBInstances[0].AllocatedStorage", "--output", "text"]
-    allocated_gb = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
-    if not allocated_gb or allocated_gb == "None":
+           "--region", region, "--query", "DBInstances[0].[AllocatedStorage,Engine]", "--output", "json"]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
+    if not out:
+        return None
+    try:
+        allocated_gb, engine = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if engine and str(engine).lower().startswith("aurora"):
+        return "not_applicable"
+    if not allocated_gb:
         return None
     cmd = ["aws", "cloudwatch", "get-metric-statistics", "--namespace", "AWS/RDS",
            "--metric-name", "FreeStorageSpace", "--dimensions", f"Name=DBInstanceIdentifier,Value={db_instance_id}",
@@ -361,7 +417,10 @@ def run_day(cfg):
         headroom_check, headroom = "not_applicable", None
     else:
         headroom = db_headroom_pct(target_db_instance_id, cfg.get("region", "us-east-1"))
-        headroom_check = None if headroom is None else (headroom > HEADROOM_THRESHOLD_PCT)
+        if headroom == "not_applicable":
+            headroom_check, headroom = "not_applicable", None
+        else:
+            headroom_check = None if headroom is None else (headroom > HEADROOM_THRESHOLD_PCT)
 
     lag_check = "not_applicable" if lag_mechanism is None else (None if lag_seconds is None else (lag_seconds <= LAG_THRESHOLD_S))
     repl_errors_check, repl_errors_detail = replication_errors(cfg)
