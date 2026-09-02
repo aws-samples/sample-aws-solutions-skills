@@ -275,6 +275,20 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
   mysql -h 127.0.0.1 -u admin -e "SELECT VERSION();"
   ```
 - PostgreSQL: use `PGPASSWORD` or a `~/.pgpass` (chmod 600) the same way.
+- **Creating or rotating a credential (`CREATE USER … IDENTIFIED BY`, `ALTER USER … IDENTIFIED BY`,
+  a replication user for reverse-replication arming, etc.) is a different case from
+  authenticating with one** — there is no existing secret to fetch on-host; the new
+  plaintext value must appear somewhere for the statement to run, and if that statement is
+  delivered via SSM Send-Command (the normal path when the target has no host-side
+  Secrets Manager access, e.g. a hybrid-activated or no-instance-profile host), the literal
+  value **will** land in SSM command history/CloudTrail regardless of env-var or
+  defaults-file tricks — those only protect against `ps -ef`/shell-history exposure, not
+  against the command document itself. Confirmed live during reverse-replication arming
+  against a no-instance-profile source. Treat the value as burned the moment that command
+  runs: generate it freshly for this one use, and rotate it immediately after the
+  statement executes — never reuse a value that has already transited a command history
+  this way, and say so plainly in the plan (this is exactly the kind of thing hard
+  constraint 13 wants surfaced immediately, not saved for the next gate).
 
 ### Information to Collect
 
