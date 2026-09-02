@@ -87,15 +87,19 @@ actually involved.
 
 **Expiry**: presigned URLs work for repeated GETs until they expire — not single-use — so
 the dashboard's 5-second polling keeps working against the same link for the entire soak
-duration without anything being regenerated mid-window. Past expiry, every fetch (page
-load and polling alike) fails cleanly with an HTTP 403 `AccessDenied`/`SignatureDoesNotMatch`
-from S3 — the browser shows this as a failed asset load for `index.html` itself (a blank or
-partially-loaded page) or, if the page was already open, as `dashboard.js`'s own
-`#conn-error` banner for `status.json`/`activity-log.jsonl`. That is the intended failure
-mode — say so up front when handing over the link, so "the link stopped working" on day 8
-of a 7-day soak reads as expected, not as a bug. See execution-runbooks.md's
-credential-longevity caveat for the one way this can fail *earlier* than the stated expiry
-(signing with short-lived credentials for a multi-day tier).
+duration without anything being regenerated mid-window. Past expiry, confirmed against a
+real browser (not just `curl`): every S3 GET — the initial page load and every 5-second
+poll alike — comes back HTTP 403 with a small XML body (`<Error><Code>AccessDenied</Code>
+<Message>Request has expired</Message>...`). If the link itself (`index.html`) has expired,
+that's what the browser shows in place of the page — Chromium renders it with its built-in
+XML viewer, so the customer sees a plain, readable "Request has expired" error, not a blank
+screen or a silent hang. If the page was already open and only the *data* URLs
+(`status.json`/`activity-log.jsonl`) have since expired, the page itself keeps rendering
+and `dashboard.js`'s own `#conn-error` banner appears on the next failed poll instead. Both
+are the intended failure mode — say so up front when handing over the link, so "the link
+stopped working" on day 8 of a 7-day soak reads as expected, not as a bug. See
+execution-runbooks.md's credential-longevity caveat for the one way this can fail *earlier*
+than the stated expiry (signing with short-lived credentials for a multi-day tier).
 
 ## The update rule — one habit, not two
 
