@@ -9,9 +9,20 @@
 | Medium Production | dms.r6i.2xlarge | 64 GB | 300-1000 tables, LOBs present |
 | Large Production | dms.r6i.4xlarge | 128 GB | 1000+ tables, > 2 TB |
 
+R-family (memory-optimized) is the default above because most migrations are memory-bound
+(buffering large transactions, cached changes, log files). **For heterogeneous/cross-engine
+migrations, prefer the equivalent C-family (compute-optimized) size instead** — DMS's own
+data-type-conversion machinery is CPU-intensive on these tasks (e.g. Oracle→PostgreSQL, or
+any task where DMS Schema Conversion is doing real work), and that's the bottleneck AWS
+calls out C5 for, not RAM. Same size tier, swap R for C: `dms.c5.large` for dev/test,
+`dms.c5.xlarge` for small production heterogeneous, and so on. See
+`heterogeneous-migration.md` for the migrations this applies to.
+
 **Rules:**
 - Allocate 50-70% of RAM for `MemoryLimitTotal`
-- Never use T-family for production (CPU credit exhaustion)
+- Never use T-family for production (CPU credit exhaustion) — dev/test at this DB's actual
+  scale (a handful of tables, low millions of rows) is a legitimate use of a T-family
+  instance; this rule is about production, not an absolute ban
 - Start larger during full load, scale down for steady-state CDC
 - Multi-AZ for production migrations (auto-failover)
 

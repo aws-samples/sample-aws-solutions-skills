@@ -48,6 +48,8 @@
 | 16 | **Engagement parameters** (rehearsal · parallel-run N · validation depth · rollback strategy · approver names) + Mode-2 handover depth (a/b) | |
 | 17 | **Third-party tools on/in front of the DB** (security, backup, monitoring, HA, proxy) | |
 | 18 | **Customer's own test suite / UAT scenarios** (regression tests, load tests, key business flows QA runs) — to be executed against the target during rehearsal and soak | |
+| 19 | **Named operational contact, source side** (who to actually call about this database — distinct from #16's approvers) | |
+| 20 | **Post-migration ownership** (who operates the target going forward — distinct from #16's handover depth) | |
 
 ## Phase 2 — Assessment results
 - Blockers found & resolutions: …

@@ -15,6 +15,10 @@
    major-version gaps, [version-upgrades.md](version-upgrades.md) "After the upgrade".
 3. **Confirm alarms are quiet** and reverse replication lag ≈ 0; record the T+24h check
    in the plan.
+4. **Confirm target backups and Multi-AZ are back on** — both were deliberately off
+   during the load/CDC window (`execution-runbooks.md` §Target Hygiene During Load/CDC).
+   Re-enabling them is easy to forget once attention moves to performance tuning; check it
+   explicitly here rather than assuming the cutover runbook step actually ran.
 
 ## Return to steady state (after the T+24h watch)
 

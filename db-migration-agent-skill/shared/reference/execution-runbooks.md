@@ -466,6 +466,19 @@ cost (millions of trigger invocations for data that's just being copied, not cre
 a correctness risk (replaying migration-time bulk data through logic that was written for
 live application traffic, not backfill).
 
+### Target Hygiene During Load/CDC — Backups and Multi-AZ Off Until Cutover
+
+Same principle as deferring triggers, applied to the target instance itself, for any
+method: **turn off automated backups and Multi-AZ on the target while the load/CDC window
+is open**, then re-enable both as part of the cutover sequence, before the rollback window
+starts (`post-migration.md`'s T+1h→T+24h watch is also where you'd confirm this actually
+happened, not just that it was planned). Backups taken mid-load are backups of a
+half-loaded, not-yet-consistent database — worthless as a recovery point and pure overhead
+on the target during exactly the window you want its write throughput unconstrained.
+Multi-AZ during this window adds synchronous replication overhead for no benefit, since
+the target isn't serving production traffic yet. Re-enabling both is a single parameter
+change each; do it before you consider cutover complete, not as an afterthought days later.
+
 ```bash
 # PostgreSQL: Functions, triggers, views, types
 pg_dump --schema-only --no-owner --no-privileges \

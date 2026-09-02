@@ -105,6 +105,15 @@ hard constraint 10.
     open question, or missing named-approver row goes in this list, nothing blocking exists
     only in prose. Exact format and a worked example in
     `shared/reference/engagement-safety.md` §Surfacing what's needed from the user.
+13. **A genuine surprise is never saved up for the next gate.** Silence between gates is
+    fine for routine, expected work — that's what the autonomous half of the Execution
+    model table above is for. But the moment you discover something that contradicts a
+    discovery answer already on record, a stated assumption, or an expected result — a
+    "no live clients" answer that turns out to have one, a cached value that turns out
+    stale, an alarm that's been watching the wrong metric — say so immediately, in the
+    conversation, right then. This applies even inside phases documented as otherwise
+    autonomous (Phase 6 included). Waiting for GATE 3 to mention something you noticed
+    during Phase 6 is exactly the failure mode this constraint exists to prevent.
 
 ## Execution model
 
@@ -206,7 +215,7 @@ per turn (customers consistently push back on drip-feed questioning; asynchronou
 stakeholders doubly so). Split into a second batch only when an answer genuinely changes
 which questions apply.
 
-Collect the 18 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
+Collect the 20 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
 a plain on-prem VM: state whether the source is self-managed with OS access, or a managed DB
 product — this decides which method-matrix row even applies; see
 source-assessment.md §Execution Location)**, target **(service/version, and its network
@@ -234,7 +243,13 @@ monitoring, HA, proxy agents; customers usually forget these until asked), and t
 **customer's own test suite** (#18 — regression/UAT/load tests their QA already runs;
 these become acceptance gates executed against the target during rehearsal and soak —
 integration mechanics in `shared/reference/customer-test-integration.md`: their tests
-run in *their* CI/QA systems pointed at the target endpoint, never pasted into chat). "Go with recommendations" accepts all remaining defaults. Skip what's
+run in *their* CI/QA systems pointed at the target endpoint, never pasted into chat),
+a **named operational contact on the source side** (#19 — distinct from the approver
+names in #16: not who decides, but who you'd actually call if something on that host
+looks odd — a DBA/ops handle, not a manager), and **post-migration ownership** (#20 —
+who operates the target once this is over, distinct from Mode-2 handover depth in #16,
+which is about how much prep work you do, not who's on the hook afterward — feeds
+Phase 9's decommission/handoff step). "Go with recommendations" accepts all remaining defaults. Skip what's
 already known.
 
 ⛔ **GATE 1** — summarize the inputs in the plan; user confirms before any assessment.

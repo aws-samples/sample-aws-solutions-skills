@@ -13,6 +13,17 @@
 > (`migration-plan.md` §Phase 1) — **do not re-ask what is already answered**; use this
 > list only to spot gaps that block a matrix row from resolving.
 
+**For a migration of meaningful size or complexity, recommend a scaled-down proof-of-concept
+run before committing to the real one** — a subset of tables, or a clone, moved through the
+actual chosen method end to end. This surfaces environment-specific surprises (real network
+throughput vs. assumed, character-set/collation mismatches, schema objects nobody mentioned
+in discovery) while the cost of being wrong is nothing. This is separate from and earlier
+than the later clone rehearsal (`execution-runbooks.md` §Migration Rehearsal) — the PoC
+validates that the *migration tooling* behaves as expected on this specific environment; the
+rehearsal validates that the *cutover procedure* itself works and times out correctly. Skip
+the PoC only for genuinely small/simple cases (this skill's own "small" tier — a handful of
+tables, no schema objects — is a reasonable line for "not worth a separate PoC pass").
+
 ### Decision Input — Ask the User
 
 1. **Homogeneous or heterogeneous?** Same engine family (MySQL→MySQL/Aurora MySQL, PostgreSQL→PostgreSQL/Aurora PG, MariaDB→MariaDB, **Oracle→RDS Oracle, SQL Server→RDS SQL Server**) = **homogeneous**, stay in this skill (homogeneous path). Engine family *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL, MySQL→PostgreSQL) = **heterogeneous**, go to [heterogeneous-migration.md](heterogeneous-migration.md) first (schema/code conversion), then return for cutover.

@@ -49,6 +49,7 @@
 - **Targets** include all RDS engines, Aurora MySQL/PostgreSQL (incl. Serverless v2 and Aurora PostgreSQL Limitless), Redshift, S3, DynamoDB, OpenSearch, Kafka/MSK, Neptune, DocumentDB, and **Babelfish for Aurora PostgreSQL**.
 - **DMS Serverless** auto-provisions/scales replication capacity — worth offering when you don't want to size a replication instance.
 - ⚠️ **DMS migrates data, not schema objects** — stored procedures, triggers, views, events, sequences, and grants are **not** carried by DMS. Convert schema separately (SCT / DMS Schema Conversion / native dump).
+- **Sizing the replication instance for this workload**: prefer the C-family, not the default R-family — cross-engine data-type conversion is CPU-bound, not memory-bound, so `dms.c5.*` at the same size tier fits better than `dms.r6i.*`. See `dms-best-practices.md` §Replication Instance Sizing.
 
 ### 3.2 AWS SCT (Schema Conversion Tool — desktop)
 
