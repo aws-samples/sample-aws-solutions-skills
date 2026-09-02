@@ -13,7 +13,7 @@
 | Source | {engine+version} on {EC2 instance-id / on-prem host} |
 | Target | {aurora-mysql / rds-postgresql / …} {version} in {region} |
 | Method (approved GATE 2) | {method} — *why:* {reason} |
-| Engagement parameters (GATE 1) | rehearsal: {none/one/repeat-until-converged} · parallel run: {N} consecutive green {days/hours} · validation depth: {…} · rollback: {reverse replication / snapshot+RPO ack / write-log replay} |
+| Engagement parameters (GATE 1) | rehearsal: {none/one/repeat-until-converged} · parallel run: {N} consecutive green {days/hours} ({risk tier: Low/Moderate/High} — signal: {…}) · validation depth: {…} · rollback: {reverse replication / snapshot+RPO ack / write-log replay} |
 | Cutover window | {date/time, TZ} |
 | Downtime budget | {seconds/minutes/hours} · RPO on rollback: {zero / acknowledged loss} |
 | Status | ⏳ Phase {n} |

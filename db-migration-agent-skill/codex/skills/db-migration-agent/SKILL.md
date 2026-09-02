@@ -253,7 +253,10 @@ return here for data movement. Prepare the **cost estimate**
 (`shared/reference/preflight-iam-cost.md` §3).
 
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
-rollback strategy, itemized cost, target architecture (Mermaid). User approves. **If the
+rollback strategy, itemized cost, target architecture (Mermaid). User approves, and you
+**sign it in `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — a verbal
+"approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
+must not proceed until the row actually has an approver and a date in the file). **If the
 chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
 replication), this approval also **pre-authorizes the CDC-proof probe** described in
 `execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a

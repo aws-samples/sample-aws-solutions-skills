@@ -12,7 +12,7 @@
 | Engagement mode | {1 analysis-only / 2 migration-ready — customer executes cutover / 3 full-migration — agent executes cutover} | | |
 | Mode 2 handover depth | {(a) full preparation / (b) light preparation} — n/a for Modes 1, 3 | | |
 | Mode 3 warnings stated & accepted | {yes — agent will freeze the source and repoint live clients / n/a} | | |
-| Engagement parameters | rehearsal {…} · parallel run {N} · validation depth {…} · rollback {…} | | |
+| Engagement parameters | rehearsal {…} · parallel run {N} ({risk tier: Low/Moderate/High} — signal: {e.g. "production-serving, live write traffic, zero/seconds downtime tolerance"}) · validation depth {…} · rollback {…} | | |
 | Prior assessment report | {path/date of report that unlocks Mode 3 / "this engagement, Phases 1–3"} | | |
 | IAM guardrail in place | {session policy / permissions boundary / simulate-proof} — Deny list active on {source ARNs} | | |
 
