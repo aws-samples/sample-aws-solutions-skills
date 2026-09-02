@@ -37,10 +37,65 @@ customer (or you, on their explicit ask) run it. Same reasoning as never opening
 without being asked.
 
 This local setup is for active work — discovery through rehearsal. During Phase 7.7
-(soak) specifically, `dashboard/` relocates to the bastion alongside `soak_check.py`, and
-gets viewed via SSM port forwarding instead of directly — see execution-runbooks.md
-§Soak automation for why (the script and the viewer must never be looking at two
-different copies) and the exact commands.
+(soak) specifically, `dashboard/` relocates to a private S3 bucket (the soak-stack's
+`DashboardBucket` — `../patterns/cdk-stacks.md` §soak-stack.ts) alongside
+`soak_check_lambda.py`, and gets viewed via a presigned URL instead of directly — see
+execution-runbooks.md §Soak automation for why (the Lambda and the viewer must never be
+looking at two different copies) and §Presigned-URL dashboard access for the exact
+commands. Everything below this point (the JSON schemas, the update rule, the rendering
+rules) is identical whether the files are sitting on local disk or in that bucket —
+only *where* they live changes, never their shape.
+
+## Presigned-URL viewing (soak window only)
+
+`shared/scripts/generate_presigned_urls.py` (run once, at soak start) presigns GET URLs
+for `index.html`, both files under `assets/`, `status.json`, and `activity-log.jsonl`, all
+expiring together at the end of the soak window, then rewrites `index.html` so its CSS
+`href`, JS `src`, and the two data-fetch targets are those absolute presigned URLs instead
+of the relative paths used for local viewing. `dashboard.js` picks this up automatically:
+it reads `window.DASHBOARD_STATUS_URL`/`window.DASHBOARD_LOG_URL` if the page defines them
+(the rewritten `index.html` does, via a small inline `<script>` block the generator
+injects just before the `dashboard.js` `<script>` tag) and falls back to the plain
+`status.json`/`activity-log.jsonl` relative fetches otherwise — the same file works
+unmodified for local dev and for the presigned/S3 case.
+
+Two mechanics worth understanding before relying on this, both confirmed against a real
+browser while building it, not just reasoned about:
+
+- **Why the rewrite is necessary at all**: a relative `fetch('status.json')` issued from a
+  page whose own URL happens to carry a presigned querystring does **not** inherit that
+  querystring for the sibling request — relative URL resolution only carries over
+  scheme/host/path, never the query string of the *document's own* URL. Against a bucket
+  with all public access blocked, that lands as an unsigned GET, i.e. an unconditional
+  403, indistinguishable at a glance from a real permissions problem. Every sub-resource
+  the page loads needs its *own* presigned query string, embedded as an absolute URL.
+- **Why there's no `?_=timestamp` cache-buster in the fetch calls**: S3's SigV4 signature
+  for a presigned URL covers the exact query string present when it was signed — appending
+  anything afterward, including an innocuous cache-busting parameter, changes the
+  canonical request S3 recomputes on receipt and makes it reject the whole request.
+  `fetch(url, { cache: 'no-store' })` already forces a real network request on every poll
+  without needing a query-string trick, so the fix was simply to rely on that and drop the
+  manual buster — which also happens to be simpler for the local-dev path.
+
+**CORS**: the bucket needs a CORS rule allowing `GET` (see `cdk-stacks.md`'s
+`DashboardBucket` — `AllowedMethods: [GET]`, permissive `AllowedOrigins`/`AllowedHeaders`,
+since these are unauthenticated-by-header GETs with no cookies involved). Verify this in an
+actual browser, not `curl` — preflight behavior and origin handling for a page whose own
+origin *is* the bucket's origin is exactly the kind of thing that looks fine from the
+command line and only shows its real behavior once a browser's fetch/CORS engine is
+actually involved.
+
+**Expiry**: presigned URLs work for repeated GETs until they expire — not single-use — so
+the dashboard's 5-second polling keeps working against the same link for the entire soak
+duration without anything being regenerated mid-window. Past expiry, every fetch (page
+load and polling alike) fails cleanly with an HTTP 403 `AccessDenied`/`SignatureDoesNotMatch`
+from S3 — the browser shows this as a failed asset load for `index.html` itself (a blank or
+partially-loaded page) or, if the page was already open, as `dashboard.js`'s own
+`#conn-error` banner for `status.json`/`activity-log.jsonl`. That is the intended failure
+mode — say so up front when handing over the link, so "the link stopped working" on day 8
+of a 7-day soak reads as expected, not as a bug. See execution-runbooks.md's
+credential-longevity caveat for the one way this can fail *earlier* than the stated expiry
+(signing with short-lived credentials for a multi-day tier).
 
 ## The update rule — one habit, not two
 
@@ -179,11 +234,13 @@ mark a gate `met:true` for either reason without one of these:
   period, each with the 8-check result set from `shared/templates/soak-report.md` (`null`
   for a check nothing autonomous can measure — `replication_lag` and
   `customer_test_suite` — never guess these, leave them `null` until you or the customer's
-  test run actually supplies a value). `shared/scripts/soak_check.py` is a standalone
-  script that runs the mechanical checks (row count, checksum, schema drift, alarm state,
-  storage headroom) against source and target directly and writes this object itself, no
-  agent invocation needed for the routine all-green case — see
-  `execution-runbooks.md` §Soak automation for how to configure and schedule it. A day it
+  test run actually supplies a value). `shared/scripts/soak_check.py` (reference
+  implementation, run by hand) and `shared/scripts/soak_check_lambda.py` (the production
+  path — VPC-attached Lambda on an EventBridge Scheduler cadence, writing straight into
+  this bucket) both run the mechanical checks (row count, checksum, schema drift, alarm
+  state, storage headroom) against source and target directly and write this object
+  themselves, no agent invocation needed for the routine all-green case — see
+  `execution-runbooks.md` §Soak automation for how to configure and deploy either. A day it
   writes with `needs_agent_review: true` (any RED, or either null check) must get you to
   actually look at it before the next period — the dashboard surfaces this as a standalone
   banner, not just a colored cell. If soak is waived, set `{"waived": true, "waived_reason": "..."}`
@@ -231,6 +288,9 @@ break the render.
 ## What this page deliberately does not do
 
 No websocket/push (client-side polling every 5s is enough for a human watching a status
-page), no auth/login (localhost-only, single user — do not deploy this anywhere), no
-multi-engagement view (one `dashboard/` per engagement, same as `migration-plan.md`), and it
-never starts its own server process.
+page), no auth/login of its own — outside the soak window this is localhost-only,
+single-user, and not deployed anywhere; during the soak window, access control is the
+presigned URL itself (only someone holding the link can reach the private bucket, and only
+until it expires) rather than any login the page implements. No multi-engagement view (one
+`dashboard/` per engagement, same as `migration-plan.md`), and it never starts its own
+server process.

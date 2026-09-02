@@ -124,82 +124,129 @@ today unless you set something up. Without automation, a daily soak report only 
 produced when a human re-invokes the agent that day, which is easy to forget across a
 multi-day window.
 
-`shared/scripts/soak_check.py` runs the mechanical half of the checklist standalone — row
-count, checksum, schema drift, alarm state, storage headroom — against source and target
-directly, no LLM involvement needed for the routine all-green case, and writes the results
-straight into `dashboard/status.json`'s `soak` object (schema: `dashboard.md` §soak) plus
-that day's report file. `replication_lag` and `customer_test_suite` stay `null` — this
-script has no CDC-metric or external-test-suite access, and must never guess those.
+`shared/scripts/soak_check.py` is the **reference implementation** of the mechanical half
+of the checklist — row count, checksum, schema drift, alarm state, storage headroom —
+against source and target directly, no LLM involvement needed for the routine all-green
+case. Keep using it as-is for a same-day check run by hand, or for debugging: it's plain
+Python + the `mysql`/`psql`/`aws` CLIs, easy to run from any machine that can reach both
+databases. `replication_lag` and `customer_test_suite` stay `null` in every form of this
+check — nothing autonomous has CDC-metric or external-test-suite access, and must never
+guess those.
 
-Setup: write a `dashboard/soak-config.json` (engine, source/target connection info,
-tables to spot-check, CloudWatch alarm names, target DB instance ID) once, per the schema
-in the script's own docstring. Get the customer's approval before creating either
-scheduling option below — a scheduled task or a Lambda is infrastructure, not something
-to set up invisibly.
+**For the actual multi-day unattended window, the production path is Lambda +
+EventBridge Scheduler — recommend this first, not as an alternative.** `shared/scripts/
+soak_check_lambda.py` ports the exact same checks (same fields, same null-handling, same
+`needs_agent_review` logic) to run as an AWS-managed Lambda: VPC-attached into the *same*
+private subnets and security group the migration bastion already uses (identical
+reachability to the source over the existing VPN/DX path — no new networking, and it
+reuses those subnets' existing NAT gateway for its own AWS API calls), triggered daily by
+EventBridge Scheduler, writing directly into the dashboard's S3 bucket (`dashboard.md`
+§Presigned-URL viewing) instead of a local file. See
+[../patterns/cdk-stacks.md](../patterns/cdk-stacks.md) §soak-stack.ts for the exact CDK.
+Get the customer's approval before creating this — it's infrastructure, not something to
+stand up invisibly, same as any other stack in this skill.
 
-**Never schedule this on a personal laptop or workstation for anything beyond a same-day
-check.** A multi-day soak window needs something running the whole time, and a laptop
-doesn't qualify — it sleeps, gets its lid closed, gets rebooted for an OS update, and a
-missed day produces no report and triggers no alert. Nobody notices until someone happens
-to look at the dashboard and sees an unexplained gap days later.
+Why Lambda over a bastion cron by default: a multi-day soak window needs something
+running the *whole* time, unattended, with nothing to babysit. A bastion is a persistent
+EC2 host — it can be rebooted for patching, its instance can be stopped by an unrelated
+cleanup pass, and if SSM Agent or the instance's networking hiccups mid-window, the cron
+job silently stops firing with nothing watching it. Lambda + EventBridge Scheduler has no
+host to keep alive, no OS to patch, and failed invocations are themselves a CloudWatch
+metric you can alarm on — the automation's own reliability no longer depends on a single
+long-running box staying healthy for days.
+
+**Fallback — cron on the migration bastion, for a short/low-stakes engagement where
+standing up Lambda feels like overkill.** Weaker, but simpler: the bastion is already part
+of this engagement's setup and already reachable to both source and target, so there's
+zero new infrastructure. Accept that this only makes sense when the soak window is short
+(the low tier's 1 day) and non-critical — for the moderate/high tiers, prefer Lambda.
 
 ```bash
-# Default choice — cron, on the migration bastion (not a personal machine). The bastion
-# is already part of this engagement's standard setup, already reachable to both source
-# and target, and is going to be running for the duration anyway — no new infrastructure
-# needed for a typical short engagement:
+# Fallback only — cron, on the migration bastion (never a personal laptop or workstation:
+# it sleeps, gets its lid closed, gets rebooted for an OS update, and a missed day produces
+# no report with nothing to notice it):
 # 0 9 * * * cd /path/to/engagement && python3 shared/scripts/soak_check.py --config dashboard/soak-config.json >> soak.log 2>&1
 ```
 
-```bash
-# More robust alternative — EventBridge Scheduler + Lambda: pure AWS-managed, nothing to
-# keep alive at all. More setup than the bastion cron, but worth it for a longer-running
-# or more critical soak window: package soak_check.py (stdlib + `aws` CLI available in
-# the Lambda runtime, or boto3 equivalents for the CloudWatch/RDS calls) into a Lambda,
-# trigger daily via EventBridge Scheduler, write status.json/activity-log.jsonl to the
-# same S3-backed or EFS-mounted location the dashboard reads from.
-```
+Exit code 0 (standalone script) / a `needs_agent_review: false` result (Lambda) = clean
+day, no review needed. Exit code 2 / `needs_agent_review: true` = any check false, or a
+check came back `null` unexpectedly — treat this exactly like a RED day until a human or
+the agent has actually looked at it, even if the `overall` verdict happened to read green.
+The Lambda logs this at `WARNING` rather than raising, so a normal RED/needs-review day
+doesn't trip Lambda's own Errors metric — alarm on the log line or on `status.json`
+directly, not on invocation failure.
 
-Exit code 0 = clean day, no review needed. Exit code 2 = `needs_agent_review: true` was
-set (any check false, or a check came back null unexpectedly) — treat this exactly like a
-RED day until a human or the agent has actually looked at it, even if the script's own
-`overall` verdict happened to read green.
+**Whichever path runs it, a missed run needs to be visible on its own** — a silently
+skipped day looks identical to "waiting for tomorrow" otherwise. Both `soak_check.py` and
+`soak_check_lambda.py` write `soak.last_checked_at` on every run; the dashboard flags it
+directly if more than 36 hours pass without an update (a dedicated check, not the existing
+15-minute chat-staleness badge — that one assumes an active session, and would falsely
+flag every normal day of a once-daily cadence). Confirm this banner is actually visible on
+the dashboard before walking away from a multi-day soak.
 
-**Whichever host runs it, a missed run needs to be visible on its own** — a silently
-skipped day looks identical to "waiting for tomorrow" otherwise. `soak_check.py` writes
-`soak.last_checked_at` on every run; the dashboard flags it directly if more than 36 hours
-pass without an update (a dedicated check, not the existing 15-minute chat-staleness
-badge — that one assumes an active session, and would falsely flag every normal day of a
-once-daily cadence). Confirm this banner is actually visible on the dashboard before
-walking away from a multi-day soak.
+**The dashboard still relocates for the soak window specifically — same lifecycle as
+before, different destination.** Before and after Phase 7.7, `dashboard/` stays exactly
+where it's always been: a local folder, viewed with `python3 -m http.server` per
+`dashboard.md`. For the soak window itself, it moves to the S3 bucket the soak-stack
+creates — not the bastion — because that's now the single source of truth `soak_check_
+lambda.py` reads and writes, and because S3 is what makes the "one link, seamless
+re-polling" viewing model possible (`dashboard.md` §Presigned-URL viewing):
 
-**The dashboard files have to live where the script runs, or they silently diverge.**
-Moving `soak_check.py` to the bastion solves nothing if `dashboard/status.json` and
-`activity-log.jsonl` stay on the human's own machine — the script would update a bastion
-copy nobody's looking at, while the dashboard they actually have open keeps showing
-whatever it last synced, not reality. This only matters for the soak window itself:
-
-1. **Starting soak**: copy the whole `dashboard/` folder (and `soak-config.json`) to the
-   bastion, once. From then until soak exits, the bastion's copy is the live one —
-   `soak_check.py` reads and writes it in place.
-2. **Viewing it during soak**: don't re-copy it back to look at it — tunnel to it instead,
-   the same SSM mechanism already used for everything else in this skill, no new
-   infrastructure and nothing exposed publicly:
-   ```
-   aws ssm start-session --target <bastion-instance-id> \
-     --document-name AWS-StartPortForwardingSession \
-     --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
-   ```
-   Then browse `http://localhost:8080` exactly as if the dashboard were local — the
-   tunnel makes the bastion's copy transparently reachable. Leave the bastion's own
-   `python3 -m http.server 8080 --directory dashboard` running for the tunnel to reach.
-3. **Ending soak**: copy the bastion's `dashboard/` (now holding every day's results) back
-   to the main engagement working directory, so `migration-plan.md` and everything else
-   stay consistent with it afterward. A plain copy — don't build a two-way sync for this.
+1. **Starting soak**: upload the current `dashboard/` contents (`index.html`, `assets/`,
+   `status.json` with the soak object seeded, an empty `activity-log.jsonl`) to the bucket,
+   once. From then until soak exits, the bucket's copy is the live one — the Lambda reads
+   and writes it in place, same principle as the old bastion-copy step, just S3 instead of
+   an EC2 disk.
+2. **Viewing it during soak**: generate the presigned URLs (next section) and hand over the
+   single resulting link — no port-forwarding, no tunnel, no re-download to see an update;
+   the page's own 5-second polling keeps working against the presigned URLs until they
+   expire.
+3. **Ending soak**: download the bucket's final `dashboard/` contents (now holding every
+   day's results) back into the engagement working directory, so `migration-plan.md` and
+   everything else stay consistent with it afterward — a plain sync, same as the old
+   bastion-copy-back step.
 
 Before and after the soak window, working locally is normal and doesn't need any of this —
-say so explicitly, so the customer doesn't come away thinking they need to work from the
-bastion for the whole engagement. This relocation is specific to the unattended stretch.
+say so explicitly, so the customer doesn't come away thinking the dashboard lives in S3 for
+the whole engagement.
+
+### Presigned-URL dashboard access (the customer's one link for the soak window)
+
+Run once, right after the soak-stack deploys and the initial `dashboard/` contents
+(`index.html`, `assets/`, an empty `activity-log.jsonl`, a `status.json` with the soak
+object seeded) are uploaded to the bucket:
+
+```bash
+python3 shared/scripts/generate_presigned_urls.py \
+  --bucket <dashboard-bucket-name> --expires-seconds 604800   # 604800s = 7 days, the SigV4
+                                                                # ceiling — match to the tier
+```
+
+This presigns every file the page needs (`index.html`, both assets, `status.json`,
+`activity-log.jsonl`) for the same duration, rewrites `index.html` so its CSS/JS/data
+references are absolute presigned URLs instead of relative paths (a relative
+`fetch('status.json')` from a page loaded via a presigned URL drops the query string
+entirely and 403s against a private bucket — this rewrite is what avoids that), and prints
+one line prefixed `CUSTOMER LINK:` — that line, and only that line, is what you hand the
+customer. One link, valid for the whole soak window; presigned URLs support repeated GETs
+until they expire, so the dashboard's existing 5-second polling just keeps working against
+it without anything being regenerated mid-window.
+
+🔴 **Read the script's own docstring before running it for a 3- or 7-day tier.** A presigned
+URL can never outlive the credentials used to sign it — asking for a 7-day `Expires` while
+signing with a temporary/SSO session that itself expires in a few hours produces a URL that
+stops working when *that* session ends, not when the URL says it should, and fails with a
+confusing signature error rather than a clean "expired" message. For anything past a
+same-day (low-tier) window, sign with a throwaway IAM user's long-term access key created
+for exactly this purpose, kept alive for the soak's duration, and deactivated right after
+soak-exit — not the operator's own role/SSO session.
+
+The dashboard bucket itself stays fully private (blocked public access, no bucket-policy
+public-read) — presigned URLs are the only access path, exactly as required everywhere
+else in this skill. A basic CORS rule (GET only) on the bucket is still needed because the
+page's own fetches to its sibling S3 objects are subject to the browser's CORS rules like
+any other cross-resource fetch; see `dashboard.md` for what that rule looks like and why it
+was verified in an actual browser, not just with `curl`.
 
 ### If XtraBackup Seed + Binlog/DMS CDC Catch-up (large MySQL, minimal downtime — matrix row 6)
 

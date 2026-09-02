@@ -1,8 +1,11 @@
 /* db-migration-agent progress dashboard — plain polling renderer.
-   No build step, no framework. Reads status.json (full snapshot, agent overwrites it)
-   and activity-log.jsonl (append-only, agent appends one line per event) from the same
-   directory as this page. Never computes cutover_ready itself — that boolean is decided
-   by the agent, from the skill's own gates; this file only renders what it's told.
+   No build step, no framework. Reads status.json (full snapshot, agent/Lambda overwrites
+   it) and activity-log.jsonl (append-only, one line per event) — normally from the same
+   directory as this page (local dev), or from two absolute presigned S3 URLs during a
+   Phase 7.7 soak window (see window.DASHBOARD_STATUS_URL/DASHBOARD_LOG_URL below and
+   shared/scripts/generate_presigned_urls.py). Never computes cutover_ready itself — that
+   boolean is decided by the agent, from the skill's own gates; this file only renders
+   what it's told.
 
    i18n: status.json's `lang` field ("en"/"ko"/...) picks the label set for this page's
    own static UI chrome (headers, badges, table columns, empty/error states) — separate
@@ -10,6 +13,13 @@
    right language itself. Defaults to "en" if `lang` is absent. */
 (() => {
   const POLL_MS = 5000;
+  // Local dev (python3 -m http.server, relative paths) vs soak-window S3 hosting (absolute
+  // presigned URLs) — shared/scripts/generate_presigned_urls.py injects these two globals
+  // into index.html right before this script tag when it materializes the presigned copy;
+  // when absent (local dev, or before soak start), fall back to the plain relative paths
+  // this page has always used. See execution-runbooks.md §Soak automation.
+  const STATUS_URL = (typeof window !== 'undefined' && window.DASHBOARD_STATUS_URL) || 'status.json';
+  const LOG_URL = (typeof window !== 'undefined' && window.DASHBOARD_LOG_URL) || 'activity-log.jsonl';
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let lastLogCount = 0;
@@ -38,7 +48,7 @@
       logEmpty: 'No activity recorded yet.',
       objectsEmpty: 'No schema-object inventory yet (populated after Phase 2).',
       objectsNone: 'This source has no schema objects beyond tables.',
-      footer: 'db-migration-agent · local only · auto-refreshes every 5s · nothing leaves this machine',
+      footer: 'db-migration-agent · single-user, no login · auto-refreshes every 5s',
       updatedPrefix: 'updated',
       connError: (msg) => `Can't read status.json / activity-log.jsonl — ${msg}`,
       checksumMatch: '✓ match',
@@ -82,7 +92,7 @@
       logEmpty: '아직 기록된 활동이 없습니다.',
       objectsEmpty: '아직 스키마 객체 인벤토리가 없습니다 (Phase 2 이후 채워집니다).',
       objectsNone: '이 소스에는 테이블 외 스키마 객체가 없습니다.',
-      footer: 'db-migration-agent · 로컬 전용 · 5초마다 자동 갱신 · 외부로 전송되지 않습니다',
+      footer: 'db-migration-agent · 단일 사용자, 로그인 없음 · 5초마다 자동 갱신',
       updatedPrefix: '업데이트',
       connError: (msg) => `status.json / activity-log.jsonl을 읽을 수 없습니다 — ${msg}`,
       checksumMatch: '✓ 일치',
@@ -295,23 +305,29 @@
     $('#log').innerHTML = rows;
   }
 
+  // No manual `?_=timestamp` cache-buster: `cache:'no-store'` already forces a real
+  // network fetch every poll, and — critically — appending an extra query param to an S3
+  // presigned URL breaks its SigV4 signature (the signature covers the exact query string
+  // present at sign time; anything added after, including a stray `&_=...`, makes S3
+  // recompute a different canonical request and reject it). Confirmed live: with the
+  // buster, every poll against a presigned status.json/activity-log.jsonl URL 403'd.
   async function fetchJSON(url) {
-    const r = await fetch(`${url}?_=${Date.now()}`, { cache: 'no-store' });
-    if (!r.ok) throw new Error(`${url}: ${r.status}`);
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`${url.split('?')[0]}: ${r.status}`);
     return r.json();
   }
 
   async function fetchJSONL(url) {
-    const r = await fetch(`${url}?_=${Date.now()}`, { cache: 'no-store' });
+    const r = await fetch(url, { cache: 'no-store' });
     if (r.status === 404) return [];   // not yet created / not yet appended to — not an error
-    if (!r.ok) throw new Error(`${url}: ${r.status}`);
+    if (!r.ok) throw new Error(`${url.split('?')[0]}: ${r.status}`);
     const text = await r.text();
     return text.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   }
 
   async function tick() {
     try {
-      const [status, log] = await Promise.all([fetchJSON('status.json'), fetchJSONL('activity-log.jsonl')]);
+      const [status, log] = await Promise.all([fetchJSON(STATUS_URL), fetchJSONL(LOG_URL)]);
       applyStaticLabels(status);
       renderTiles(status);
       renderCutover(status);

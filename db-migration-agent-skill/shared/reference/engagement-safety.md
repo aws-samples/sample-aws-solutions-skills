@@ -155,10 +155,11 @@ language; keep the structure, not the exact words):
 > Do you want to keep that, shorten it, or skip it entirely? Either way I'll record which
 > and why.
 >
-> One logistics note if you keep it: for those [N] day(s), the checks run automatically
-> and the dashboard moves to the migration bastion (not your own machine — that's not
-> reliable left running for days). You'll view it through a one-line tunnel command
-> instead of directly; nothing else about how you work changes.
+> One logistics note if you keep it: for those [N] day(s), the checks run automatically on
+> AWS-managed infrastructure (not your own machine — that's not reliable left running for
+> days), and I'll send you a single link once, at the start, that shows the dashboard live
+> for the whole window — just keep it open or reopen it, no re-downloading anything.
+> Nothing else about how you work changes.
 
 Record the answer **and the stated reasoning** in `authorizations.md` — "waived, customer
 accepted the risk because X" or "kept at 3 days because Y," never just the number. This is

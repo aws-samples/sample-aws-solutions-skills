@@ -176,6 +176,132 @@ in — output the proxy endpoint; Phase 8 points clients at it. Monitoring: the 
 from [../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4 + a
 dashboard with source-vs-target panels during the migration window, all → one SNS topic.
 
+## soak-stack.ts (conditional — Phase 7.7 automated soak checks, the recommended path)
+
+Generated when the customer approves automating the Phase 7.7 checklist (see
+[../reference/execution-runbooks.md](../reference/execution-runbooks.md) §Soak automation —
+get approval before creating this, it's infrastructure like everything else here). Three
+pieces: an S3 bucket that becomes the soak window's single source of truth for the
+dashboard, a VPC-attached Lambda that ports `shared/scripts/soak_check_lambda.py`'s logic,
+and an EventBridge Scheduler rule that invokes it daily. `shared/scripts/soak_check.py`
+stays the reference implementation for running the same checks by hand from any machine
+that can reach the databases directly — this stack is the unattended production path.
+
+```typescript
+// ── S3 bucket: single source of truth for dashboard/ during the soak window ──
+const dashboardBucket = new s3.Bucket(this, 'DashboardBucket', {
+  bucketName: `${constants.PREFIX}-soak-dashboard`,
+  encryption: s3.BucketEncryption.S3_MANAGED,           // SSE-S3; use KMS if the plan needs a CMK
+  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,    // no bucket policy public-read, ever —
+  publicReadAccess: false,                              // presigned URLs are the ONLY access path
+  versioned: true,
+  removalPolicy: RemovalPolicy.RETAIN, autoDeleteObjects: false,
+  cors: [{
+    allowedMethods: [s3.HttpMethods.GET],
+    allowedOrigins: ['*'],       // the page's own origin IS the bucket's origin (same-origin
+    allowedHeaders: ['*'],       // fetches to sibling keys) in the common case; kept permissive
+    maxAge: 3000,                // (GET-only, no credentials) so a differently-hosted dashboard
+  }],                            // shell or a future CDN in front doesn't need a stack change.
+});
+```
+
+```typescript
+// ── Lambda: VPC-attached into the SAME private subnets + SG the migration bastion already
+// uses — identical reachability to the source over the existing VPN/DX path, no new
+// networking, no new NAT (reuses the subnets' existing NAT gateway for AWS API calls). ──
+const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
+  runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
+  handler: 'soak_check_lambda.handler',
+  code: lambda.Code.fromAsset('lambda/soak-check', {   // shared/scripts/soak_check_lambda.py
+    bundling: {                                         // copied in here + pymysql (+ pg8000
+      image: lambda.Runtime.PYTHON_3_12.bundlingImage,  // for a PostgreSQL source/target)
+      command: ['bash', '-c',
+        'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
+    },
+  }),
+  timeout: Duration.seconds(90), memorySize: 256,
+  vpc: bastionVpc,                                       // ec2.Vpc.fromLookup — the migration
+  vpcSubnets: { subnets: bastionPrivateSubnets },         // bastion's own target VPC, not a new one
+  securityGroups: [ec2.SecurityGroup.fromSecurityGroupId(   // import the bastion's SG read-only
+    this, 'ImportedBastionSg', constants.BASTION_SG_ID, { mutable: false })],  // (mutable:false —
+  environment: {                                          // never add ingress from here; the
+    ENGINE: constants.SOURCE_ENGINE,                       // bastion's SG already has everything
+    SOURCE_HOST: constants.SOURCE_HOST, SOURCE_PORT: `${constants.DB_PORT}`,
+    SOURCE_DB: constants.DB_NAME, SOURCE_SECRET_ARN: sourceReadOnlySecret.secretArn,
+    TARGET_HOST: cluster.clusterEndpoint.hostname, TARGET_PORT: `${constants.DB_PORT}`,
+    TARGET_DB: constants.DB_NAME, TARGET_SECRET_ARN: cluster.secret!.secretArn,
+    TABLES: JSON.stringify(constants.SOAK_TABLES),
+    ALARM_NAMES: JSON.stringify(constants.SOAK_ALARM_NAMES),
+    TARGET_DB_INSTANCE_ID: constants.TARGET_DB_INSTANCE_ID,
+    N_TOTAL: `${constants.SOAK_N_TOTAL}`,          // the risk-tiered default from engagement-safety.md
+    DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
+  },
+});
+dashboardBucket.grantReadWrite(soakFn);
+sourceReadOnlySecret.grantRead(soakFn);
+cluster.secret!.grantRead(soakFn);
+soakFn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricStatistics', 'rds:DescribeDBInstances'],
+  resources: ['*'],   // these three are describe/read-only and don't support resource-level scoping
+}));
+```
+
+Pitfalls: `lambda.Function`'s default execution role does **not** include ENI
+create/describe/delete permissions — attaching `vpc`/`vpcSubnets` without also having
+`AWSLambdaVPCAccessExecutionRole` on the role (CDK adds this automatically the moment you
+pass `vpc`, but confirm it if you construct the role yourself) means the function creates
+but every invocation fails at ENI attach. Import the bastion's security group **by ID**
+(`ec2.SecurityGroup.fromSecurityGroupId(this, 'ImportedBastionSg', bastionSgId, { mutable:
+false })`) — never create a new SG and add it as an extra ingress rule on the
+source/target DB security groups; that's new networking, which the whole point of this
+design is to avoid. `pymysql`/`pg8000` are both pure-Python (no compiled extension), so the
+Docker bundling step above works unmodified across host architectures — no manylinux wheel
+concerns.
+
+```typescript
+// ── EventBridge Scheduler: daily invocation, pure AWS-managed, nothing to keep alive ──
+const schedulerRole = new iam.Role(this, 'SoakSchedulerRole', {
+  assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+});
+soakFn.grantInvoke(schedulerRole);
+
+new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
+  flexibleTimeWindow: { mode: 'OFF' },
+  scheduleExpression: 'rate(1 day)',   // or a cron() at a fixed off-peak hour; match the
+  target: {                            // soak cadence chosen at GATE 1 (engagement-safety.md)
+    arn: soakFn.functionArn,
+    roleArn: schedulerRole.roleArn,
+    retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 3600 },
+  },
+});
+```
+
+**Presigned URLs — a one-time step, not part of this stack.** Run
+`shared/scripts/generate_presigned_urls.py` once, right after this stack deploys and the
+initial `dashboard/` contents are uploaded to `dashboardBucket` (index.html, assets/, empty
+status.json + activity-log.jsonl) — it presigns every file the page needs for the full soak
+duration and rewrites `index.html` so its CSS/JS/data references are absolute presigned
+URLs rather than relative paths (see that script's own docstring for exactly why the naive
+relative-path version silently 403s). It is deliberately not a CDK resource or a
+Lambda-invoked-at-deploy custom resource — read that script's credential-longevity caveat
+before running it: for a 3- or 7-day soak, sign with a throwaway IAM user's long-term
+access key, not the deploying operator's own temporary/SSO session, or the URLs stop
+working when that session expires, long before the `Expires` value they carry claims.
+
+**IAM summary for this stack:** `soakFn`'s role = `secretsmanager:GetSecretValue` on
+exactly the source-read-only and target secrets (never `*`), `cloudwatch:DescribeAlarms`/
+`GetMetricStatistics` + `rds:DescribeDBInstances` (read-only, no resource-level scoping
+available), `s3:GetObject`/`PutObject` scoped to `dashboardBucket` only, plus the VPC ENI
+permissions from `AWSLambdaVPCAccessExecutionRole`. No `Create*`/`Modify*`/`Delete*`
+anywhere — this function only ever reads the databases and writes to one bucket.
+
+**Fallback — bastion cron, for someone who really doesn't want to stand up Lambda.** Simpler
+to set up, but weaker: the bastion has to stay running and reachable for the entire soak
+window, a missed run is invisible unless something else is watching, and the dashboard
+files end up on the bastion's local disk instead of a durable, shareable location. See
+execution-runbooks.md §Soak automation for the one-line cron form if this is the deliberate
+choice for a short, low-stakes engagement.
+
 ## scripts/ contract
 
 Each script is idempotent, `set -euo pipefail`, reads identifiers from `cdk` outputs
