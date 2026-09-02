@@ -55,7 +55,7 @@ or manual `.mcp.json` (SigV4 via proxy; requires AWS CLI ≥ 2.32, `aws login`, 
 
 | Situation | Delegate to | How |
 |-----------|-------------|-----|
-| **Heterogeneous** schema conversion (Oracle/SQL Server → Aurora/PG/MySQL) | **`dms-schema-conversion`** skill (Agent Toolkit, `skills/specialized-skills/migration-and-modernization-skills/`) | `Load "dms-schema-conversion" skill using the retrieve_skill tool.` — covers DMS SC projects, data providers, metadata import/conversion, action items. Then return here for data movement + cutover. |
+| **Heterogeneous** schema conversion (Oracle/SQL Server → Aurora/PG/MySQL, or MySQL ↔ PostgreSQL cross-engine) | **`dms-schema-conversion`** skill (Agent Toolkit, `skills/specialized-skills/migration-and-modernization-skills/`) | `Load "dms-schema-conversion" skill using the retrieve_skill tool.` — covers DMS SC projects, data providers, metadata import/conversion, action items. Then return here for data movement + cutover. |
 | Target-engine operational questions post-migration | `amazon-aurora-mysql`, `amazon-aurora-postgresql`, `rds-oracle`, `rds-sqlserver`, `rds-oss`, `rds-db2` skills | Same `retrieve_skill` mechanism, or the `aws-database` router skill in the `aws-core` plugin |
 
 This skill's own ground is what none of those cover: end-to-end **data migration
