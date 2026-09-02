@@ -154,6 +154,16 @@ and waiver lives in **`authorizations.md`** (template in `shared/templates/`), w
 named person and date. `migration-plan.md` gate rows point at the corresponding
 authorization row. The customer can hand the file to an auditor.
 
+**The agent never fills in the named approver's row itself.** Gathering and recording
+evidence (a green validation battery, a green soak period) is ordinary agent work and can
+happen without a round-trip. *Accepting* that evidence — signing GATE 1/2/3/4 or a
+soak-exit row — is the approver's own decision and requires their own reply addressing
+that specific row. A broader instruction like "proceed with execution" authorizes the work
+it names; it is not advance acceptance of whatever gate the work happens to produce
+evidence for. If a gate's evidence goes green mid-flight, stop, present it with its own
+ACTION NEEDED block, and wait — don't carry an earlier "proceed" forward as a signature on
+a row the user hasn't seen yet.
+
 ## Surfacing what's needed from the user
 
 Every message that ends waiting on the user — a GATE, an A2/A3/A4 authorization, a missing

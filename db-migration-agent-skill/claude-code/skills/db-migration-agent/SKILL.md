@@ -48,7 +48,13 @@ hard constraint 10.
    source mutations are the user-approved fixes for blockers (e.g. `ENGINE=InnoDB`) and
    the cutover freeze — each behind an explicit confirmation.
 3. **The user approves the method, the cost, and the cutover** (GATES 2 and 4). Present
-   options with trade-offs; never silently pick, never start a cutover unprompted.
+   options with trade-offs; never silently pick, never start a cutover unprompted. **Every
+   ⛔-marked gate (1, 2, 3, 4) and the soak-exit row is the same kind of stop** — the agent
+   gathers and records evidence, but only the named approver's own reply accepts it. Never
+   write the approver's name into a GATE or soak-exit row in `authorizations.md` off the
+   back of a broader "proceed" instruction that didn't actually address that row — a green
+   validation result is evidence to present, not a signature to fill in yourself. If you
+   catch yourself about to sign a row the user didn't explicitly address, stop and ask.
 4. **No credentials in argv or in files you generate.** `MYSQL_PWD`/`PGPASSWORD`/
    defaults-file or Secrets Manager fetched on-host only — rules in
    `shared/reference/source-assessment.md`.
@@ -280,7 +286,11 @@ timezone shift, auto-increment high-water marks, aggregate fidelity), read-only 
 test. Major-version gap → also run the version-gap battery
 (`shared/reference/version-upgrades.md`). Paste evidence into the plan.
 
-⛔ **GATE 3** — all validation green, recorded. No cutover date before this.
+⛔ **GATE 3** — present the validation evidence table and stop with a standalone ACTION
+NEEDED block; the user reviews and explicitly accepts before you sign it in
+`authorizations.md` (same discipline as GATE 1/2 — evidence being green is not the same
+event as the approver accepting it, and "proceed with execution" at GATE 2 does not carry
+forward as advance acceptance of GATE 3). No cutover date before this is signed.
 
 ### Phase 7.5: Discover every DB client (mandatory)
 
@@ -303,7 +313,9 @@ alarms, drift, plus the customer's test-suite result when one exists) and send i
 customer; any RED period resets the consecutive-green counter. Client discovery (7.5) runs
 alongside. Invite the customer to point read-only test traffic or load tests at the target
 during this window. Cutover readiness unlocks only at **N consecutive greens + the signed
-soak-exit row** in `authorizations.md`. Shortening or skipping is a waiver
+soak-exit row** in `authorizations.md` — present the final soak report and stop with its
+own ACTION NEEDED block; the user's explicit accept is the signature, not the agent
+recording that the periods came up green. Shortening or skipping is a waiver
 (engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
 concurrently with this soak, not after it** — they test different things and don't depend
 on each other; don't serialize two independent waits.
