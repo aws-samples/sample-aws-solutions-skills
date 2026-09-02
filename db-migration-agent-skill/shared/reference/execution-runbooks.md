@@ -173,6 +173,34 @@ badge — that one assumes an active session, and would falsely flag every norma
 once-daily cadence). Confirm this banner is actually visible on the dashboard before
 walking away from a multi-day soak.
 
+**The dashboard files have to live where the script runs, or they silently diverge.**
+Moving `soak_check.py` to the bastion solves nothing if `dashboard/status.json` and
+`activity-log.jsonl` stay on the human's own machine — the script would update a bastion
+copy nobody's looking at, while the dashboard they actually have open keeps showing
+whatever it last synced, not reality. This only matters for the soak window itself:
+
+1. **Starting soak**: copy the whole `dashboard/` folder (and `soak-config.json`) to the
+   bastion, once. From then until soak exits, the bastion's copy is the live one —
+   `soak_check.py` reads and writes it in place.
+2. **Viewing it during soak**: don't re-copy it back to look at it — tunnel to it instead,
+   the same SSM mechanism already used for everything else in this skill, no new
+   infrastructure and nothing exposed publicly:
+   ```
+   aws ssm start-session --target <bastion-instance-id> \
+     --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+   ```
+   Then browse `http://localhost:8080` exactly as if the dashboard were local — the
+   tunnel makes the bastion's copy transparently reachable. Leave the bastion's own
+   `python3 -m http.server 8080 --directory dashboard` running for the tunnel to reach.
+3. **Ending soak**: copy the bastion's `dashboard/` (now holding every day's results) back
+   to the main engagement working directory, so `migration-plan.md` and everything else
+   stay consistent with it afterward. A plain copy — don't build a two-way sync for this.
+
+Before and after the soak window, working locally is normal and doesn't need any of this —
+say so explicitly, so the customer doesn't come away thinking they need to work from the
+bastion for the whole engagement. This relocation is specific to the unattended stretch.
+
 ### If XtraBackup Seed + Binlog/DMS CDC Catch-up (large MySQL, minimal downtime — matrix row 6)
 
 Combine the two procedures above: the physical copy does the bulk, CDC closes the delta.

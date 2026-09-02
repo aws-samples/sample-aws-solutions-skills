@@ -36,6 +36,12 @@ Do **not** start this server yourself in the background — print the command an
 customer (or you, on their explicit ask) run it. Same reasoning as never opening a port
 without being asked.
 
+This local setup is for active work — discovery through rehearsal. During Phase 7.7
+(soak) specifically, `dashboard/` relocates to the bastion alongside `soak_check.py`, and
+gets viewed via SSM port forwarding instead of directly — see execution-runbooks.md
+§Soak automation for why (the script and the viewer must never be looking at two
+different copies) and the exact commands.
+
 ## The update rule — one habit, not two
 
 **Whenever you update `migration-plan.md`, also overwrite `dashboard/status.json` and
