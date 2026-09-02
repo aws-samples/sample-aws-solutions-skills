@@ -16,8 +16,11 @@ append, so "append a line to activity-log.jsonl" is GET-modify-PUT under the hoo
 SCOPE: homogeneous MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family
 (postgres/postgresql/aurora-postgresql) only — source and target must normalize to the
 SAME family. Heterogeneous soak-checking (e.g. MySQL source, PostgreSQL target) is not
-yet supported by this script; it raises a clear error at startup rather than silently
-running the wrong SQL dialect against one side.
+yet supported by this script; `handler()` checks this FIRST, from the SOURCE_ENGINE/
+TARGET_ENGINE environment variables alone, and raises a clear error before reading either
+secret or opening either database connection — rather than silently running the wrong SQL
+dialect against one side, or spending a live Secrets Manager read + DB connection on an
+invocation that was already going to fail.
 
 RETRY SAFETY: EventBridge Scheduler's retry policy is at-least-once, not exactly-once — a
 retried invocation for a day already recorded in status.json/activity-log.jsonl overwrites
@@ -651,6 +654,24 @@ def handler(event, context):
         "customer_test_suite_provided": os.environ.get("CUSTOMER_TEST_SUITE_PROVIDED", "false").lower() == "true",
         "n_total": int(os.environ["N_TOTAL"]),
     }
+    # Checked FIRST, before any Secrets Manager read or DB connection attempt — a
+    # misconfigured heterogeneous pair (or an engine string outside both supported
+    # families) is a config error diagnosable from the environment variables alone; there
+    # is no reason to spend a GetSecretValue call or open a live connection to either
+    # database (using a real, dedicated credential) before failing on it. run_day() below
+    # still re-checks this itself (defense-in-depth for any other/direct caller), but by
+    # the time this invocation would have reached that check, it would have already
+    # touched two live databases for nothing.
+    source_family = _engine_family(cfg["source_engine"])
+    target_family = _engine_family(cfg["target_engine"])
+    if source_family != target_family:
+        raise ValueError(
+            f"source_engine={cfg['source_engine']!r} and target_engine={cfg['target_engine']!r} "
+            "normalize to different SQL families — heterogeneous soak-checking is not yet "
+            "supported by this script (see module docstring). No secret was read and no "
+            "database connection was attempted for this invocation."
+        )
+
     bucket = os.environ["DASHBOARD_BUCKET"]
     prefix = os.environ.get("DASHBOARD_PREFIX", "")
     status_key = f"{prefix}status.json"
@@ -674,8 +695,6 @@ def handler(event, context):
     source_creds = _get_secret(os.environ["SOURCE_SECRET_ARN"])
     target_creds = _get_secret(os.environ["TARGET_SECRET_ARN"])
 
-    source_family = _engine_family(cfg["source_engine"])
-    target_family = _engine_family(cfg["target_engine"])
     source_conn = _connect(source_family, os.environ["SOURCE_HOST"], os.environ["SOURCE_PORT"],
                             source_creds, os.environ["SOURCE_DB"], source_ssl_ca_path, source_ssl_insecure)
     target_conn = _connect(target_family, os.environ["TARGET_HOST"], os.environ["TARGET_PORT"],

@@ -166,6 +166,13 @@ accepted the risk because X" or "kept at 3 days because Y," never just the numbe
 a default the agent proposes proactively; it is never framed as something the customer has
 to think to ask for.
 
+**Heterogeneous engagement:** before making this recommendation, read
+`execution-runbooks.md` §Soak automation's heterogeneous callout — the "checks run
+automatically" logistics note above assumes the automated Lambda/`soak_check.py` checklist
+applies, and for a heterogeneous pair it may not (no CDC at all → no soak, propose the
+static-validation-window alternative instead; CDC in play → propose a manual/agent-reviewed
+process, not the automated checklist). Say which of the three applies before quoting [N].
+
 ## Waiver protocol
 
 When the customer declines a recommended parameter (rehearsal, parallel-run length,

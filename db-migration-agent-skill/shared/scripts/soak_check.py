@@ -15,9 +15,12 @@ RETRY/RE-RUN SAFETY: running this twice for the same calendar day (e.g. cron fir
 or you re-ran it by hand) overwrites that day's entry in status.json/activity-log.jsonl in
 place — it never appends a duplicate or double-counts the green streak.
 
-SCOPE: homogeneous MySQL-family (mysql/mariadb) or PostgreSQL-family (postgres) only —
-source and target must be the same family. Heterogeneous soak-checking is not yet
-supported by this script.
+SCOPE: homogeneous MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family
+(postgres/postgresql/aurora-postgresql) only — source and target must be the same family.
+Heterogeneous soak-checking is not yet supported by this script; a family mismatch (or an
+engine string outside both families) raises ValueError with no dashboard/log/report writes
+attempted, and this script exits with a clean one-line message (no Python traceback) and
+exit code 1 for that case.
 """
 import argparse
 import datetime
@@ -33,16 +36,21 @@ LAG_THRESHOLD_S = 30
 HEADROOM_THRESHOLD_PCT = 30
 _SPLIT = "___SOAK_CHECK_SPLIT___"
 
-MYSQL_FAMILY = {"mysql", "mariadb"}
-POSTGRES_FAMILY = {"postgres", "postgresql"}
+MYSQL_FAMILY = {"mysql", "mariadb", "aurora-mysql"}
+POSTGRES_FAMILY = {"postgres", "postgresql", "aurora-postgresql"}
 
 
 def _engine_family(engine):
-    """Normalizes an engine string to 'mysql' or 'postgres' — MariaDB routes to the same
-    client path as MySQL instead of silently falling through to the psql path (the
-    confirmed bug: anything other than the exact string "mysql" used to fall to
-    Postgres). Raises for anything else; heterogeneous soak-checking (different SQL
-    dialects on each side) is out of scope for this script."""
+    """Normalizes an engine string to 'mysql' or 'postgres' — MariaDB/Aurora MySQL route
+    to the same client path as MySQL instead of silently falling through to the psql path
+    (the confirmed bug: anything other than the exact string "mysql" used to fall to
+    Postgres). Must match soak_check_lambda.py's MYSQL_FAMILY/POSTGRES_FAMILY exactly —
+    these are the literal `engine` strings AWS APIs return (e.g. `aws rds
+    describe-db-clusters`), so a family missing "aurora-postgresql" here previously made a
+    real Aurora PostgreSQL target look "unsupported" instead of naming the actual problem
+    (heterogeneous mismatch) when checked against a non-Postgres-family source. Raises for
+    anything outside both families; heterogeneous soak-checking (different SQL dialects on
+    each side) is out of scope for this script."""
     e = (engine or "").strip().lower()
     if e in MYSQL_FAMILY:
         return "mysql"
@@ -50,8 +58,9 @@ def _engine_family(engine):
         return "postgres"
     raise ValueError(
         f"Unsupported engine '{engine}' — this script only supports homogeneous "
-        "MySQL-family (mysql/mariadb) or PostgreSQL-family (postgres) checks. "
-        "Heterogeneous soak-checking is not yet supported."
+        "MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family "
+        "(postgres/postgresql/aurora-postgresql) checks. Heterogeneous soak-checking is "
+        "not yet supported."
     )
 
 
@@ -489,7 +498,15 @@ def main():
     status_path = args.config.parent / "status.json"
     log_path = args.config.parent / "activity-log.jsonl"
 
-    day_result = run_day(cfg)
+    try:
+        day_result = run_day(cfg)
+    except ValueError as e:
+        # An unsupported/mismatched engine pair (see _engine_family) is an expected,
+        # already-diagnosed config problem, not a bug in this script — surface it as a
+        # clean one-line message a human or an agent can act on immediately, not a Python
+        # traceback. No dashboard/log/report write has happened yet at this point (this
+        # is the very first thing run_day checks), so nothing needs cleanup here.
+        sys.exit(f"soak_check.py: {e}")
     update_status_json(status_path, day_result, cfg["n_total"])
     append_activity_log(log_path, day_result)
 

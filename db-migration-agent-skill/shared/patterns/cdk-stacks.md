@@ -255,6 +255,33 @@ cp <skill>/shared/scripts/soak_check_lambda.py lambda/soak-check/
 cp <skill>/shared/scripts/requirements.txt     lambda/soak-check/
 ```
 
+🔴 **Fail at `cdk synth`, not at the first scheduled invocation.** `SOURCE_ENGINE`/
+`TARGET_ENGINE` below are plain strings — CloudFormation has no way to reject a mismatched
+pair, and without this check `cdk deploy` would succeed cleanly (bucket, secrets, schedule,
+alarms — real cost, running on a schedule) for a stack that is guaranteed to fail its very
+first invocation. `soak_check_lambda.py`'s own guard (fixed to check this before touching
+Secrets Manager or either database — see its `handler()`) still catches it, but only once
+the schedule fires. Mirror the same family check at synth time, before any of that gets
+created:
+
+```typescript
+// Same normalization as soak_check_lambda.py's _engine_family() — keep the two lists in
+// sync with that script's MYSQL_FAMILY/POSTGRES_FAMILY if either changes.
+function engineFamily(engine: string): 'mysql' | 'postgres' {
+  const e = engine.trim().toLowerCase();
+  if (['mysql', 'mariadb', 'aurora-mysql'].includes(e)) return 'mysql';
+  if (['postgres', 'postgresql', 'aurora-postgresql'].includes(e)) return 'postgres';
+  throw new Error(`SoakStack: unsupported engine '${engine}' in constants.SOURCE_ENGINE/TARGET_ENGINE.`);
+}
+if (engineFamily(constants.SOURCE_ENGINE) !== engineFamily(constants.TARGET_ENGINE)) {
+  throw new Error(
+    `SoakStack: SOURCE_ENGINE=${constants.SOURCE_ENGINE} and TARGET_ENGINE=${constants.TARGET_ENGINE} ` +
+    `normalize to different SQL families — heterogeneous soak-checking is not yet supported. ` +
+    `See execution-runbooks.md §Soak automation for the manual/agent-reviewed alternative.`
+  );
+}
+```
+
 ```typescript
 // ── Lambda: VPC-attached into the SAME private subnets + SG the migration bastion already
 // uses — identical reachability to the source over the existing VPN/DX path, no new
@@ -280,7 +307,8 @@ const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
     // DB_NAME/SOURCE_ENGINE for both sides silently breaks a cross-version or
     // differently-named-database engagement). Both engines must still normalize to the
     // same MySQL-family-or-Postgres-family — heterogeneous soak-checking across families
-    // is not yet supported (soak_check_lambda.py raises clearly if they don't match).
+    // is not yet supported. Already asserted at synth time above (`engineFamily` check) —
+    // this comment is the runtime backstop's location, not the first line of defense.
     SOURCE_ENGINE: constants.SOURCE_ENGINE, TARGET_ENGINE: constants.TARGET_ENGINE,
     SOURCE_HOST: constants.SOURCE_HOST, SOURCE_PORT: `${constants.SOURCE_DB_PORT}`,
     SOURCE_DB: constants.SOURCE_DB_NAME, SOURCE_SECRET_ARN: sourceReadOnlySecret.secretArn,

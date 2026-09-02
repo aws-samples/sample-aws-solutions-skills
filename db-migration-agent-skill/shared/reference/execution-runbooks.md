@@ -117,6 +117,27 @@ change during the migration window needs the same "verify both sides" discipline
 
 ### Soak automation (Phase 7.7 — optional, offer it, don't set it up silently)
 
+🔴 **Heterogeneous engagement? Decide this BEFORE recommending Lambda or handing over
+`soak_check.py`.** Both scripts below compute row counts/checksums/column fingerprints
+using ONE SQL dialect and diff the two sides' results directly — that comparison is only
+meaningful when source and target normalize to the same family (MySQL-family or
+PostgreSQL-family). For a genuinely heterogeneous pair (e.g. MySQL → Aurora PostgreSQL)
+they raise a clear error rather than run the wrong dialect against one side (see
+`_engine_family` in either script) — but by the time that fires, you've already promised
+the customer automation that doesn't exist for their pair. Check this at Phase 3 method
+selection, not at Phase 7.7 setup:
+- **Heterogeneous + Full Load only (no CDC)** — there is no continuously-refreshing
+  pipeline to soak-check in the first place. Don't propose a soak at all; propose the
+  static-validation-window alternative (`engagement-safety.md` §Risk-tiered parallel-run
+  default) and record it as a waiver.
+- **Heterogeneous + Full Load + CDC** — the DMS task itself IS translating dialects
+  continuously, but these scripts can't diff the result across dialects. Propose a
+  manual/agent-reviewed process instead: DMS task-level CloudWatch metrics/alarms (engine-
+  agnostic, keep using them) plus periodic agent-run dual-read spot checks with hand-
+  written per-side queries — not a diffable checksum. Say this explicitly when you make
+  the soak-length recommendation; don't let the customer assume "soak" means the same
+  automated Lambda checklist a homogeneous engagement gets.
+
 The 8-check soak-report checklist (`shared/templates/soak-report.md`) has two kinds of
 check: native CloudWatch alarms (latency/CPU/memory/connections) already run unattended,
 but row-count/checksum/schema-drift/storage-headroom don't — nothing autonomous runs them
