@@ -125,12 +125,23 @@ def _mysql_ssl_args(ssl_ca, ssl_insecure):
             else [f"--ssl-ca={bundle}", "--ssl-mode=VERIFY_IDENTITY"])
 
 
-def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False):
+def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False, port=None):
     """Executes every statement in `sqls` in ONE mysql client session (one subprocess
     call/one connection) — required so a consistent-snapshot transaction started as the
     first statement actually covers every statement after it; separate subprocess calls
     are each a brand-new connection with no session continuity. Returns a list of line
     lists, one per input statement, split on a marker row injected after each one.
+    `port`: confirmed live (real version-gap pair, source+target both reached through an
+    SSM/bastion port-forward tunnel on non-default local ports) that without an explicit
+    `-P`, the `mysql` CLI silently defaults to 3306 — connecting to nothing (or the wrong
+    endpoint) instead of erroring clearly, for the exact "reach the DB through a bastion
+    tunnel on a non-default local port" case this skill's own Phase 2 access path
+    documents as routine. This is the same gap already found and fixed for the Postgres
+    path (`run_psql_batch`'s `port` param) — soak-config.json's documented schema
+    (execution-runbooks.md §Soak automation) includes "port" for BOTH families, but only
+    the Postgres branch was actually threading it through; MySQL/MariaDB silently dropped
+    it. `None` keeps the mysql client's own 3306 default for a direct, default-port
+    connection.
     Three TLS tiers, never a silent plaintext fallback:
     - ssl_ca given: pin that exact CA certificate as the trust anchor (VERIFY_CA —
       encrypted + chain-verified, no hostname check — on-prem certs frequently carry no
@@ -151,6 +162,8 @@ def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insec
     rejects `--ssl-mode` outright (see `_mysql_client_is_mariadb`'s docstring)."""
     script = "; ".join(f"{sql}; SELECT '{_SPLIT}'" for sql in sqls)
     cmd = ["mysql", "-h", host, "-u", user, f"-p{password}"]
+    if port:
+        cmd += ["-P", str(port)]
     cmd += _mysql_ssl_args(ssl_ca, ssl_insecure)
     cmd += ["-N", "-B", database, "-e", script]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -217,18 +230,22 @@ def run_batch(family, conn, sqls):
     # above — strip it here so it isn't passed through as a stray keyword arg.
     conn_args = {k: v for k, v in conn.items()
                  if k in ("host", "user", "password", "database", "ssl_ca", "ssl_insecure")}
-    if family == "mysql":
-        return run_mysql_batch(sqls=sqls, **conn_args)
     # soak-config.json's documented schema (execution-runbooks.md §Soak automation)
-    # includes "port" per side — confirmed live that dropping it here made run_psql_batch
-    # silently default to 5432 regardless of what's configured, connecting to the wrong
-    # endpoint (or nothing) instead of erroring clearly for the extremely common case of
-    # reaching the DB through an SSM/bastion port-forward tunnel on a non-default local
-    # port. Threaded through only for postgres here (not added to the shared allowlist
-    # above / run_mysql_batch's signature) to stay isolated from that function while it's
-    # being edited concurrently elsewhere in this file for an unrelated MySQL-client fix.
+    # includes "port" per side, for BOTH families — confirmed live (real MySQL 8.0->8.4
+    # version-gap pair, both sides reached through an SSM/bastion port-forward tunnel on
+    # non-default local ports) that dropping it here made run_mysql_batch's `mysql` CLI
+    # silently default to 3306, connecting to nothing instead of erroring clearly, for the
+    # exact "reach the DB through a bastion tunnel on a non-default local port" case this
+    # skill's own Phase 2 access path documents as routine. This was already fixed for
+    # run_psql_batch (Postgres) but the identical MySQL/MariaDB-side gap was left
+    # unfixed — the comment that used to be here said it was deliberately isolated from
+    # run_mysql_batch to avoid colliding with an unrelated concurrent MySQL-client edit;
+    # that edit landed without ever adding port support, so the gap survived. Both
+    # families now take it the same way.
     if "port" in conn:
         conn_args["port"] = conn["port"]
+    if family == "mysql":
+        return run_mysql_batch(sqls=sqls, **conn_args)
     return run_psql_batch(sqls=sqls, **conn_args)
 
 
