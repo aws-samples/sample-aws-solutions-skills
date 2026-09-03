@@ -218,7 +218,12 @@ which questions apply.
 Collect the 20 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
 a plain on-prem VM: state whether the source is self-managed with OS access, or a managed DB
 product — this decides which method-matrix row even applies; see
-source-assessment.md §Execution Location)**, target **(service/version, and its network
+source-assessment.md §Execution Location)**, **how the customer already connects to it**
+(existing bastion/jump host, VPN, direct network access — ask this explicitly, before
+proposing anything new: a path they already trust and use today is reused as-is, by running
+the session from wherever that access already lives, rather than defaulting to SSM
+hybrid-activation as if no access existed. Only reach for SSM when no existing path does —
+see source-assessment.md §Execution Location), target **(service/version, and its network
 placement — does an existing VPC/subnet group/security groups/KMS key already exist for
 this instance to reuse, or is fresh networking being provisioned? See
 target-provisioning.md §Network Placement)**,
