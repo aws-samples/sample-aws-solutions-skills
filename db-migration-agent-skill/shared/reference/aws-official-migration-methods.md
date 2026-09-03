@@ -693,6 +693,13 @@ From the DMS Step-by-Step Guide, AWS documents three approaches:
 - Must stop replication and reset with `mysql.rds_reset_external_master` after cutover
 - Network stability between source and target is critical during replication
 - Replication lag monitoring is essential before cutover
+- **MySQL 8.4+ target: these procedure names are renamed.** Confirmed live against a real
+  RDS MySQL 8.4.11 target: `rds_set_external_master` errors, telling you to call
+  `mysql.rds_set_external_source` instead; `rds_reset_external_master` →
+  `rds_reset_external_source` likewise (`rds_start_replication`/`rds_stop_replication` are
+  unchanged). Same "master"→"source" rename as `SHOW REPLICA STATUS`'s `Seconds_Behind_Source`
+  (`version-upgrades.md`'s MySQL 8.0→8.4 section) — the column layout itself is identical
+  across the hop, only the names changed.
 
 **Documentation**: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.Procedural.Importing.NonRDSRepl.html
 
