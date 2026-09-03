@@ -44,6 +44,15 @@
     - Stop, snapshot (final image), then terminate the source EC2 (or stop if the user
       keeps it as a cold copy).
     - Delete DMS tasks, endpoints, then the replication instance.
+    - **If a physical-copy method was used (XtraBackup+S3, native backup/restore staged
+      via S3, Snow Family/DataSync seed)**: delete the intermediate S3 objects
+      (`aws s3 rm s3://your-bucket/xtrabackup/ --recursive`, or the equivalent prefix) —
+      a full copy of the database sits there from the restore step
+      (execution-runbooks.md §XtraBackup + S3) and nothing deletes it automatically once
+      `restore-db-cluster-from-s3` has consumed it. It's SSE-KMS-encrypted, not
+      egregiously exposed, but it's still a real residual full-data copy outside the
+      managed instance — list it explicitly in the decommission confirmation, don't let
+      attention move straight to the EC2/DMS items and skip it.
     - Remove migration-only security-group rules and the migration stack from the CDK app.
 11. Mark the plan complete: final costs vs the GATE 2 estimate, lessons-learned notes,
     handover of the CDK project + runbooks to the customer.
