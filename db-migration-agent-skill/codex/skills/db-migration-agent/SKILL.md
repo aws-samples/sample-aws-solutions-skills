@@ -260,6 +260,8 @@ already known.
 ⛔ **GATE 1** — summarize the inputs in the plan; user confirms before any assessment.
 **Mode + engagement parameters are locked here** and signed in `authorizations.md` §3;
 from this point the chosen parameters are binding and any deviation is a recorded waiver.
+Explain what each non-obvious choice (mode, parallel-run length, rehearsal depth) actually
+means and what its default assumes — see `engagement-safety.md` §How to present a gate.
 
 ### Phase 2: Assess the source (read-only)
 
@@ -280,7 +282,9 @@ return here for data movement. Prepare the **cost estimate**
 (`shared/reference/preflight-iam-cost.md` §3).
 
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
-rollback strategy, itemized cost, target architecture (Mermaid). User approves, and you
+rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
+terms the customer can independently evaluate, not a one-line justification clause — see
+`engagement-safety.md` §How to present a gate. User approves, and you
 **sign it in `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — a verbal
 "approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
 must not proceed until the row actually has an approver and a date in the file). **If the
@@ -317,7 +321,10 @@ test. Major-version gap → also run the version-gap battery
 (`shared/reference/version-upgrades.md`). Paste evidence into the plan.
 
 ⛔ **GATE 3** — present the validation evidence table and stop with a standalone ACTION
-NEEDED block; the user reviews and explicitly accepts before you sign it in
+NEEDED block; say what each check actually proves and what it does NOT prove (see
+`engagement-safety.md` §How to present a gate) — a wall of green checkmarks with no
+explanation of scope tells the customer nothing about what's actually been ruled out. The
+user reviews and explicitly accepts before you sign it in
 `authorizations.md` (same discipline as GATE 1/2 — evidence being green is not the same
 event as the approver accepting it, and "proceed with execution" at GATE 2 does not carry
 forward as advance acceptance of GATE 3). No cutover date before this is signed.
@@ -361,13 +368,17 @@ acknowledgment in the plan).
 (engagement-safety.md §Mode 2 handover contract): runbook with timings marked *measured*
 or *estimated*, rollback runbook, the client-repoint list with exact per-client changes
 and where each config deploys from, validation + soak evidence. Walk the customer through
-the runbook step by step, answer their questions, and get **A4b handover acceptance**
-signed in `authorizations.md`. Then **stop** — do not freeze the source, repoint clients,
+the runbook step by step, answer their questions, and say plainly what is now their own
+responsibility and why (`engagement-safety.md` §How to present a gate), then get **A4b
+handover acceptance** signed in `authorizations.md`. Then **stop** — do not freeze the
+source, repoint clients,
 or run the sequence. Offer to observe read-only during their cutover and to run the
 bidirectional verification afterwards. Their reported completion is what triggers Phase 9.
 
 **Mode 3 only — execute.** ⛔ **GATE 4**: walk the user through the runbook; they approve
-the window, the rollback strategy, and the abort criteria, and A4 is signed. Then execute
+the window, the rollback strategy, and the abort criteria, and A4 is signed. Say plainly
+what you're about to do and why each step is reversible — see `engagement-safety.md` §How
+to present a gate. Then execute
 step-by-step with go/no-go confirmation at each group: freeze source → drain CDC → stop
 forward task → spot-validate → reset auto-increment/sequences → start reverse replication
 → repoint → refresh clients → **bidirectional verification** (app health UP *and* new DB's

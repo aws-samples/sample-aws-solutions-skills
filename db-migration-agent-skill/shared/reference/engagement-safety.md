@@ -204,6 +204,34 @@ evidence for. If a gate's evidence goes green mid-flight, stop, present it with 
 ACTION NEEDED block, and wait — don't carry an earlier "proceed" forward as a signature on
 a row the user hasn't seen yet.
 
+## How to present a gate
+
+A gate is a decision point, not a checklist to click through. The narrative that precedes
+every ACTION NEEDED block (below) must actually explain the decision, not just state its
+result — a customer who reads it should be able to explain the decision back to someone
+else afterward, not just have clicked "approve" on a black box. This applies to the
+material items at each gate, not every line of the plan.
+
+For each gate, at minimum:
+
+- **GATE 1** (discovery + mode + engagement parameters): for anything the customer might
+  not already know is a design decision — Mode 2 vs 3, the parallel-run length, rehearsal
+  depth — say what it actually changes and what the recommended default assumes about
+  their risk tolerance. Don't just restate their own answers back as a bullet list.
+- **GATE 2** (method): say why *this* method over the rejected alternatives, in terms the
+  customer can independently evaluate (downtime budget, cost, what breaks if a bandwidth
+  estimate is wrong) — not just "chosen method: X" with a one-line justification clause.
+- **GATE 3** (validation): say what each check actually proves and — just as important —
+  what it does **not** prove (a green CDC task with zero counters proves plumbing, not
+  correctness; a matching row count doesn't prove column-level data fidelity). A customer
+  who only sees green checkmarks doesn't know what's actually been ruled out.
+- **GATE 4 / A4b** (cutover / handover): say plainly what becomes the customer's own
+  responsibility from this point (Mode 2) or what the agent is about to do and why it's
+  reversible (Mode 3) — not just "here's the runbook, approve?"
+
+§Soak decision script (below) is the existing worked example of this — apply the same
+discipline at every gate that asks for a signature, not just there.
+
 ## Surfacing what's needed from the user
 
 Every message that ends waiting on the user — a GATE, an A2/A3/A4 authorization, a missing
@@ -222,8 +250,9 @@ narrative and analysis, so a skimming reader never has to hunt for what's blocki
 ```
 
 Rules: last thing in the message, nothing above it; one scannable sentence per item, no
-justification inline (that belongs in the narrative above — the checklist is purely "what
-do you need to do"); numbered so the user can reply "approve 1, 3, 4, need clarification on
+justification inline (that belongs in the narrative above, per §How to present a gate —
+the checklist is purely "what do you need to do," it is never the only place the reasoning
+appears); numbered so the user can reply "approve 1, 3, 4, need clarification on
 2"; every open item enumerated, none left implicit. Distinct from the phase banners in hard
 constraint 11 — those report progress, this requests a decision. The block above is the
 English form of the template — translate the header and every item into the user's
