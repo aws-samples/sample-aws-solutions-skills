@@ -220,6 +220,14 @@ cross-reference the rows.
 
 ### Execution Location — How Will You Reach the Source DB? (Decide First)
 
+**This should already be answered from Phase 1 discovery input #1** ("how do you already
+connect to it?" — existing bastion/jump host, VPN, direct network access). If the customer
+already has a working, trusted path, the default move is to reuse it as-is — run the
+session from wherever that access already lives — not to introduce SSM hybrid-activation as
+if no access existed. If Phase 1 was skipped or the answer wasn't captured, ask it now,
+before consulting the table below: **check for an existing path first, reach for SSM only
+when none exists.**
+
 🔴 **Before anything else: does this host allow OS/root access, or is it a managed DB product?**
 If the source location is anything other than EC2 or a VM already confirmed to have OS access,
 ask directly — "self-managed on a VM you can install software on" or "a managed database
