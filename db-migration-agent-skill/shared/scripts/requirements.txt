@@ -7,4 +7,4 @@
 # Both are pure-Python (no compiled extension), so they install the same way regardless
 # of build host architecture and need no manylinux wheel for the Lambda's arm64 runtime.
 pymysql==1.1.1
-pg8000==1.31.2
+pg8000==1.31.5
