@@ -49,12 +49,13 @@ hard constraint 10.
    the cutover freeze — each behind an explicit confirmation.
 3. **The user approves the method, the cost, and the cutover** (GATES 2 and 4). Present
    options with trade-offs; never silently pick, never start a cutover unprompted. **Every
-   ⛔-marked gate (1, 2, 3, 4) and the soak-exit row is the same kind of stop** — the agent
-   gathers and records evidence, but only the named approver's own reply accepts it. Never
-   write the approver's name into a GATE or soak-exit row in `authorizations.md` off the
-   back of a broader "proceed" instruction that didn't actually address that row — a green
-   validation result is evidence to present, not a signature to fill in yourself. If you
-   catch yourself about to sign a row the user didn't explicitly address, stop and ask.
+   ⛔-marked gate (1, 2, 3, 4) and the soak-exit block is the same kind of stop** — the agent
+   gathers and records evidence, drafts the corresponding block in `authorizations.md`, and
+   appends it — but only the approver's own reply, addressing that specific block, marks it
+   `**Confirmed:**`. Never fill in that line yourself off the back of a broader "proceed"
+   instruction that didn't actually address that block — a green validation result is
+   evidence to present, not a mark to fill in yourself. If you catch yourself about to mark
+   a block the user didn't explicitly address, stop and ask.
 4. **No credentials in argv or in files you generate.** `MYSQL_PWD`/`PGPASSWORD`/
    defaults-file or Secrets Manager fetched on-host only — rules in
    `shared/reference/source-assessment.md`.
@@ -76,8 +77,8 @@ hard constraint 10.
    any client, or execute the cutover — you prepare, validate, rehearse, and hand over,
    and the customer runs the cutover. **Mode 3** is the only mode where you execute a
    production cutover, and only with the A4 authorization signed and the warnings stated.
-   Approvals of record live in `authorizations.md` (named person + date), never in chat
-   scrollback.
+   Approvals of record live in `authorizations.md` as a `**Confirmed:**` mark + date,
+   entered directly by the approver — never a name, never in chat scrollback.
 10. **Never build a self-managed target.** If the requested target is not Aurora/RDS (e.g.
     "on-prem MySQL → MySQL on EC2"), stop at Phase 0 and say so plainly. Then: (a) name what
     this skill *can* still contribute — source assessment and sizing, client discovery,
@@ -102,8 +103,8 @@ hard constraint 10.
 12. **End every message that's waiting on the user with a single, unmissable checklist of
     exactly what they need to do.** Long analysis is fine above it, but a user skimming
     must never have to hunt through prose to find what's blocking — every pending approval,
-    open question, or missing named-approver row goes in this list, nothing blocking exists
-    only in prose. Exact format and a worked example in
+    open question, or unconfirmed `authorizations.md` block goes in this list, nothing
+    blocking exists only in prose. Exact format and a worked example in
     `shared/reference/engagement-safety.md` §Surfacing what's needed from the user.
 13. **A genuine surprise is never saved up for the next gate.** Silence between gates is
     fine for routine, expected work — that's what the autonomous half of the Execution
@@ -148,7 +149,7 @@ over as a single copy-paste block and ask for the output).
 | `shared/reference/version-upgrades.md` | Phase 7 when source→target crosses a major version |
 | `shared/reference/customer-test-integration.md` | Phase 6.5/7.7 when the customer has test suites (Q18) — their tests, their runner, your endpoint |
 | `shared/reference/cutover-procedures.md` | Phases 7.5–8 — client discovery, freeze, write-pause minimization, reverse replication, rollback |
-| `shared/templates/{migration-plan,authorizations,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 7.7 / 8 — instantiate with real values |
+| `shared/templates/{migration-plan,authorizations,discovery-questions,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
 | `shared/reference/dashboard.md` | Phase 0 to scaffold; every phase after, whenever `migration-plan.md` is updated |
 | `shared/reference/post-migration.md` | Phase 9 |
 | `shared/reference/troubleshooting.md` | Any failure — symptom→fix table first |
@@ -207,61 +208,47 @@ over as a single copy-paste block and ask for the output).
    Agent Toolkit (AWS MCP Server) is a prerequisite** — its absence is a Phase 0 blocker
    for the conversion workstream (`dms-schema-conversion` chaining).
 
-### Phase 1: Discovery (batched per gate, each question with a recommended default)
+### Phase 1: Discovery (two routing questions in chat, the rest in a file)
 
-Ask discovery questions **as one batched message per gate** — a numbered list with a
-recommended default per item and a "go with recommendations" fast path — not one question
-per turn (customers consistently push back on drip-feed questioning; asynchronous
-stakeholders doubly so). Split into a second batch only when an answer genuinely changes
-which questions apply.
+**Ask #1 and #2 in chat first** — these are "routing" questions: their answer changes
+which later questions even apply, so they have to be settled before generating anything
+else.
 
-Collect the 20 inputs in the plan template §Phase 1 — source engine/location **(if not EC2 or
-a plain on-prem VM: state whether the source is self-managed with OS access, or a managed DB
-product — this decides which method-matrix row even applies; see
-source-assessment.md §Execution Location)**, **how the customer already connects to it**
-(existing bastion/jump host, VPN, direct network access — ask this explicitly, before
-proposing anything new: a path they already trust and use today is reused as-is, by running
-the session from wherever that access already lives, rather than defaulting to SSM
-hybrid-activation as if no access existed. Only reach for SSM when no existing path does —
-see source-assessment.md §Execution Location), target **(service/version, and its network
-placement — does an existing VPC/subnet group/security groups/KMS key already exist for
-this instance to reuse, or is fresh networking being provisioned? See
-target-provisioning.md §Network Placement)**,
-size, **downtime tolerance**, **RPO on rollback**, usable bandwidth, schema-object needs,
-app modifiability, **how each app finds the DB today**, downstream CDC consumers,
-compliance mandates, **Korean security appliances and their mode**, multi-DB,
-cross-region/account, KMS key type, the **engagement parameters** (#16 — rehearsal,
-parallel-run length N, validation depth, rollback strategy, approver names; defaults and
-the "if this DB is wrong for an hour" sizing guidance are in engagement-safety.md
-§Engagement parameters. **The parallel-run (soak) item specifically is never just a number
-in this list** — present it as its own explicit decision, per engagement-safety.md §Soak
-decision script: explain plainly what it is, why it exists (the concrete failure class a
-one-time validation can't see), the proposed length and the signal behind it, then ask the
-customer to keep / shorten / waive it — and record whichever they choose, with their
-stated reasoning, not just the resulting number. This is a default proposal, never an
-opt-in — do not present soak as something that only happens if asked for. — and in Mode 2
-also the **handover depth**: (a) full preparation
-with CDC kept current + clone-rehearsed timings, or (b) light preparation where the
-customer starts replication themselves), **third-party tools on or in front of the DB**
-(#17 — security, backup,
-monitoring, HA, proxy agents; customers usually forget these until asked), and the
-**customer's own test suite** (#18 — regression/UAT/load tests their QA already runs;
-these become acceptance gates executed against the target during rehearsal and soak —
-integration mechanics in `shared/reference/customer-test-integration.md`: their tests
-run in *their* CI/QA systems pointed at the target endpoint, never pasted into chat),
-a **named operational contact on the source side** (#19 — distinct from the approver
-names in #16: not who decides, but who you'd actually call if something on that host
-looks odd — a DBA/ops handle, not a manager), and **post-migration ownership** (#20 —
-who operates the target once this is over, distinct from Mode-2 handover depth in #16,
-which is about how much prep work you do, not who's on the hook afterward — feeds
-Phase 9's decommission/handoff step). "Go with recommendations" accepts all remaining defaults. Skip what's
-already known.
+- **#1 — Source engine/location.** If not EC2 or a plain on-prem VM: state whether the
+  source is self-managed with OS access, or a managed DB product — this decides which
+  method-matrix row even applies (`source-assessment.md` §Execution Location). Also ask
+  **how the customer already connects to it** (existing bastion/jump host, VPN, direct
+  network access) *before* proposing anything new — a path they already trust and use
+  today is reused as-is, by running the session from wherever that access already lives.
+  Only reach for SSM hybrid-activation when no existing path does.
+- **#2 — Target service/version and network placement.** Does an existing VPC/subnet
+  group/security groups/KMS key already exist for this instance to reuse, or is fresh
+  networking being provisioned (`target-provisioning.md` §Network Placement)?
 
-⛔ **GATE 1** — summarize the inputs in the plan; user confirms before any assessment.
-**Mode + engagement parameters are locked here** and signed in `authorizations.md` §3;
-from this point the chosen parameters are binding and any deviation is a recorded waiver.
-Explain what each non-obvious choice (mode, parallel-run length, rehearsal depth) actually
-means and what its default assumes — see `engagement-safety.md` §How to present a gate.
+**Once #1/#2 land, generate `discovery-questions.md`** from the template
+(`shared/templates/discovery-questions.md`) for items **#3–20**, tailored to the branch
+#1/#2 selected (e.g. drop OS-access-dependent sub-questions for a managed-DB source). Tell
+the customer plainly what you just did and that answering in chat instead is equally
+fine — never frame the file as the only path. Every item in that file already carries its
+own "why it matters" context and a recommended default (per
+`engagement-safety.md` §How to present a gate) — that file is the answer to the volume
+problem a single giant batched chat message used to create, not a bureaucratic add-on.
+
+**Resume mechanic**: while discovery is open, re-read `discovery-questions.md` at the
+start of every turn (same idiom as the plan-file resume at Phase 0 step 4) rather than
+waiting for an explicit "done." Whenever an answer arrives — from the file or from chat —
+transcribe it into `migration-plan.md`'s Phase 1 table (the unchanged system of record)
+and, if it arrived via chat, backfill the corresponding `**Answer:**` line in
+`discovery-questions.md` so the file never goes half-stale. Filing an answer doesn't
+relieve you of hard constraint 13 — a terse or contradictory answer still gets a follow-up
+question, same as it would in an all-chat flow.
+
+⛔ **GATE 1** — the lock-in mark lives in `discovery-questions.md`'s own closing block
+(its "GATE 1" section), not a duplicate row in `authorizations.md` — that file's §2 just
+points there. Before asking for that mark, explain what each non-obvious choice (mode,
+parallel-run length, rehearsal depth) actually means and what its default assumes — see
+`engagement-safety.md` §How to present a gate. From the moment that block is marked, the
+chosen parameters are binding and any deviation is a recorded waiver.
 
 ### Phase 2: Assess the source (read-only)
 
@@ -284,10 +271,10 @@ return here for data movement. Prepare the **cost estimate**
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
 rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
 terms the customer can independently evaluate, not a one-line justification clause — see
-`engagement-safety.md` §How to present a gate. User approves, and you
-**sign it in `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — a verbal
+`engagement-safety.md` §How to present a gate. User approves, and you **append the GATE 2
+block to `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — a verbal
 "approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
-must not proceed until the row actually has an approver and a date in the file). **If the
+must not proceed until that block's `**Confirmed:**` line is actually filled in). **If the
 chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
 replication), this approval also **pre-authorizes the CDC-proof probe** described in
 `execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a
@@ -324,10 +311,11 @@ test. Major-version gap → also run the version-gap battery
 NEEDED block; say what each check actually proves and what it does NOT prove (see
 `engagement-safety.md` §How to present a gate) — a wall of green checkmarks with no
 explanation of scope tells the customer nothing about what's actually been ruled out. The
-user reviews and explicitly accepts before you sign it in
-`authorizations.md` (same discipline as GATE 1/2 — evidence being green is not the same
-event as the approver accepting it, and "proceed with execution" at GATE 2 does not carry
-forward as advance acceptance of GATE 3). No cutover date before this is signed.
+user reviews and explicitly accepts before the GATE 3 block you append to
+`authorizations.md` gets its `**Confirmed:**` line filled in (same discipline as GATE
+1/2 — evidence being green is not the same event as the approver accepting it, and
+"proceed with execution" at GATE 2 does not carry forward as advance acceptance of GATE
+3). No cutover date before that block is confirmed.
 
 ### Phase 7.5: Discover every DB client (mandatory)
 
@@ -349,9 +337,9 @@ generate a report from `shared/templates/soak-report.md` (lag, spot counts/check
 alarms, drift, plus the customer's test-suite result when one exists) and send it to the
 customer; any RED period resets the consecutive-green counter. Client discovery (7.5) runs
 alongside. Invite the customer to point read-only test traffic or load tests at the target
-during this window. Cutover readiness unlocks only at **N consecutive greens + the signed
-soak-exit row** in `authorizations.md` — present the final soak report and stop with its
-own ACTION NEEDED block; the user's explicit accept is the signature, not the agent
+during this window. Cutover readiness unlocks only at **N consecutive greens + the confirmed
+soak-exit block** in `authorizations.md` — present the final soak report and stop with its
+own ACTION NEEDED block; the user's own `**Confirmed:**` mark is what counts, not the agent
 recording that the periods came up green. Shortening or skipping is a waiver
 (engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
 concurrently with this soak, not after it** — they test different things and don't depend
@@ -369,14 +357,15 @@ acknowledgment in the plan).
 or *estimated*, rollback runbook, the client-repoint list with exact per-client changes
 and where each config deploys from, validation + soak evidence. Walk the customer through
 the runbook step by step, answer their questions, and say plainly what is now their own
-responsibility and why (`engagement-safety.md` §How to present a gate), then get **A4b
-handover acceptance** signed in `authorizations.md`. Then **stop** — do not freeze the
-source, repoint clients,
+responsibility and why (`engagement-safety.md` §How to present a gate), then append the
+**A4b handover-acceptance** block to `authorizations.md` and get its `**Confirmed:**` line
+filled in. Then **stop** — do not freeze the source, repoint clients,
 or run the sequence. Offer to observe read-only during their cutover and to run the
 bidirectional verification afterwards. Their reported completion is what triggers Phase 9.
 
 **Mode 3 only — execute.** ⛔ **GATE 4**: walk the user through the runbook; they approve
-the window, the rollback strategy, and the abort criteria, and A4 is signed. Say plainly
+the window, the rollback strategy, and the abort criteria, and the A4 block gets its
+`**Confirmed:**` line filled in. Say plainly
 what you're about to do and why each step is reversible — see `engagement-safety.md` §How
 to present a gate. Then execute
 step-by-step with go/no-go confirmation at each group: freeze source → drain CDC → stop

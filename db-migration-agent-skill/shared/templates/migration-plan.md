@@ -18,8 +18,10 @@
 | Downtime budget | {seconds/minutes/hours} · RPO on rollback: {zero / acknowledged loss} |
 | Status | ⏳ Phase {n} |
 
-> Approvals of record live in **`authorizations.md`** (named person + date); gate rows
-> below reference it. IAM guardrail active: {session policy / boundary / simulate-proof}.
+> Approvals of record live in **`authorizations.md`** as a `**Confirmed:**` mark + date
+> per block — no name captured, by design; gate rows below reference it. GATE 1 itself is
+> locked in `discovery-questions.md`'s own closing block, not a separate authorizations.md
+> row. IAM guardrail active: {session policy / boundary / simulate-proof}.
 
 ## Phase 0 — Preflight ▢
 - Account/region verified: ▢ ({account-id}, {region})
@@ -27,9 +29,10 @@
 - Quotas OK: ▢ · Engine version available: ▢ · CDK bootstrapped: ▢/n.a.
 - MCP servers connected: {list or "none — CLI fallback"}
 
-## Phase 1 — Discovery answers (GATE 1 sign-off: ▢ {date, by})
+## Phase 1 — Discovery answers (GATE 1 sign-off: ▢ {date} — see `discovery-questions.md`)
 | # | Question | Answer |
 |---|----------|--------|
+| — | *#1–2 answered in chat at Phase 0/1; #3–20 collected via `discovery-questions.md` (or chat, if preferred) and transcribed below.* | |
 | 1 | Source engine/version/location **(if not EC2/plain on-prem VM: self-managed w/ OS access, or managed DB product?)** — **and how do you already connect to it?** (existing bastion/jump host, VPN, direct network access) — check this first: a working path the customer already trusts is reused as-is (run the session from wherever that access already is), not replaced by SSM by default | |
 | 2 | Target service/version **and network placement** — existing VPC/subnet group/SGs/KMS key to reuse, or provision new networking? | |
 | 3 | DB size / table count | |
@@ -45,10 +48,10 @@
 | 13 | Multi-DB on host? Cross-DB queries? | |
 | 14 | Cross-region / cross-account? | |
 | 15 | KMS key type (AWS-managed / CMK) | |
-| 16 | **Engagement parameters** (rehearsal · parallel-run N · validation depth · rollback strategy · approver names) + Mode-2 handover depth (a/b) | |
+| 16 | **Engagement parameters** (rehearsal · parallel-run N · validation depth · rollback strategy) + Mode-2 handover depth (a/b) | |
 | 17 | **Third-party tools on/in front of the DB** (security, backup, monitoring, HA, proxy) | |
 | 18 | **Customer's own test suite / UAT scenarios** (regression tests, load tests, key business flows QA runs) — to be executed against the target during rehearsal and soak | |
-| 19 | **Named operational contact, source side** (who to actually call about this database — distinct from #16's approvers) | |
+| 19 | **Operational contact, source side** (who to actually call about this database — distinct from who confirms each authorization block; a role/team handle is fine, not a personal name) | |
 | 20 | **Post-migration ownership** (who operates the target going forward — distinct from #16's handover depth) | |
 
 ## Phase 2 — Assessment results

@@ -28,8 +28,8 @@
    *source* once, early, to establish which failures are pre-existing.
 3. **Where results live**: each suite execution = a row in the daily soak report
    (`{suite: n pass / n fail}`) + the run log/URL referenced in `migration-plan.md`
-   Phase 7.7. When deep validation was chosen: the final pre-cutover run is a named sign-off row in
-   `authorizations.md`.
+   Phase 7.7. When deep validation was chosen: the final pre-cutover run gets its own
+   confirmed block in `authorizations.md`.
 4. **Load tests** (k6/JMeter/Gatling/nGrinder): run against the target during the soak at
    production-like concurrency — this is the deep-validation performance input. Compare
    p95/p99 against the source baseline from Phase 2, not against absolute thresholds.

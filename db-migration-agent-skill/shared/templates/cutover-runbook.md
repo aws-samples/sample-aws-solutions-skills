@@ -17,8 +17,8 @@ run it) / migration agent (Mode 3, with A4 signed)}
 | ✅ | Step | Command / action | Expect |
 |---|------|------------------|--------|
 | ▢ | Validation green (GATE 3) | see migration-plan.md Phase 7 | all ▢→✅ |
-| ▢ | Parallel run passed: {N} consecutive green periods | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit row signed |
-| ▢ | **Mode 3:** cutover authorization signed (A4) + abort criteria agreed. **Mode 2:** handover acceptance signed (A4b) + abort criteria agreed with the customer's own team | authorizations.md §2/§3 | named approver + date present |
+| ▢ | Parallel run passed: {N} consecutive green periods | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit block confirmed |
+| ▢ | **Mode 3:** cutover authorization confirmed (A4) + abort criteria agreed. **Mode 2:** handover acceptance confirmed (A4b) + abort criteria agreed with the customer's own team | authorizations.md §3 | that block's `**Confirmed:**` date present (no name — this checks the block exists and is marked, not who marked it) |
 | ▢ | Client inventory complete | migration-plan.md Phase 7.5 | every client repoint-ready |
 | ▢ | Reverse replication task exists, endpoints tested, task NEVER RUN | `aws dms describe-replication-tasks --filters Name=replication-task-arn,Values={rev-arn}` | status `ready` (never `stopped` — a run task holds a stale CDC checkpoint; recreate it if rehearsal ran it) |
 | ▢ | DNS TTL lowered (if DNS cutover) | `aws route53 change-resource-record-sets …` TTL=60 | dig shows 60 |

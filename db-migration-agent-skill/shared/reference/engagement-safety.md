@@ -73,7 +73,7 @@ Record the choice in the plan. The handover package the customer receives:
    from, so their team can land it in their own repo/pipeline.
 4. **Validation evidence** — row counts, checksums, schema-object comparison, plus the
    parallel-run reports (a) and any customer-test-suite results.
-5. **A named handover acceptance** (`authorizations.md` A4b): the customer confirms
+5. **A handover-acceptance block** (`authorizations.md` A4b): the customer confirms
    receipt and accepts ownership of the cutover step.
 6. **A standing offer**: the agent stays available to *observe* and verify during the
    customer's cutover (read-only checks, bidirectional verification afterwards) without
@@ -83,7 +83,7 @@ Record the choice in the plan. The handover package the customer receives:
 
 - The agent will **freeze the production source, repoint live clients, and switch the
   application to a new database.** During the freeze window the application cannot write.
-- **A named approver must be reachable for the whole window** and pre-agree the abort
+- **An approver must be reachable for the whole window** and pre-agree the abort
   criteria; the agent stops and asks whenever a criterion trips rather than deciding.
 - **Timing is earned, not promised:** quote a write-pause budget only from a measured
   rehearsal, and treat rehearsal × 2 as the honest number.
@@ -105,7 +105,7 @@ recommended default; every deviation from a default is a recorded waiver.
 | **Parallel-run length** | not run / N consecutive green periods (days, or hours for compressed engagements) | **Risk-tiered — see table below.** Not a flat number: the default the agent proposes is derived from discovery input #4 (`method-selection.md`), not copied from the previous engagement. |
 | **Validation depth** | counts + checksums + smoke test / + app-level & version-gap battery / + domain reconciliation aggregates | **counts + checksums + app-level checks**, plus the **customer's own test suite** whenever one exists (discovery Q18) |
 | **Rollback strategy** | snapshot/PITR restore (with acknowledged RPO) / reverse replication (zero RPO) / write-log replay | **Reverse replication** when the engines support it; otherwise state the RPO plainly and get it acknowledged |
-| **Approver(s)** | named person per action class; for Mode 3 also "present during the window" | Named in `authorizations.md` before any production-touching step |
+| **Approver(s)** | confirmed directly in `authorizations.md` per action class (no name captured); for Mode 3 also "present during the window" | Confirmed in `authorizations.md` before any production-touching step |
 
 Guidance to offer when the customer is unsure: *"If this database being wrong or down for
 an hour would stop revenue or reach customers, take the full rehearsal, a 7-day parallel
@@ -127,17 +127,19 @@ shown (e.g. a live client already found reading/writing during assessment overri
 | **Moderate** | Some live traffic, or downtime tolerance is minutes rather than hours, or the customer is unsure which tier applies | **3 days** |
 | **High** | Production-serving with live write traffic today, zero/seconds downtime tolerance, or an explicit RPO requirement | **7 consecutive green days** (unchanged ceiling) |
 
-This is still a **proposed default, not a rule** — the named approver can move it either
+This is still a **proposed default, not a rule** — the approver can move it either
 direction at GATE 1, and every deviation from the tier's default is recorded as a waiver
 exactly as before (§Waiver protocol). The tier itself, and the signal that produced it,
-gets recorded alongside the parameter in `authorizations.md` so a later reader can see
-*why* N was what it was, not just the number.
+gets recorded alongside the parameter on `discovery-questions.md`'s #16c so a later reader
+can see *why* N was what it was, not just the number.
 
 ### Soak decision script
 
 Never let the parallel-run parameter arrive as a bare number inside the engagement-parameters
-list. When discovery reaches it, say something like this (translate into the customer's
-language; keep the structure, not the exact words):
+list. **This is the source text for `discovery-questions.md`'s #16c** when discovery uses
+the file path (the normal case) — reproduce it there in full, never summarize it down.
+When discovery stays in chat instead, say something like this (translate into the
+customer's language; keep the structure, not the exact words):
 
 > A parallel run (soak) means: your old database keeps running production traffic exactly
 > as it does today — nothing is at risk yet. The new database just sits alongside it,
@@ -161,10 +163,13 @@ language; keep the structure, not the exact words):
 > for the whole window — just keep it open or reopen it, no re-downloading anything.
 > Nothing else about how you work changes.
 
-Record the answer **and the stated reasoning** in `authorizations.md` — "waived, customer
-accepted the risk because X" or "kept at 3 days because Y," never just the number. This is
-a default the agent proposes proactively; it is never framed as something the customer has
-to think to ask for.
+Record the answer **and the stated reasoning** on #16c's own `**Answer:**` line in
+`discovery-questions.md` — "waived, customer accepted the risk because X" or "kept at 3
+days because Y," never just the number. If the chosen option was C (waive), also append
+the corresponding block to `authorizations.md` §4 (Waivers) — a waiver is a genuine
+standalone authorization moment even though the rest of engagement parameters are pure
+reference. This is a default the agent proposes proactively; it is never framed as
+something the customer has to think to ask for.
 
 **Heterogeneous engagement:** before making this recommendation, read
 `execution-runbooks.md` §Soak automation's heterogeneous callout — the "checks run
@@ -178,31 +183,34 @@ process, not the automated checklist). Say which of the three applies before quo
 When the customer declines a recommended parameter (rehearsal, parallel-run length,
 reverse replication):
 1. State plainly, in one or two sentences, what risk moves into the cutover window.
-2. Record the waiver in `authorizations.md` §Waivers — what was skipped, the risk as
-   stated, who accepted it, date.
+2. Append the waiver block to `authorizations.md` §4 — what was skipped, the risk as
+   stated — and get its `**Confirmed:**` date filled in directly.
 3. Recover what value you can (e.g. declined rehearsal → component-test every
    freeze-window command against the real target; see execution-runbooks.md §Rehearsal).
-4. Never silently skip. A waiver the customer doesn't remember signing is a failure.
+4. Never silently skip. A waiver the customer doesn't remember confirming is a failure.
 
 Why this matters: a declined rehearsal plus one untested engine-version-specific command
 is all it takes to turn a 40-second freeze into a 5-minute write pause.
 
 ## Approvals of record
 
-Chat approvals drift and scroll away. Every gate sign-off, action-class authorization,
-and waiver lives in **`authorizations.md`** (template in `shared/templates/`), with a
-named person and date. `migration-plan.md` gate rows point at the corresponding
-authorization row. The customer can hand the file to an auditor.
+Chat approvals drift and scroll away. Every gate, action-class authorization, and waiver
+lives in **`authorizations.md`** (template in `shared/templates/`) as its own block — what
+was authorized, why, and a `**Confirmed:**` date. **No name, no role, no other identifying
+detail is ever captured, by design** — see that template's header note. `migration-plan.md`
+gate rows point at the corresponding block. The customer can hand the file to an auditor as
+a record of *what* was authorized and *when*; it does not answer *who*, and it never will.
 
-**The agent never fills in the named approver's row itself.** Gathering and recording
-evidence (a green validation battery, a green soak period) is ordinary agent work and can
-happen without a round-trip. *Accepting* that evidence — signing GATE 1/2/3/4 or a
-soak-exit row — is the approver's own decision and requires their own reply addressing
-that specific row. A broader instruction like "proceed with execution" authorizes the work
-it names; it is not advance acceptance of whatever gate the work happens to produce
-evidence for. If a gate's evidence goes green mid-flight, stop, present it with its own
-ACTION NEEDED block, and wait — don't carry an earlier "proceed" forward as a signature on
-a row the user hasn't seen yet.
+**The agent drafts and appends the block; it never fills in the `**Confirmed:**` line
+itself.** Gathering and recording evidence (a green validation battery, a green soak
+period) is ordinary agent work and can happen without a round-trip. *Confirming* that
+evidence — GATE 1/2/3/4 or a soak-exit block — is the approver's own act, and requires
+their own reply addressing that specific block, entered directly by them in the file. A
+broader instruction like "proceed with execution" authorizes the work it names; it is not
+advance confirmation of whatever gate the work happens to produce evidence for. If a
+gate's evidence goes green mid-flight, stop, present it with its own ACTION NEEDED block,
+and wait — don't carry an earlier "proceed" forward as a mark on a block the user hasn't
+seen yet.
 
 ## How to present a gate
 
@@ -214,10 +222,13 @@ material items at each gate, not every line of the plan.
 
 For each gate, at minimum:
 
-- **GATE 1** (discovery + mode + engagement parameters): for anything the customer might
-  not already know is a design decision — Mode 2 vs 3, the parallel-run length, rehearsal
-  depth — say what it actually changes and what the recommended default assumes about
-  their risk tolerance. Don't just restate their own answers back as a bullet list.
+- **GATE 1** (discovery + mode + engagement parameters): most of this obligation now lives
+  in `discovery-questions.md` itself — every non-obvious item there already carries its
+  own "why it matters" prose, so the file is the primary home for this explanation, not a
+  replacement for it. In chat, for anything not already covered there — Mode 2 vs 3 in
+  particular, since that's settled before the file exists — say what it actually changes
+  and what the recommended default assumes about risk tolerance. Don't just restate the
+  customer's own answers back as a bullet list.
 - **GATE 2** (method): say why *this* method over the rejected alternatives, in terms the
   customer can independently evaluate (downtime budget, cost, what breaks if a bandwidth
   estimate is wrong) — not just "chosen method: X" with a one-line justification clause.
@@ -230,19 +241,20 @@ For each gate, at minimum:
   reversible (Mode 3) — not just "here's the runbook, approve?"
 
 §Soak decision script (below) is the existing worked example of this — apply the same
-discipline at every gate that asks for a signature, not just there.
+discipline at every gate that asks for a confirmation, not just there.
 
 ## Surfacing what's needed from the user
 
-Every message that ends waiting on the user — a GATE, an A2/A3/A4 authorization, a missing
-named approver, any open question — must end with a standalone checklist block, after all
-narrative and analysis, so a skimming reader never has to hunt for what's blocking:
+Every message that ends waiting on the user — a GATE, an A2/A3/A4 authorization, an
+unconfirmed `authorizations.md` block, any open question — must end with a standalone
+checklist block, after all narrative and analysis, so a skimming reader never has to hunt
+for what's blocking:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔲 ACTION NEEDED — GATE 2: Method approval
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. [ ] Named approver for authorizations.md (required before any A2/A3 action)
+1. [ ] Confirm the new block in authorizations.md (required before any A2/A3 action)
 2. [ ] Approve DMS as a recorded deviation from the matrix (row 4 would be the default)
 3. [ ] Approve dms.t3.small sizing
 4. [ ] Approve the ≈$3.25 one-time / ≈$50/mo cost estimate
@@ -345,7 +357,7 @@ decommission stage is signed:
 | Phase | Addition |
 |-------|----------|
 | 0 | **Mode question first** (1/2/3, Mode 2 recommended); mode gates the whole session; guardrail policy generated for that mode |
-| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b); mode + parameters signed in `authorizations.md` |
+| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 locked via that file's own closing block, `authorizations.md` §2 just points there |
 | 6.5 | Rehearsal per the chosen parameter (see execution-runbooks.md §Rehearsal) |
 | 7.7 | **Parallel-run soak**: target stays current; daily `soak-report.md`; customer may point read-only traffic/load tests at the target; cutover readiness requires N consecutive green periods |
 | 8 | **Mode 2** → assemble + verify the handover package, walk the customer through the runbook, sign A4b, then stop (offer read-only observation during their cutover). **Mode 3** → execute step-by-step with go/no-go per group, A4 signed first |

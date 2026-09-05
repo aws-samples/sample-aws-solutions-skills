@@ -27,13 +27,15 @@ From there:
      executes the cutover**, in your window, with your tests. The agent will not freeze
      your source or repoint your applications in this mode.
    - **Mode 3 — full migration**: Mode 2 plus the agent executing the cutover itself. Only
-     if you explicitly ask for it, with the risks stated and a named approver present.
+     if you explicitly ask for it, with the risks stated and an approver present.
 
-2. **A short interview.** ~18 questions, batched with a recommended default each —
-   say **"go with recommendations"** and it skips to the end. It asks the things teams
-   forget until it's too late: who else reads this database? any backup/monitoring/
-   security agents on the host? what happens to you if a rollback loses ten minutes of
-   writes?
+2. **A short interview.** Two quick routing questions in chat first (what kind of source,
+   how you already connect to it), then the rest — about 18 more — in a file you fill out
+   at your own pace, each one with enough context to know why it's being asked and a
+   recommended default. Say **"go with recommendations"** and it skips to the end, or just
+   answer in chat instead if you'd rather. It asks the things teams forget until it's too
+   late: who else reads this database? any backup/monitoring/security agents on the host?
+   what happens to you if a rollback loses ten minutes of writes?
 
 3. **It inspects your environment — read-only.** Connects via SSM (no SSH keys, no
    passwords typed anywhere), scans for the things that break managed databases
@@ -56,8 +58,8 @@ From there:
    ones, your stored procedures executed on the target, and a **parallel-run period**: the
    new database runs alongside production, kept current in real time, with a daily
    green/red report. Cutover readiness stays locked until it has been green for N
-   consecutive periods (you pick N) and a named person signs off. Your own test suite, if
-   you have one, runs against the new database during this window.
+   consecutive periods (you pick N) and that soak-exit block gets confirmed. Your own test
+   suite, if you have one, runs against the new database during this window.
 
 7. **Cutover — handed to you (Mode 2) or executed for you (Mode 3).** Either way you get a
    runbook rehearsed on a clone with **measured** timings, a rollback runbook, and the
@@ -76,8 +78,8 @@ From there:
 **You'll be asked** at four gates: to confirm the interview answers (mode + parameters),
 to approve the method + cost, to accept the validation evidence, and — in Mode 2 — to
 accept the cutover handover, or in Mode 3 to green-light the cutover window.
-Every approval is recorded in a generated `authorizations.md` with a name and date — an
-audit record you can hand to your security team. Skipping a safety step (like the
+Every approval is recorded in a generated `authorizations.md` with a confirmation mark and
+a date/timestamp — never a name — an audit record you can hand to your security team. Skipping a safety step (like the
 rehearsal) is possible, but only as a **written waiver** with the risk spelled out.
 
 **You'll never be asked** to paste a password into chat (credentials live in AWS Secrets
@@ -89,7 +91,7 @@ every production write is itemized), or to trust "it worked" without evidence.
 | Artifact | What it is |
 |---|---|
 | `migration-plan.md` | The running record — every decision and why, every result, every gate |
-| `authorizations.md` | Who approved what, when — including any waivers |
+| `authorizations.md` | What was authorized and when — including any waivers (no names) |
 | `{prefix}-migration/` | A deployable CDK (TypeScript) project for the new database — yours to keep |
 | `cutover-runbook.md` / `rollback-runbook.md` | The scripts as executed, with measured timings |
 | Soak reports | Daily green/red evidence from the parallel-run period |
@@ -138,7 +140,7 @@ cutover with no rehearsal, this skill will refuse to promise it — that's a fea
 
 **5. It does not cut over your production database unless you choose Mode 3.** The
 default (Mode 2) stops at a rehearsed handover: your team runs the cutover with your own
-tests and change window. And it is never unattended — a named human approves the mode,
+tests and change window. And it is never unattended — a human approves the mode,
 engagement parameters, method, cost, and (in Mode 3) the cutover window, and is reachable
 during it. The skill is designed to *stop and ask*
 when an abort criterion trips mid-cutover rather than decide on its own — which only
@@ -203,7 +205,8 @@ db-migration-agent-skill/
 │   │   └── cdk-stacks.md                   The CDK project the skill generates
 │   └── templates/
 │       ├── migration-plan.md               Working artifact (source of truth per engagement)
-│       ├── authorizations.md               Named-approver audit record
+│       ├── discovery-questions.md          Bulk Phase 1 Q&A, filled out by the customer
+│       ├── authorizations.md               Approval ledger — marks + dates, no names
 │       ├── soak-report.md                  Daily green/red gate during the parallel run
 │       ├── cutover-runbook.md              Instantiated with real values at Phase 8
 │       └── rollback-runbook.md

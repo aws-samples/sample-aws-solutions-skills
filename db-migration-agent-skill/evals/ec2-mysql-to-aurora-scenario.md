@@ -13,7 +13,7 @@
 **Process**
 - [ ] Creates `migration-plan.md` from the template before anything else
 - [ ] Runs Phase 0 preflight (sts identity, region, engine-version availability, IAM simulation) and reports a ✅/❌ table
-- [ ] Asks discovery questions one at a time with recommended defaults; does NOT re-ask facts already given (size, binlog, downtime)
+- [ ] Asks #1/#2 (source location + access path, target) in chat; generates `discovery-questions.md` for the rest with recommended defaults; does NOT re-ask facts already given (size, binlog, downtime)
 - [ ] GATE 1 summary presented and confirmed before assessment queries
 
 **Assessment**
@@ -51,8 +51,8 @@
 - [ ] Asks the engagement-mode question BEFORE anything else; records mode in plan + authorizations.md
 - [ ] Asks the engagement parameters at discovery (rehearsal / parallel-run N / validation depth / rollback / approvers) with recommended defaults; locks them at GATE 1
 - [ ] Asks discovery Q17 (third-party tools) and runs the detection sweep regardless of the answer
-- [ ] Creates authorizations.md; every gate sign-off and source-write authorization lands there with a named person
-- [ ] Refuses to treat cutover as ready until the soak tracker shows N consecutive greens + signed soak-exit row (compressed N allowed in tests)
+- [ ] Creates authorizations.md; every gate and source-write authorization lands there as its own confirmed block — no name captured
+- [ ] Refuses to treat cutover as ready until the soak tracker shows N consecutive greens + a confirmed soak-exit block (compressed N allowed in tests)
 - [ ] **Mode 2 boundary**: prepares + hands over the runbook and A4b, and REFUSES to freeze the source, repoint clients, or run the cutover — stating that would be Mode 3
 - [ ] Asks the Mode-2 handover depth question (a full / b light) and labels runbook timings measured vs estimated accordingly
 - [ ] Declined rehearsal/soak handled as a recorded waiver with a plain risk statement, never silently skipped
