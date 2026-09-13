@@ -8,7 +8,7 @@ Ship the *ability* to generate a solution — not a static template.
 One source of knowledge, one `SKILL.md` per skill, deployed verbatim to **Kiro · Claude Code · Codex**.
 
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](./LICENSE)
-[![Skills](https://img.shields.io/badge/skills-6-orange.svg)](#-skill-catalog)
+[![Skills](https://img.shields.io/badge/skills-8-orange.svg)](#-skill-catalog)
 [![Tools](https://img.shields.io/badge/tools-Kiro%20%C2%B7%20Claude%20Code%20%C2%B7%20Codex-232f3e.svg)](#-supported-tools)
 [![Standard](https://img.shields.io/badge/spec-Anthropic%20Agent%20Skills-5A45FF.svg)](https://agentskills.io/specification)
 
@@ -55,9 +55,10 @@ The same `SKILL.md` runs identically across three AI tools — the only differen
 | **[data-platform-consumption-skill](./data-platform-consumption-skill/)** | QuickSight + Amazon Quick chat agents — *queryable data → BI* | *"Set up a QuickSight dashboard"* | Monolithic SKILL.md (~60 KB) |
 | **[db-migration-agent-skill](./db-migration-agent-skill/)** | EC2/on-prem databases (MySQL · MariaDB · PostgreSQL · Oracle · SQL Server · Db2) → Aurora / RDS — assessment, method selection, CDK provisioning, client repointing, soak, rehearsed cutover, rollback | *"Migrate my database to Aurora"* | `shared/` + thin SKILL.md |
 | **[llm-gateway-governance-skill](./llm-gateway-governance-skill/)** | LiteLLM gateway + Bedrock Guardrails + SSO/Cognito virtual keys + ECS Fargate + ALB edge (certMode: acm/http, SG CIDR-restricted) | *"Build an LLM gateway to govern Bedrock"* | `shared/` + thin SKILL.md |
+| **[agentic-media-archive-skill](./agentic-media-archive-skill/)** | Video ingest + MediaConvert proxies + Bedrock video models (embedding · understanding) + OpenSearch Serverless vector search + AgentCore Gateway MCP (16 tools) + MCP Apps UI for ChatGPT/Codex · Claude · Kiro · Quick | *"Build a video archive with AI search on AWS"* | `shared/` + thin SKILL.md |
 
 > **Two authoring styles coexist** (both produce md5-identical `SKILL.md` across all three tools):
-> - **`shared/` + thin `SKILL.md`** — deep knowledge lives in `shared/`; `SKILL.md` is a thin wrapper. *(unified-customer-profile, strands-agentcore, graph-personalization, llm-gateway-governance)*
+> - **`shared/` + thin `SKILL.md`** — deep knowledge lives in `shared/`; `SKILL.md` is a thin wrapper. *(unified-customer-profile, strands-agentcore, graph-personalization, llm-gateway-governance, agentic-media-archive)*
 > - **Monolithic `SKILL.md`** — everything self-contained in one ~50–60 KB file. *(the two data-platform skills)*
 >
 > See [CONTRIBUTING.md](./CONTRIBUTING.md) for when to choose which.
