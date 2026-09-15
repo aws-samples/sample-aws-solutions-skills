@@ -42,6 +42,7 @@ import datetime
 import json
 import os
 import random
+import re
 import ssl
 import time
 from pathlib import Path
@@ -173,7 +174,7 @@ def _query(family, conn, sql, params=None):
     subprocess layer."""
     if family == "mysql":
         with conn.cursor() as cur:
-            cur.execute(sql, params or ())
+            cur.execute(sql, params)
             return list(cur.fetchall())
     # pg8000.native.run returns list-of-dict-like rows keyed by column label; normalize to
     # plain tuples by column order for parity with the mysql path.
@@ -207,16 +208,76 @@ def _end_consistent_read(family, conn):
         pass
 
 
+def _table_parts(table):
+    pattern = r'\s*(?:"((?:[^"]|"")+)"|`((?:[^`]|``)+)`|([^.`"\s][^.`"]*?))\s*(\.|$)'
+    parts = []
+    offset = 0
+    for match in re.finditer(pattern, table):
+        if match.start() != offset:
+            raise ValueError(f"Invalid table identifier: {table!r}")
+        quoted, backtick, plain, separator = match.groups()
+        parts.append(quoted.replace('""', '"') if quoted is not None else
+                     backtick.replace('``', '`') if backtick is not None else plain.strip())
+        offset = match.end()
+    if offset != len(table) or not 1 <= len(parts) <= 2 or separator == '.':
+        raise ValueError(f"Invalid table identifier: {table!r}")
+    return parts
+
+
+def _table_sql(family, table):
+    quote = '`' if family == 'mysql' else '"'
+    return '.'.join(quote + part.replace(quote, quote * 2) + quote for part in _table_parts(table))
+
+
+def _sql_literal(family, value):
+    if family == "mysql":
+        return "CONVERT(X'" + value.encode("utf-8").hex() + "' USING utf8mb4)"
+    return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _columns_sql(family, table):
+    parts = _table_parts(table)
+    name = _sql_literal(family, parts[-1])
+    schema = (_sql_literal(family, parts[0]) if len(parts) == 2 else
+              "DATABASE()" if family == "mysql" else "current_schema()")
+    if family == "mysql":
+        return ("SELECT column_name, column_type, is_nullable, column_default FROM "
+                f"information_schema.columns WHERE table_schema={schema} AND table_name={name} ORDER BY column_name")
+    return ("SELECT attribute.attname, pg_catalog.format_type(attribute.atttypid, attribute.atttypmod), "
+            "CASE WHEN attribute.attnotnull THEN 'NO' ELSE 'YES' END, "
+            "pg_catalog.pg_get_expr(defaults.adbin, defaults.adrelid) "
+            "FROM pg_catalog.pg_attribute attribute JOIN pg_catalog.pg_class relation ON relation.oid=attribute.attrelid "
+            "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace "
+            "LEFT JOIN pg_catalog.pg_attrdef defaults ON defaults.adrelid=attribute.attrelid AND defaults.adnum=attribute.attnum "
+            f"WHERE namespace.nspname={schema} AND relation.relname={name} "
+            "AND attribute.attnum>0 AND NOT attribute.attisdropped ORDER BY attribute.attname")
+
+
+def _green_streak(days, current_date):
+    days.sort(key=lambda day: day["date"])
+    expected = datetime.date.fromisoformat(current_date)
+    consecutive = 0
+    for day in reversed(days):
+        if (datetime.date.fromisoformat(day["date"]) != expected
+                or day.get("overall") != "green" or day.get("needs_agent_review")
+                or any(value is not True and value != "not_applicable"
+                       for value in day.get("checks", {}).values())):
+            break
+        consecutive += 1
+        expected -= datetime.timedelta(days=1)
+    return consecutive
+
+
 def row_count(family, conn, table):
-    rows = _query(family, conn, f"SELECT COUNT(*) FROM {table}")
+    rows = _query(family, conn, f"SELECT COUNT(*) FROM {_table_sql(family, table)}")
     return int(rows[0][0]) if rows else None
 
 
 def checksum(family, conn, table):
     if family == "mysql":
-        rows = _query(family, conn, f"CHECKSUM TABLE {table}")
+        rows = _query(family, conn, f"CHECKSUM TABLE {_table_sql(family, table)}")
         return str(rows[0][1]) if rows and rows[0][1] is not None else None
-    rows = _query(family, conn, f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {table} t")
+    rows = _query(family, conn, f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {_table_sql(family, table)} t")
     return rows[0][0] if rows and rows[0][0] is not None else None
 
 
@@ -224,15 +285,7 @@ def columns(family, conn, table):
     """Column fingerprint keyed by name -> {type, nullable, default} — strengthened from
     a name-only comparison (the confirmed gap: two tables with identically-named columns
     of different types/nullability/defaults used to report no drift at all)."""
-    if family == "mysql":
-        rows = _query(family, conn,
-                      "SELECT column_name, column_type, is_nullable, column_default FROM information_schema.columns "
-                      "WHERE table_schema=DATABASE() AND table_name=%s ORDER BY column_name",
-                      (table,))
-    else:
-        rows = _query(family, conn,
-                      "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns "
-                      "WHERE table_name=:t ORDER BY column_name", {"t": table})
+    rows = _query(family, conn, _columns_sql(family, table))
     return {
         str(r[0]).strip(): {"type": str(r[1]), "nullable": str(r[2]),
                              "default": (str(r[3]) if r[3] is not None else None)}
@@ -304,7 +357,7 @@ def db_headroom_pct(db_instance_id):
 
 def measure_replication_lag(cfg, family, source_conn, target_conn):
     """Returns (lag_seconds_or_None, mechanism_or_None). mechanism is one of
-    "dms"/"mysql_replica_status"/"postgres_replica_status"/None (nothing configured for
+    "dms"/"mysql_replica_status"/"postgres_logical_requires_review"/None (nothing configured for
     this engagement — the caller treats that as "not_applicable", not "unknown")."""
     dms_task_id = cfg.get("dms_task_id")
     dms_instance_id = cfg.get("dms_replication_instance_id")
@@ -320,10 +373,12 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
                 Period=300, Statistics=["Maximum"],
             )
             points = stats.get("Datapoints", [])
+            if not points:
+                return None, "dms"
             if points:
                 worst = max(float(p["Maximum"]) for p in points)
                 best = worst if best is None else max(best, worst)
-        # points missing/INSUFFICIENT_DATA for BOTH metrics -> None, not a guess of 0.
+        # Missing either required metric cannot establish the lag bound.
         return best, "dms"
 
     replica_side = cfg.get("mysql_replica_status_side")  # "source" or "target"
@@ -354,14 +409,7 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
 
     pg_side = cfg.get("pg_replication_lag_side")  # "source" or "target"
     if family == "postgres" and pg_side:
-        conn = target_conn if pg_side == "target" else source_conn
-        try:
-            rows = _query(family, conn,
-                          "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))")
-        except Exception:
-            return None, "postgres_replica_status"
-        val = rows[0][0] if rows else None
-        return (float(val), "postgres_replica_status") if val is not None else (None, "postgres_replica_status")
+        return None, "postgres_logical_requires_review"
 
     return None, None
 
@@ -394,10 +442,10 @@ def replication_errors(cfg):
 
 
 def run_day(cfg, source_conn, target_conn):
-    """checks{} 3-state model (replaces the old always-null placeholders):
+    """checks{} four-state model:
       True/False  — measured and passed/failed.
-      None        — SHOULD be measurable (something IS configured for it) but the data
-                    came back missing/INSUFFICIENT_DATA/unreachable — needs_agent_review,
+      None        — missing/INSUFFICIENT_DATA/unreachable, or pending full-period evidence
+                    review — needs_agent_review,
                     never a silent pass.
       "not_applicable" — genuinely nothing configured for this check on this engagement
                     (e.g. no DMS task, no customer test suite per Q18) — excluded from
@@ -414,6 +462,8 @@ def run_day(cfg, source_conn, target_conn):
         )
     family = source_family
     tables = cfg["tables"]
+    if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
+        raise ValueError("tables must be a nonempty list of table identifiers")
 
     _start_consistent_read(family, source_conn)
     _start_consistent_read(family, target_conn)
@@ -422,7 +472,7 @@ def run_day(cfg, source_conn, target_conn):
         for t in tables:
             sc, tc = row_count(family, source_conn, t), row_count(family, target_conn, t)
             row_check["detail"][t] = {"source": sc, "target": tc}
-            if sc != tc:
+            if sc != tc or sc is None:
                 row_check["pass"] = False
 
         checksum_tables = cfg.get("checksum_tables") or tables[:2]
@@ -436,7 +486,7 @@ def run_day(cfg, source_conn, target_conn):
         drift_check = {"pass": True, "detail": {}}
         for t in tables:
             sc, tc = columns(family, source_conn, t), columns(family, target_conn, t)
-            if sc != tc:
+            if sc != tc or not sc or not tc:
                 drift_check["pass"] = False
                 mismatched = sorted(k for k in (set(sc) & set(tc)) if sc[k] != tc[k])
                 drift_check["detail"][t] = {
@@ -480,16 +530,14 @@ def run_day(cfg, source_conn, target_conn):
         "replication_lag": lag_check,
         "replication_errors": repl_errors_check,
         "customer_test_suite": customer_test_suite_check,
+        "period_evidence": None,
     }
-    # Green/complete calc only ever considers checks that were actually measured this
-    # run — "not_applicable" (nothing configured) is excluded exactly like a check that
-    # doesn't exist for this engagement, never counted as either a pass or a review flag.
-    measured = [v for v in checks.values() if isinstance(v, bool)]
-    overall_green = all(measured) if measured else False
+    measured = [value for value in checks.values() if value != "not_applicable"]
+    overall_green = bool(measured) and all(value is True for value in measured)
     needs_review = (not overall_green) or any(v is None for v in checks.values())
 
     return {
-        "date": datetime.date.today().isoformat(),
+        "date": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         "checks": checks,
         "detail": {"row_count": row_check["detail"], "checksum": checksum_check["detail"],
                     "schema_drift": drift_check["detail"], "firing_alarms": firing_alarms,
@@ -569,12 +617,7 @@ def update_status_json(bucket, key, day_result, n_total):
             days[existing_idx] = day_result
         else:
             days.append(day_result)
-        consecutive = 0
-        for d in reversed(days):
-            if d.get("overall") == "green":
-                consecutive += 1
-            else:
-                break
+        consecutive = _green_streak(days, datetime.datetime.now(datetime.timezone.utc).date().isoformat())
         soak["consecutive_green"] = consecutive
         soak["n_total"] = n_total
         # S3 is now the single source of truth during the soak window — this timestamp is
@@ -677,7 +720,7 @@ def handler(event, context):
     cfg = {
         "source_engine": os.environ["SOURCE_ENGINE"],
         "target_engine": os.environ["TARGET_ENGINE"],
-        "tables": _env_json("TABLES", []),
+        "tables": json.loads(os.environ["TABLES"]),
         "checksum_tables": _env_json("CHECKSUM_TABLES", None),
         "alarm_names": _env_json("ALARM_NAMES", []),
         "target_db_instance_id": os.environ.get("TARGET_DB_INSTANCE_ID"),
@@ -707,6 +750,10 @@ def handler(event, context):
             "database connection was attempted for this invocation."
         )
 
+    if not isinstance(cfg["tables"], list) or not cfg["tables"]:
+        raise ValueError("TABLES must be a nonempty list of table identifiers")
+    for table in cfg["tables"]:
+        _table_parts(table)
     bucket = os.environ["DASHBOARD_BUCKET"]
     prefix = os.environ.get("DASHBOARD_PREFIX", "")
     status_key = f"{prefix}status.json"

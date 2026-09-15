@@ -9,14 +9,16 @@
 run it) / migration agent (Mode 3, with A4 signed)}
 **Timings below are:** {measured on the clone rehearsal / estimated — no rehearsal was run}
 
-**Roles:** operator: {name} · app owner: {name} · approver: {name}
-**Abort authority:** {name} — abort criteria at bottom apply at every step.
+**Operational contacts:** operator: {team/channel} · app owner: {team/channel}
+**Approval and abort authority:** confirmed context-and-mark block in `authorizations.md`
+(no identifying approval details); agreed abort criteria apply at every step.
 **Comms:** {channel} — post at start, at each ⏱ checkpoint, at completion/abort.
 
 ## T-24h — Prechecks
 | ✅ | Step | Command / action | Expect |
 |---|------|------------------|--------|
 | ▢ | Validation green (GATE 3) | see migration-plan.md Phase 7 | all ▢→✅ |
+| ▢ | Production settings effective before validation/soak | {parameter group, reboot/session checks} | durable commits, integrity checks, TLS/timezone, approved backups/availability |
 | ▢ | Parallel run passed: {N} consecutive green periods | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit block confirmed |
 | ▢ | **Mode 3:** cutover authorization confirmed (A4) + abort criteria agreed. **Mode 2:** handover acceptance confirmed (A4b) + abort criteria agreed with the customer's own team | authorizations.md §3 | that block's `**Confirmed:**` date present (no name — this checks the block exists and is marked, not who marked it) |
 | ▢ | Client inventory complete | migration-plan.md Phase 7.5 | every client repoint-ready |
@@ -26,6 +28,11 @@ run it) / migration agent (Mode 3, with A4 signed)}
 | ▢ | Alarms + dashboard on operator screen | CloudWatch dashboard {name} | no active alarms |
 
 ## T-0 — Execution
+
+**Offline/full-load-only branch:** replace CDC-drain steps with the rehearsed final
+full export/backup and replacement restore under a continuous source-write fence,
+then repeat final validation before repointing. The earlier Phase 6 copy is not current.
+Budget the entire copy/validation outage; in Mode 2 the customer executes this branch.
 
 > Steps 3–8 (the freeze window) run as **one pre-staged script per host** (staged and
 > dry-run-tested at T-24h) — the operator issues one command per host, not one per step.
@@ -49,12 +56,12 @@ run it) / migration agent (Mode 3, with A4 signed)}
 |---|-------|------|---------|--------|--------------|
 | ▢ | 1m | 1. Confirm CDC caught up | CDCLatencySource=0 ∧ CDCLatencyTarget=0 | metric=0 | wait / abort if climbing |
 | ▢ | 1m | 2. Maintenance mode ON | {app-specific} | banner up | — |
-| ▢ | 2m | 3. Freeze source ({read_only / stop-clients fallback}) | {exact command} | processlist: 0 writers | unfreeze, exit maint |
-| ▢ | 1m | 4. Final CDC drain | sleep 30; re-check latency=0 | =0 | resume, abort |
+| ▢ | 2m | 3. Freeze source | {fence all app/job reconnects; drain/terminate sessions and transactions; engine read-only controls supplementary} | no writers or prepared write transactions; reconnect fence tested | unfreeze, exit maint |
+| ▢ | 1m | 4. Final CDC drain | {fresh CloudWatch Source/Target metrics and applied source checkpoint} | post-freeze datapoints =0; missing/stale blocks | resume, abort |
 | ▢ | 1m | 5. Stop forward task | `aws dms stop-replication-task --replication-task-arn {fwd-arn}` | `stopped` | restart task |
 | ▢ | 2m | 6. Spot-validate {3-5 critical tables} | {prepared count/checksum commands} | match | ROLLBACK |
 | ▢ | 2m | 7. Reset AUTO_INCREMENT / sequences on target | {generated statements file} | next-val > max | ROLLBACK |
-| ▢ | 1m | 8. Start REVERSE replication (fresh start from the freeze point — task must be never-run; see cutover-procedures.md step 8 note) | `aws dms start-replication-task --replication-task-arn {rev-arn} --start-replication-task-type start-replication` | `running` | note: rollback now lossy — decide |
+| ▢ | 1m | 8. Start REVERSE replication (fresh start from freeze point, never-run task) | {retain source app/job fence; clear read-only controls for ordinary DMS SQL apply}; `aws dms start-replication-task --replication-task-arn {rev-arn} --start-replication-task-type start-replication` | `running`; apply permissions rehearsed; source app writers still blocked | abort unless alternative rollback/RPO explicitly confirmed |
 | ▢ | 1m | 9. Repoint: {secret update / DNS swap / config+unit change} | {exact command(s) per client} | — | revert repoint |
 | ▢ | 3m | 10. Refresh/restart clients ({coordinated / rolling-with-frozen-source}) | {per-client commands} | services up | revert + restart |
 | ▢ | 2m | 11. **Bidirectional verify** | app health = UP **and** target processlist shows {expected client IPs, ~pool counts} | both | ROLLBACK |

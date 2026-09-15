@@ -37,12 +37,15 @@ calls out C5 for, not RAM. Same size tier, swap R for C: `dms.c5.large` for dev/
 **Query to profile LOB sizes:**
 ```sql
 -- MySQL: Find actual max LOB sizes
-SELECT table_name, column_name,
-  MAX(LENGTH(column_name)) AS max_bytes
-FROM your_db.your_table GROUP BY table_name, column_name;
+SELECT MAX(OCTET_LENGTH(`your_lob_column`)) AS max_bytes
+FROM `your_db`.`your_table`;
 ```
 
-**Recommendation:** Use Limited LOB Mode with `LobMaxSize` set to the 99th percentile of your actual LOB sizes. Only use Full LOB mode if you cannot afford to truncate any LOBs.
+**Recommendation:** Use a non-truncating Full LOB mode unless a verified upper bound,
+including future CDC writes, fits Limited LOB mode. Set `LobMaxSize` in KB at or above
+that bound (round bytes up to KB); a percentile is not a safe limit. If the maximum is
+unknown or exceeds the supported limit, use Full LOB mode and test performance. Never
+treat truncation as an acceptable default.
 
 ## Task Types
 
@@ -102,9 +105,18 @@ aws dms create-replication-task \
   --target-endpoint-arn $TARGET_ARN \
   --replication-instance-arn $INSTANCE_ARN \
   --migration-type "full-load" \
-  --table-mappings file://table-mappings.json \
-  --enable-premigration-assessment-run
+  --table-mappings file://table-mappings.json
+
+aws dms start-replication-task-assessment-run \
+  --replication-task-arn "$TASK_ARN" \
+  --service-access-role-arn "$ASSESSMENT_ROLE_ARN" \
+  --result-location-bucket "$ASSESSMENT_BUCKET" \
+  --assessment-run-name "pre-migration-assessment"
 ```
+
+Set `TASK_ARN` to the created task's ARN. The assessment role must trust DMS and have
+access to the result bucket (and its KMS key, if used). Wait for the assessment run to
+finish and review its results before starting replication.
 
 This checks:
 - Source DB connectivity and permissions

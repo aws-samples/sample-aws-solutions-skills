@@ -8,6 +8,9 @@
 
 ## The four integration patterns (pick per what the customer has)
 
+In these patterns, use the soak target only for read-only tests; writing suites receive
+an isolated rehearsal-clone endpoint and clone-scoped credentials instead.
+
 | Customer has | Integration | Who runs it | Evidence back |
 |--------------|-------------|-------------|---------------|
 | **CI pipeline** (Jenkins/GitHub Actions/GitLab/CodePipeline) with a test stage that takes a DB endpoint/profile | Ask for a **parameterized run**: they trigger the existing job with the DB host/secret overridden to the target (most test stages already read `DB_HOST`/JDBC URL from env or a profile). If the runner is outside the VPC, provide the private endpoint via their existing runner network path — never a public endpoint | Customer's CI | The CI run URL + pass/fail counts, pasted or screenshotted into the soak report row |
@@ -17,11 +20,12 @@
 
 ## Rules
 
-1. **Read-only vs writing tests.** Ask which the suite is. Write-tests are fine against a
-   rehearsal clone or a soaking target **before** it becomes authoritative, but their
-   writes must be excluded from row-count/checksum comparisons (tag a test window, or
-   diff-check only outside it). Never run customer write-tests against the target after
-   cutover authorization without noting the window.
+1. **Read-only vs writing tests.** Ask which the suite is. Run write-tests only against
+   an isolated rehearsal clone, not the real CDC/soak target. Excluding a time window
+   does not undo persistent inserts, updates, deletes, or external side effects. If the
+   target was contaminated, block readiness, rebuild/reseed it from an authoritative
+   source checkpoint, catch up CDC, revalidate, and restart the green streak. Keep soak
+   traffic read-only; run write-load tests against the clone.
 2. **Their tests are immutable.** If a test fails on the target, the finding goes in the
    plan (migration defect? pre-existing failure? environment config?) — the agent never
    "fixes" the test to make it pass. Ask the customer to run the same suite against the
@@ -30,7 +34,8 @@
    (`{suite: n pass / n fail}`) + the run log/URL referenced in `migration-plan.md`
    Phase 7.7. When deep validation was chosen: the final pre-cutover run gets its own
    confirmed block in `authorizations.md`.
-4. **Load tests** (k6/JMeter/Gatling/nGrinder): run against the target during the soak at
+4. **Load tests** (k6/JMeter/Gatling/nGrinder): run read-only tests against the target and
+   writing tests against the isolated clone at
    production-like concurrency — this is the deep-validation performance input. Compare
    p95/p99 against the source baseline from Phase 2, not against absolute thresholds.
 5. **Secrets**: the runner gets the target credentials the same way everything else does

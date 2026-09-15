@@ -2,12 +2,16 @@
 """Generates the ONE link handed to the customer for a soak window, per
 execution-runbooks.md §Soak automation / dashboard.md §Presigned-URL viewing.
 
-Run this ONCE, at soak start, after dashboard/index.html + assets/ + the initial
+Run this at soak start, and renew before expiry, after dashboard/index.html + assets/ + the initial
 status.json/activity-log.jsonl have been uploaded to the dashboard S3 bucket (see
 cdk-stacks.md §Soak automation infra for the bucket + upload step). It does two things:
 
 1. Presigns a GET URL for every file the page needs (index.html, both assets, status.json,
-   activity-log.jsonl), each valid for the same duration — the soak length (1/3/7 days).
+   activity-log.jsonl), each valid for the same duration. Use 129600s (1.5 days) or
+   302400s (3.5 days) to cover the 1/3-day tier plus an exit buffer. A 7-day tier needs
+   648000s (7.5 days) of coverage, but S3 SigV4 caps EACH signature at 604800s: issue
+   604800s, renew by day 6, and have the customer reopen the NEW link. Rewriting the
+   bucket's index does not refresh URLs already embedded in an open browser page.
 2. Rewrites index.html so its CSS href / JS src / data-source globals point at those
    presigned URLs instead of relative paths, then re-uploads that rewritten copy — and
    THIS is the part that would otherwise be a subtle, easy-to-miss bug: a relative fetch

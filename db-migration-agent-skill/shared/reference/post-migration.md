@@ -15,17 +15,17 @@
    major-version gaps, [version-upgrades.md](version-upgrades.md) "After the upgrade".
 3. **Confirm alarms are quiet** and reverse replication lag ≈ 0; record the T+24h check
    in the plan.
-4. **Confirm target backups and Multi-AZ are back on** — both were deliberately off
-   during the load/CDC window (`execution-runbooks.md` §Target Hygiene During Load/CDC).
-   Re-enabling them is easy to forget once attention moves to performance tuning; check it
-   explicitly here rather than assuming the cutover runbook step actually ran.
+4. **Confirm target backup retention and availability match the approved production
+   configuration** (`execution-runbooks.md` §Target Hygiene During Load/CDC). Aurora
+   backups and multi-AZ storage were never disabled; verify its planned reader/failover
+   topology separately. Any approved RDS load-only changes must already be restored.
 
 ## Return to steady state (after the T+24h watch)
 
-4. **Swap the parameter group** migration → production ([../patterns/cdk-stacks.md](../patterns/cdk-stacks.md)
-   generates both) and apply — note which parameters are reboot-scoped and schedule
-   accordingly. This reverts import-only settings (`innodb_flush_log_at_trx_commit`,
-   relaxed checks) and enforces the production TLS posture.
+4. **Verify the production parameter group remains active** ([../patterns/cdk-stacks.md](../patterns/cdk-stacks.md)
+   generates both). The migration → production swap, required reboots, and connection
+   recycling happen **before Phase 7 validation and soak**, not after the first day of
+   production. Verify effective durability, integrity checks, TLS, and source timezone.
 5. **Scale down** the instance class to steady-state size (the import-sized instance is
    pure cost now).
 6. **Restore connection-pool settings** on clients (the 30s `maxLifetime` cutover value →

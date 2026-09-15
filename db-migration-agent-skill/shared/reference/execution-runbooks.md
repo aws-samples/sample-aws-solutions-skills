@@ -8,6 +8,21 @@
 
 ## Method-Specific Procedures
 
+Credential-bearing SQL below is a template for **on-host, in-memory execution only**:
+fetch secrets there and submit via a driver/stdin, never argv or a file with substituted
+values. Disable shell tracing/history and redact diagnostics. Password hashes (including
+SQL Server login hashes) are credentials too: stream directly to the target securely,
+never save the generated login statements in engagement files.
+
+**Offline/full-load-only methods:** Phase 6 copies are rehearsal data, not a current
+production target. Without proven CDC, use the static-validation window in
+`engagement-safety.md`, not a CDC soak. Budget a **final complete export/backup and
+replacement restore inside the Phase 8 write freeze**, followed by final validation
+before repointing clients. Keep every source writer fenced throughout. Mode 3 needs
+A4 first; in Mode 2 the customer's team executes this final-copy procedure after
+handover. If copy plus validation cannot fit the outage, stop and reselect a CDC method.
+Never cut over the earlier online copy.
+
 ### If mysqldump / pg_dump (small DBs, downtime OK)
 
 ```bash
@@ -62,7 +77,7 @@ aws rds restore-db-cluster-from-s3 \
   --source-engine mysql \
   --source-engine-version 8.0.36 \
   --master-username admin \
-  --master-user-password $NEW_PASS
+  --manage-master-user-password
 ```
 
 **Requirements:**
@@ -84,7 +99,7 @@ See [dms-best-practices.md](dms-best-practices.md) for complete DMS configuratio
 - MySQL/MariaDB: `binlog_format=ROW`, `binlog_row_image=FULL`, `log_bin=ON`
 - PostgreSQL: `wal_level=logical`, available replication slots
 
-### CDC Proof Probe (any CDC-based method — required before GATE 3, pre-authorized at GATE 2)
+### CDC Proof Probe (any CDC-based method — required before GATE 3, A2 required)
 
 A CDC task showing `running` with zero insert/update/delete counters proves the plumbing
 is connected, not that it works — an all-zeros state is indistinguishable from "no changes
@@ -92,7 +107,9 @@ have happened yet" and "changes aren't actually propagating." This is common on 
 just-migrated non-production database where nothing has written since the data was
 generated/loaded. Don't sign GATE 3 on an unproven CDC path.
 
-Approving a CDC-based method at GATE 2 pre-authorizes this probe — do not ask again here:
+GATE 2 approves the method, not source mutations. Obtain a separate confirmed A2 block
+for **each** source CREATE, INSERT, UPDATE, DELETE, and DROP before that operation;
+never bundle them. If any is declined, stop and record CDC proof as blocked:
 
 1. Create one throwaway object the CDC task will replicate — a scratch table
    (`<schema>._cdc_probe`, or the engine's equivalent) is cleaner than touching a real
@@ -148,12 +165,12 @@ multi-day window.
 `shared/scripts/soak_check.py` is the **reference implementation** of the mechanical half
 of the checklist — row count, checksum, schema drift, alarm state, storage headroom,
 replication lag, and replication errors — against source and target directly, no LLM
-involvement needed for the routine all-green case. Keep using it as-is for a same-day
+involvement needed to collect samples; full-period acceptance still needs review. Keep using it as-is for a same-day
 check run by hand, or for debugging: it's plain Python + the `mysql`/`psql`/`aws` CLIs,
 easy to run from any machine that can reach both databases, over a TLS-verified
 connection using a dedicated **read-only** credential (never the admin/master secret —
 see §Dedicated read-only credential below). `replication_lag` is measured from DMS
-CloudWatch metrics or a native `SHOW REPLICA STATUS`/PostgreSQL replay-lag query when
+CloudWatch metrics or native `SHOW REPLICA STATUS` when
 one of those is configured for the engagement, and is `"not_applicable"` (not `null`)
 when neither is — see `dashboard.md`'s field notes for the full 4-state model
 (`true`/`false`/`null`/`"not_applicable"`). `customer_test_suite` can never be measured
@@ -162,15 +179,33 @@ provided at discovery Q18, in which case it legitimately stays `null` (a real
 "needs review," not a bug) until you or the customer's test run supplies a value; never
 guess it.
 
+These are **scheduled samples, not whole-day monitoring**: DMS lag covers the preceding
+15 minutes; native lag, replication errors, and alarms are invocation-time observations.
+A GREEN sample cannot rule out recovered overnight incidents. Before accepting each
+green day, review the full period's retained replication logs and CloudWatch alarm/metric
+history, including scheduled-job windows; missing evidence blocks that day's acceptance
+and soak exit. Both scripts emit `period_evidence: null`, blocking GREEN/complete until
+reviewed. Record the review in the daily report, attach evidence to that date's `detail`,
+and set `period_evidence` to `true` only when coverage and incident resolution pass.
+Resolve any other `null`/RED checks from real evidence too; recompute `overall` and
+`needs_agent_review` using the same all-required-checks rule, then call that path's
+`update_status_json`, `append_activity_log`, and `write_soak_report` with the corrected
+day. Never edit just the streak or `state`. A new invocation replaces that day's sample
+and requires review again. Native PostgreSQL logical lag is
+not automated: setting `pg_replication_lag_side` returns `null`, never physical replay
+age. Review subscription workers/table sync plus the source slot's confirmed flush LSN
+and a timed end-to-end apply observation; do not convert WAL bytes or physical replay
+timestamps into seconds. Keep the day blocked until that evidence resolves the check.
+
 **`soak-config.json` schema** (written once by the agent at Phase 7.7 setup, next to
 `status.json`):
 
 ```json
 {
   "source": {"engine": "mysql", "host": "10.x.x.x", "port": 3306, "user": "soak_ro",
-             "password": "...", "ssl_ca": null, "ssl_insecure": true},
+             "database": "your_db", "password_env": "SOURCE_DB_PASSWORD", "ssl_ca": null, "ssl_insecure": true},
   "target": {"engine": "mysql", "host": "target.rds.amazonaws.com", "port": 3306,
-             "user": "soak_ro", "password": "..."},
+             "user": "soak_ro", "database": "your_db", "password_env": "TARGET_DB_PASSWORD"},
   "tables": ["customers", "orders", "order_items"],
   "checksum_tables": ["customers"],
   "alarm_names": ["target-cpu-high", "target-replica-lag"],
@@ -192,6 +227,13 @@ or `pg_replication_lag_side` for `replication_lag` — leave all three unset/`nu
 engagement has no replication mechanism to measure, and the check reports
 `"not_applicable"` instead of getting permanently stuck. `dms_task_arn` similarly drives
 `replication_errors`.
+
+Set the named password variables only in the on-host environment, from a secure prompt
+or Secrets Manager; never write values into JSON, generated scripts, or the dashboard
+bucket. Subprocesses use `MYSQL_PWD`/`PGPASSWORD`, not argv. `tables` must be nonempty;
+names may be `schema.name`, with double-quoted/backtick components for literal dots.
+Automation supports UTC calendar days only; compressed hourly windows require the
+manual, explicitly waived process in `engagement-safety.md`.
 
 **TLS — three tiers per side, chosen independently for `source`/`target`, never a
 silent plaintext fallback:**
@@ -232,8 +274,9 @@ for `SHOW REPLICA STATUS` on MySQL/MariaDB; `pg_monitor`/`pg_read_all_stats` —
 `SELECT` on `pg_stat_replication`, which is world-readable by default — for the
 PostgreSQL query). Create a dedicated user for exactly this on **both** source and
 target, store each in its own Secrets Manager secret, and point `SOURCE_SECRET_ARN`/
-`TARGET_SECRET_ARN` (Lambda) or `soak-config.json`'s `source.password`/`target.password`
-(script) at those — never at the cluster's generated admin secret:
+`TARGET_SECRET_ARN` (Lambda) at those. For the CLI, retrieve the same secrets into the
+on-host variables named by `source.password_env`/`target.password_env`; never store
+password values in the config or use the cluster's generated admin secret:
 
 ```sql
 -- MySQL/MariaDB (run on each side, scoped to the actual schema being checked)
@@ -244,7 +287,7 @@ GRANT REPLICATION CLIENT ON *.* TO 'soak_ro'@'%';   -- only if SHOW REPLICA STAT
 -- PostgreSQL
 CREATE ROLE soak_ro WITH LOGIN PASSWORD '<generated>';
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO soak_ro;
-GRANT pg_read_all_stats TO soak_ro;   -- only if the pg_last_xact_replay_timestamp query is in use
+GRANT pg_read_all_stats TO soak_ro;   -- only if required for reviewed logical-replication evidence
 ```
 
 No `INSERT`/`UPDATE`/`DELETE`/`CREATE`/`DROP` — verify this by attempting a throwaway
@@ -334,15 +377,19 @@ filter on `needs_agent_review=true`, wired in `cdk-stacks.md` §soak-stack.ts) o
 separate, genuinely-nobody-noticed failure mode** — don't rely on someone having the
 dashboard open. `cdk-stacks.md`'s soak-stack.ts wires both a CloudWatch Alarm on the
 function's own `Errors` metric and a dead-letter queue on the EventBridge Scheduler
-target (so an invocation that exhausts its retries is still visible), both feeding the
+target (so an invocation that exhausts its retries is still visible), plus an
+`Invocations < 1` daily alarm with missing data breaching for a schedule that never fires,
+all feeding the
 same SNS topic the rest of this skill's monitoring already uses
 ([preflight-iam-cost.md](preflight-iam-cost.md) §4) — not a second, disconnected alerting
 channel.
 
 **Whichever path runs it, a missed run needs to be visible on its own** — a silently
 skipped day looks identical to "waiting for tomorrow" otherwise. Both `soak_check.py` and
-`soak_check_lambda.py` write `soak.last_checked_at` on every run; the dashboard flags it
-directly if more than 36 hours pass without an update (a dedicated check, not the existing
+`soak_check_lambda.py` write `soak.last_checked_at` on every run. Seed `soak.started_at`
+when activating the schedule, before its first invocation; the dashboard uses that
+timestamp until the first result. Missing both timestamps is itself flagged. It also
+flags more than 36 hours without an update (a dedicated check, not the existing
 15-minute chat-staleness badge — that one assumes an active session, and would falsely
 flag every normal day of a once-daily cadence). Confirm this banner is actually visible on
 the dashboard before walking away from a multi-day soak.
@@ -387,16 +434,15 @@ object seeded) are uploaded to the bucket:
 
 ```bash
 python3 shared/scripts/generate_presigned_urls.py \
-  --bucket <dashboard-bucket-name> --expires-seconds 561600   # 561600s = 6.5 days — slightly
-                                                                # UNDER the tier's nominal 7
-                                                                # days (604800 is the hard SigV4
-                                                                # ceiling), so the link itself is
-                                                                # never what expires first if
-                                                                # soak-exit slips a few hours past
-                                                                # the nominal window. Re-running
-                                                                # the script (safe, see its
-                                                                # docstring) extends it further.
+  --bucket <dashboard-bucket-name> --expires-seconds 604800
 ```
+
+Sign for **more than nominal** where S3 allows: `129600` seconds (1.5 days) for the 1-day
+tier, `302400` (3.5 days) for the 3-day tier. A 7-day tier needs **648000 seconds (7.5
+days) of coverage**, exceeding S3 SigV4's per-URL ceiling of `604800`. Use the command
+above, renew by day 6 (earlier if credentials expire), and have the customer reopen the
+**new** link. Re-running does not extend URLs embedded in an open page. Renew again if
+the soak resets or runs long; retain the half-day soak-exit buffer.
 
 This presigns every file the page needs (`index.html`, both assets, `status.json`,
 `activity-log.jsonl`) for the same duration, rewrites `index.html` so its CSS/JS/data
@@ -404,7 +450,7 @@ references are absolute presigned URLs instead of relative paths (a relative
 `fetch('status.json')` from a page loaded via a presigned URL drops the query string
 entirely and 403s against a private bucket — this rewrite is what avoids that), and prints
 one line prefixed `CUSTOMER LINK:` — that line, and only that line, is what you hand the
-customer. One link, valid for the whole soak window; presigned URLs support repeated GETs
+customer. One current link, renewed as described above; presigned URLs support repeated GETs
 until they expire, so the dashboard's existing 5-second polling just keeps working against
 it without anything being regenerated mid-window.
 
@@ -437,10 +483,11 @@ cat /backup/xtrabackup_binlog_info        # e.g.  mysql-bin.000042  1337  [gtid-
 
 # 3. Catch up the delta from the RECORDED position — two equivalent channels:
 # 3a. Native binlog replication (Aurora as replica of the source):
-mysql -h $AURORA_ENDPOINT -u admin -p -e "
+mysql -h "$AURORA_ENDPOINT" -u admin -p <<SQL
   CALL mysql.rds_set_external_source ('$SOURCE_HOST', 3306, '$REPL_USER', '$REPL_PASS',
-       'mysql-bin.000042', 1337, 0);
-  CALL mysql.rds_start_replication;"
+       'mysql-bin.000042', 1337, 1);
+  CALL mysql.rds_start_replication;
+SQL
 #     Requires a REPLICATION SLAVE user on the source and binlog retention long enough
 #     to cover the bulk-copy + restore time: on the source,
 #     SET GLOBAL binlog_expire_logs_seconds ≥ (copy+restore hours × 3600) × 2.
@@ -464,6 +511,13 @@ high-water-mark step is mandatory), **DDL is not replicated** (freeze schema cha
 the migration window), every table needs a PK or `REPLICA IDENTITY FULL`, and large
 objects (`lo`) are not carried.
 
+For credential-bearing replication setup here and in the MySQL example, supply SQL via
+stdin or a driver from on-host memory, never `-c`/`-e` or a generated credential file.
+Retrieve secrets on-host without shell tracing/history, escape SQL literals and libpq
+connection-string values with the appropriate client quoting routines, and redact
+diagnostics. Never paste expanded SQL into the engagement. Ensure PostgreSQL's
+subscription host trusts the source CA for `verify-full`; do not silently disable TLS.
+
 ```bash
 # 0. Prerequisites — SOURCE postgresql.conf (restart if wal_level changes):
 #    wal_level=logical, max_replication_slots ≥ 2, max_wal_senders ≥ 2
@@ -478,10 +532,11 @@ pg_dump --schema-only --no-owner --no-privileges -h $SOURCE -U postgres your_db 
 psql -h $SOURCE -U postgres -d your_db -c "CREATE PUBLICATION mig_pub FOR ALL TABLES;"
 
 # 3. On TARGET: subscription — initial data copy + streaming happen automatically:
-psql -h $AURORA_ENDPOINT -U postgres -d your_db -c "
+psql -h "$AURORA_ENDPOINT" -U postgres -d your_db <<SQL
   CREATE SUBSCRIPTION mig_sub
-  CONNECTION 'host=$SOURCE port=5432 dbname=your_db user=repl_user password=...'
-  PUBLICATION mig_pub;"       # creates its own slot on the source
+  CONNECTION 'host=$SOURCE port=5432 dbname=your_db user=repl_user password=$REPL_PASS sslmode=verify-full'
+  PUBLICATION mig_pub;
+SQL
 
 # 4. Monitor: initial sync state per table, then ongoing lag:
 psql -h $AURORA_ENDPOINT -c "SELECT srsubstate, count(*) FROM pg_subscription_rel GROUP BY 1;"
@@ -514,9 +569,7 @@ aws rds create-db-cluster \
   --engine aurora-mysql \
   --replication-source-identifier arn:aws:rds:REGION:ACCOUNT:db:source-rds-instance
 
-# Wait for replica to sync, then promote
-aws rds promote-read-replica-db-cluster \
-  --db-cluster-identifier aurora-replica-cluster
+# Wait for replica to sync; promotion is a Phase 8 action, not Phase 6 preparation.
 ```
 
 **Only works from RDS (not EC2 directly).** For EC2 → Aurora, use DMS or XtraBackup.
@@ -525,14 +578,11 @@ aws rds promote-read-replica-db-cluster \
 
 ```bash
 aws rds create-blue-green-deployment \
-  --blue-green-deployment-name "migrate-to-aurora" \
+  --blue-green-deployment-name "mysql-upgrade" \
   --source "arn:aws:rds:REGION:ACCOUNT:db:source-instance" \
-  --target-engine-version "8.0.mysql_aurora.3.07.1"
+  --target-engine-version "$SUPPORTED_RDS_MYSQL_VERSION"
 
-# Wait for green to be AVAILABLE and synchronized, then:
-aws rds switchover-blue-green-deployment \
-  --blue-green-deployment-identifier $BGD_ID \
-  --switchover-timeout 300
+# Stop after green is AVAILABLE and synchronized; switchover belongs to Phase 8 only.
 ```
 
 ### If Oracle Data Pump (Oracle → RDS Oracle, primary method)
@@ -713,20 +763,27 @@ Two gotchas, both confirmed against a live MySQL 8.0 source:
 
 Don't apply `schema_objects.sql` in one shot alongside the table structure. Sequence it:
 
+Before any dump/restore that includes events, set and verify the target event scheduler
+OFF; keep it OFF through validation/soak even after applying production parameters.
+Record each source event's intended enabled state for the controlled Phase 8 activation.
+
 1. **Create base tables** on the target — structure only, no triggers yet.
 2. **Bulk-load the data** (DMS Full Load, mysqldump restore, or physical backup restore).
    No triggers exist on the target yet, so there's no per-row trigger overhead during the
    load and no risk of triggers double-processing logic the source side already applied
    before the data was captured.
 3. **Once the data load completes** (and, if running CDC, once it's caught up to
-   near-real-time) — create views, procedures, functions, and events. These don't touch
-   existing rows; they only need the table structure to exist, which it already does.
+   near-real-time) — create views, procedures, and functions. Create events explicitly
+   **DISABLE**d or defer them entirely. Keep target jobs and the event scheduler inactive
+   throughout load/CDC/soak; enabled events can write immediately.
 4. **Create triggers last, immediately before cutover** — not "create then disable."
    MySQL triggers have no native enable/disable toggle; the only way to keep one inactive
    during the load is to defer its creation entirely until you're ready for it to be live.
 5. **At cutover**, triggers are now active, so genuinely new application writes (i.e.,
    ones that happen after cutover) get the trigger logic applied fresh — matching how they
    behaved on the source.
+6. Enable only approved target events/jobs after forward CDC stops and source jobs are
+   fenced at Phase 8; verify exactly one active scheduler for each job.
 
 Concretely: a `BEFORE INSERT` trigger that defaults a NULL column (or, more generally, any
 trigger with side effects — audit logging, counters, notifications) would otherwise fire
@@ -735,18 +792,18 @@ cost (millions of trigger invocations for data that's just being copied, not cre
 a correctness risk (replaying migration-time bulk data through logic that was written for
 live application traffic, not backfill).
 
-### Target Hygiene During Load/CDC — Backups and Multi-AZ Off Until Cutover
+### Target Hygiene During Load/CDC — Preserve Engine-Specific Recovery
 
-Same principle as deferring triggers, applied to the target instance itself, for any
-method: **turn off automated backups and Multi-AZ on the target while the load/CDC window
-is open**, then re-enable both as part of the cutover sequence, before the rollback window
-starts (`post-migration.md`'s T+1h→T+24h watch is also where you'd confirm this actually
-happened, not just that it was planned). Backups taken mid-load are backups of a
-half-loaded, not-yet-consistent database — worthless as a recovery point and pure overhead
-on the target during exactly the window you want its write throughput unconstrained.
-Multi-AZ during this window adds synchronous replication overhead for no benefit, since
-the target isn't serving production traffic yet. Re-enabling both is a single parameter
-change each; do it before you consider cutover complete, not as an afterthought days later.
+Keep approved backup retention and availability by default. Aurora automated backups
+cannot be disabled with retention zero, and its multi-AZ storage is not an RDS standby
+toggle; choose reader/failover capacity independently. For RDS only, consider load-only
+retention/Multi-AZ changes if explicitly approved and compatible with the engine and
+replication method. Crossing zero retention can cause an outage and remove required
+binlogs; budget that and restore production settings **before Phase 7 validation/soak**.
+Apply the production parameter group at the same boundary, reboot/recycle sessions as
+required, and verify effective durability, integrity checks, TLS, and timezone before
+testing. Re-enabling checks does not retroactively validate loaded data: run the
+orphan/constraint validation battery.
 
 ```bash
 # PostgreSQL: Functions, triggers, views, types

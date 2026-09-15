@@ -13,7 +13,7 @@
 | Source | {engine+version} on {EC2 instance-id / on-prem host} |
 | Target | {aurora-mysql / rds-postgresql / …} {version} in {region} |
 | Method (approved GATE 2) | {method} — *why:* {reason} |
-| Engagement parameters (GATE 1) | rehearsal: {none/one/repeat-until-converged} · parallel run: {N} consecutive green {days/hours} ({risk tier: Low/Moderate/High} — signal: {…}) · validation depth: {…} · rollback: {reverse replication / snapshot+RPO ack / write-log replay} |
+| Engagement parameters (GATE 1) | rehearsal: {none/one/repeat-until-converged} · parallel run: {N} consecutive green days ({risk tier: Low/Moderate/High} — signal: {…}; hourly compression: manual tracking + waiver only) · validation depth: {…} · rollback: {reverse replication / snapshot+RPO ack / write-log replay} |
 | Cutover window | {date/time, TZ} |
 | Downtime budget | {seconds/minutes/hours} · RPO on rollback: {zero / acknowledged loss} |
 | Status | ⏳ Phase {n} |
@@ -86,7 +86,11 @@
 - AUTO_INCREMENT/sequence high-water marks reset plan: ▢
 - App smoke test (read-only): ▢ · Version-gap checks (if major upgrade): ▢
 
-## Phase 7.5 — Client inventory (cutover blocked until every row is ✅✅)
+## Phase 7.5 — Client inventory (every repoint/revert plan staged and pool prep complete)
+
+Before cutover, all clients/consumers must be repoint-ready, not already repointed.
+Keep Repointed/Verified and consumer Executed/Verified unchecked until Phase 8; Mode 2
+hands those execution checks to the customer. Upstream changes must remain inactive.
 | Client | How it finds the DB (highest-priority source) | Config deployed from (repo/pipeline) | Change merged upstream | Pool prep done | Repointed | Verified on new DB processlist |
 |--------|-----------------------------------------------|--------------------------------------|:---:|:---:|:---:|:---:|
 | | | | ▢ | ▢ | ▢ | ▢ |

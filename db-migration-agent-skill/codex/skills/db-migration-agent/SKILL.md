@@ -2,7 +2,7 @@
 name: db-migration-agent
 description: |
   Plan and execute production database migrations to AWS managed services — MySQL, MariaDB,
-  PostgreSQL, Oracle, SQL Server, Db2 (on EC2, on-premises, or another cloud) to Amazon
+  PostgreSQL, Oracle, SQL Server (on EC2, on-premises, or another cloud) to Amazon
   Aurora or Amazon RDS, homogeneous or heterogeneous. Covers environment preflight,
   compatibility assessment, method selection (mysqldump, XtraBackup, pg_dump, logical
   replication, DMS Full Load + CDC, Read Replica, Blue/Green, Data Pump, native
@@ -167,7 +167,11 @@ over as a single copy-paste block and ask for the output).
    lightweight courtesy check-in (hard constraint 11), not one of GATES 1–4 — don't ask it
    like a real gate, just get a clear "yes" before running anything.
    (Translate this into the user's conversation language — see the Language rule; the quote above is the English form of the template, not a literal string.)
-2. Ask the **mode question** (`shared/reference/engagement-safety.md`) and
+2. **Before creating or updating any engagement record**, check for an existing plan,
+   authorizations, and dashboard. Ask fresh / resume at phase N / failed midway and
+   needs triage. Preserve every existing record; never reseed approval/progress evidence.
+   On resume, use the recorded mode unless the user explicitly confirms a change.
+   For a fresh engagement, ask the **mode question** (`shared/reference/engagement-safety.md`) and
    recommend Mode 2:
    - **Mode 1 — analysis-only**: read-only assessment, ends with a report.
    - **Mode 2 — migration-ready (recommended default)**: the full migration *except* the
@@ -179,7 +183,8 @@ over as a single copy-paste block and ask for the output).
      warnings and never propose it as the default.
    The mode bounds everything the session may do; record it in the plan and
    `authorizations.md` §1, and generate that mode's IAM guardrail policy.
-3. Create `migration-plan.md` and `authorizations.md` from the templates in the working
+3. For a fresh engagement only, create `migration-plan.md`
+   and `authorizations.md` from the templates in the working
    directory. Scaffold `dashboard/` the same moment (`shared/reference/dashboard.md`) —
    copy `dashboard.css`/`dashboard.js` verbatim, instantiate `dashboard.html` as
    `dashboard/index.html`, seed `status.json` with every phase `pending`, every
@@ -197,8 +202,7 @@ over as a single copy-paste block and ask for the output).
    http.server 8080` then open http://localhost:8080. This tracks phase progress and the 6
    cutover-readiness gates separately — share this URL with any stakeholder who wants to
    watch progress without reading chat transcripts." Do not start the server yourself.
-4. Ask the **current-state question**: fresh engagement / plan exists, resume at phase N
-   / migration failed midway, triage? Resume from the plan file if it exists.
+4. Confirm the starting/resume phase from the preserved plan before running preconditions.
 5. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
    account, region, source reachability, engine-version availability, quotas, IAM
    simulation. Report ✅/❌ table. **STOP on ❌ and wait.**
@@ -276,11 +280,11 @@ block to `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — 
 "approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
 must not proceed until that block's `**Confirmed:**` line is actually filled in). **If the
 chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
-replication), this approval also **pre-authorizes the CDC-proof probe** described in
+replication), plan the **CDC-proof probe** described in
 `execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a
-change is not optional at GATE 3, and asking for it as a separate mid-validation approval
-just adds a round-trip for something already implied by choosing a CDC method. No separate
-authorization needed when Phase 7 reaches it.
+change is not optional at GATE 3. Method approval does **not** authorize source writes:
+obtain a separate confirmed A2 block before each CREATE, INSERT, UPDATE, DELETE, and
+DROP; never bundle them. Declining a required probe operation blocks CDC proof.
 
 ### Phase 4–5: Provision the target
 
@@ -300,6 +304,11 @@ production: **rehearse first** against a clone (§Rehearsal) and record measured
 — they become the cutover runbook's time budget.
 
 ### Phase 7: Validate
+
+Before testing, apply the **production** parameter group and approved backup/availability
+settings; complete required reboots/session recycling and verify effective durability,
+integrity checks, TLS, and source timezone. Keep scheduled target jobs disabled until
+Phase 8. Validation/soak must not run against import-only settings.
 
 Per `shared/reference/validation-patterns.md`: row counts (all tables), checksums
 (critical tables), schema-object counts, FK orphans, app-level checks (collation order,
@@ -330,13 +339,18 @@ every row is ready**.
 
 ### Phase 7.7: Parallel-run soak (cutover readiness stays locked until it passes)
 
-Applies to Mode 2 handover depth (a) and to Mode 3. The target runs live and CDC-current
+Applies to CDC methods in Mode 2 handover depth (a) and Mode 3. Offline/full-load-only
+methods use the static-validation window and final frozen copy in
+`shared/reference/engagement-safety.md`; an old online copy is never cutover-current.
+The target runs live and CDC-current
 while production stays on the source, for the parallel-run length chosen at GATE 1
-(default 7 consecutive green days; compressed engagements may use hours). Each period:
+(risk-tier default: Low 1, Moderate 3, High 7 consecutive green days). The scripts support
+UTC calendar days only; hourly compression needs a recorded waiver and manual tracking.
+Each period:
 generate a report from `shared/templates/soak-report.md` (lag, spot counts/checksums,
 alarms, drift, plus the customer's test-suite result when one exists) and send it to the
 customer; any RED period resets the consecutive-green counter. Client discovery (7.5) runs
-alongside. Invite the customer to point read-only test traffic or load tests at the target
+alongside. Invite read-only test/load traffic at the target; write-tests use an isolated clone
 during this window. Cutover readiness unlocks only at **N consecutive greens + the confirmed
 soak-exit block** in `authorizations.md` — present the final soak report and stop with its
 own ACTION NEEDED block; the user's own `**Confirmed:**` mark is what counts, not the agent
@@ -376,8 +390,8 @@ and stop to ask whenever one trips.
 
 ### Phase 9: Post-migration
 
-Per `shared/reference/post-migration.md`: refresh statistics, swap to the production
-parameter group, scale down, compare against the Phase 2 baseline, keep the source +
+Per `shared/reference/post-migration.md`: refresh statistics, verify production parameters
+(already applied before Phase 7), scale down, compare against the Phase 2 baseline, keep the source +
 reverse replication through the rollback window, then decommission (with constraint 8's
 confirmation). Hand over the CDK project + plan as the customer's operational record. In
 Mode 2 this phase starts **after the customer reports their cutover complete** — offer it

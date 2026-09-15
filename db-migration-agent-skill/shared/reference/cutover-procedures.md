@@ -139,9 +139,12 @@ Record each consumer + its plan in the `migration-plan.md` client inventory (the
 their own rows).
 
 ### Completion criterion
-EVERY discovered client is repointed to the new RDS DNS endpoint and verified connected
-(bidirectionally — app health + DB-side processlist), and every replication/CDC consumer
-has executed its Step 4 plan.
+**Before cutover:** EVERY client has a reviewed repoint/revert plan, upstream change
+staged (not activated), and pool preparation complete; every replication/CDC consumer
+has an approved Step 4 restart plan. This is the client-inventory readiness gate.
+**After authorized cutover:** every client is repointed and verified bidirectionally
+(app health + new-DB processlist), and every consumer's plan is executed and verified.
+Mode 2 hands over these execution checks; the agent does not repoint to satisfy readiness.
 
 ---
 
@@ -153,16 +156,41 @@ has executed its Step 4 plan.
 
 ### Procedure
 
+Before the freeze, fence **all** application/job writers against reconnecting (roles,
+network access, and stopped services), then drain or terminate existing sessions and
+transactions. For PostgreSQL, `default_transaction_read_only` is only a new-session
+default, not an access-control fence: include inherited/write-capable roles and prepared
+transactions, terminate lingering app backends, and prove no writer remains. Keep the
+fence until the target is authoritative or rollback is complete. A read-only default
+alone, an empty active-query sample, or idle pooled connections do not prove quiescence.
+
+For an offline/full-load-only method, replace CDC steps 1/4/5 with the final complete
+copy under this freeze and final validation; never use the Phase 6 online copy as-is.
+
+The helper refreshes `LAG_WINDOW_START`/`LAG_WINDOW_END` for each query; use
+the task/instance identifiers from CloudWatch dimensions, not ARNs. At final drain,
+require datapoints timestamped after the freeze for **both** metrics, task status
+`running`, zero errored tables, and evidence that the saved source checkpoint applied.
+Missing/stale metrics or timeout means abort, not permission to stop forward replication.
+The MySQL reseed pipeline below uses on-host `MYSQL_PWD`; rehearse it against the target.
+
 ```bash
-# Step 1: Verify CDC is caught up
-aws dms describe-replication-tasks \
-  --filters Name=replication-task-arn,Values=$TASK_ARN \
-  --query 'ReplicationTasks[0].ReplicationTaskStats.{
-    CDCLatencySource: CdcLatencySource,
-    CDCLatencyTarget: CdcLatencyTarget,
-    TablesLoaded: TablesLoaded,
-    TablesErrored: TablesErrored
-  }'
+# Step 1: Verify task health and query CDC lag from CloudWatch
+show_dms_health_and_lag() {
+  LAG_WINDOW_START=$(date -u -d '2 minutes ago' +%FT%TZ)
+  LAG_WINDOW_END=$(date -u +%FT%TZ)
+  aws dms describe-replication-tasks \
+    --filters Name=replication-task-arn,Values=$TASK_ARN \
+    --query 'ReplicationTasks[0].{Status:Status,Stats:ReplicationTaskStats,Failure:LastFailureMessage}'
+  for metric in CDCLatencySource CDCLatencyTarget; do
+    aws cloudwatch get-metric-statistics --namespace AWS/DMS --metric-name "$metric" \
+      --dimensions Name=ReplicationInstanceIdentifier,Value="$DMS_INSTANCE_ID" \
+        Name=ReplicationTaskIdentifier,Value="$DMS_TASK_ID" \
+      --start-time "$LAG_WINDOW_START" --end-time "$LAG_WINDOW_END" \
+      --period 60 --statistics Maximum --query 'sort_by(Datapoints,&Timestamp)'
+  done
+}
+show_dms_health_and_lag
 # Verify: CDCLatencySource < 5, CDCLatencyTarget < 5, TablesErrored = 0
 
 # Step 2: Put application in read-only mode (disable write endpoints / feature flag)
@@ -178,7 +206,7 @@ aws dms describe-replication-tasks \
 mysql -h $SOURCE_HOST -u admin -p -e \
   "SET GLOBAL read_only = ON; SET GLOBAL super_read_only = ON;"
 mysql -h $SOURCE_HOST -u admin -p -e "SELECT @@global.read_only, @@global.super_read_only;"
-# PostgreSQL equivalent (new sessions only; also revoke INSERT/UPDATE/DELETE at app role):
+# PostgreSQL additional default ONLY — the writer/session fence above is mandatory:
 #   ALTER DATABASE your_db SET default_transaction_read_only = on;
 #
 # 3b. FALLBACK (no privilege — equally valid first-class option): QUIESCE by stopping write clients.
@@ -190,8 +218,9 @@ mysql -h $SOURCE_HOST -u admin -p -e "
   WHERE command NOT IN ('Sleep','Daemon','Binlog Dump') AND info IS NOT NULL;"
 # Expect ZERO active write/DML threads. Stopping the clients becomes the freeze mechanism.
 
-# Step 4: Wait for final CDC drain (10-30 seconds), then re-verify CDC latency = 0
+# Step 4: Re-query fresh CloudWatch datapoints after the freeze; missing/stale is NOT zero.
 sleep 30
+show_dms_health_and_lag
 
 # Step 5: Stop forward DMS task (source → target)
 aws dms stop-replication-task --replication-task-arn $TASK_ARN
@@ -202,14 +231,16 @@ aws dms stop-replication-task --replication-task-arn $TASK_ARN
 # Step 7: RESET TARGET HIGH-WATER MARKS — AUTO_INCREMENT / sequences are NOT carried by
 # DMS or binlog CDC. Without this, the first inserts on Aurora collide with existing PKs.
 # MySQL/MariaDB — emit ALTER statements for every auto_increment column and run them:
-mysql -h $AURORA_ENDPOINT -u admin -p -N -e "
-  SELECT CONCAT('ALTER TABLE \`', t.TABLE_NAME, '\` AUTO_INCREMENT = ',
-                IFNULL((SELECT MAX(\`', k.COLUMN_NAME, '\`) FROM \`', t.TABLE_NAME, '\`),0)+1, ';')
-  FROM information_schema.TABLES t
-  JOIN information_schema.COLUMNS k
-    ON k.TABLE_SCHEMA = t.TABLE_SCHEMA AND k.TABLE_NAME = t.TABLE_NAME
-   AND k.EXTRA LIKE '%auto_increment%'
-  WHERE t.TABLE_SCHEMA = 'your_db';" | mysql -h $AURORA_ENDPOINT -u admin -p your_db
+mysql -h "$AURORA_ENDPOINT" -u admin -N -B --raw your_db <<'SQL' | mysql -h "$AURORA_ENDPOINT" -u admin your_db
+SELECT CONCAT(
+  'SELECT COALESCE(MAX(`', REPLACE(COLUMN_NAME, '`', '``'), '`),0)+1 INTO @next_id FROM `',
+  REPLACE(TABLE_SCHEMA, '`', '``'), '`.`', REPLACE(TABLE_NAME, '`', '``'), '`; ',
+  'SET @ddl=CONCAT(CONVERT(0x', HEX(CONCAT('ALTER TABLE `', REPLACE(TABLE_SCHEMA, '`', '``'),
+  '`.`', REPLACE(TABLE_NAME, '`', '``'), '` AUTO_INCREMENT = ')), ' USING utf8mb4), @next_id); ',
+  'PREPARE reseed FROM @ddl; EXECUTE reseed; DEALLOCATE PREPARE reseed;')
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA=DATABASE() AND EXTRA LIKE '%auto_increment%';
+SQL
 # PostgreSQL — re-seed every owned sequence to its column max:
 #   SELECT setval(seq, COALESCE(max_val, 1)) for each sequence via pg_get_serial_sequence.
 
@@ -231,16 +262,16 @@ aws dms start-replication-task \
 # recreate the task, or use 'reload-target'-free restart with an explicit --cdc-start-position.)
 
 # Step 9: Rotate the secret
-aws secretsmanager update-secret \
-  --secret-id "your-app/db-credentials" \
-  --secret-string '{
-    "username": "admin",
-    "password": "'"$DB_PASSWORD"'",
-    "host": "'"$AURORA_ENDPOINT"'",
-    "port": "3306",
-    "dbname": "your_db",
-    "engine": "mysql"
-  }'
+python3 - <<'PY'
+import json
+import os
+import boto3
+client = boto3.client('secretsmanager')
+secret_id = os.environ['APP_SECRET_ID']
+secret = json.loads(client.get_secret_value(SecretId=secret_id)['SecretString'])
+secret.update(host=os.environ['AURORA_ENDPOINT'], password=os.environ['DB_PASSWORD'])
+client.update_secret(SecretId=secret_id, SecretString=json.dumps(secret))
+PY
 
 # Step 10: Force credential refresh (application-specific)
 # For Spring Boot with Secrets Manager rotation:
@@ -264,6 +295,14 @@ mysql -h $AURORA_ENDPOINT -u admin -p -e "
 ```
 
 ### Reverse Replication — Set Up BEFORE Cutover (mandatory for lossless rollback)
+
+**DMS applies ordinary SQL, not a native replication thread.** Before starting reverse
+DMS at step 8, keep all source application/job roles and reconnect paths fenced, verify
+their sessions are drained, then turn `super_read_only` and `read_only` **OFF** on the
+source for the dedicated DMS apply account. Do not rely on a SUPER exemption. For
+PostgreSQL, clear the database read-only default for the apply connection while retaining
+the application-role/network fence. Rehearse an actual reverse write on the clone;
+connection tests alone do not prove apply permission. Never reopen source app writers.
 
 The 7-day rollback window only protects you if the source stays current with the writes
 Aurora accepts after cutover. Establish a reverse CDC channel **before** the cutover window:
@@ -346,7 +385,13 @@ pool.end(() => { /* recreate with new credentials */ });
 
 ## Method 2: RDS Blue/Green Deployment
 
-**Best for:** Migrations from RDS MySQL/PostgreSQL to Aurora (already on RDS).
+For an **Aurora Read Replica promotion** instead, keep Phase 6 replication running
+through validation/soak. Only at Phase 8, after the readiness gates and source freeze/
+final drain, execute `aws rds promote-read-replica-db-cluster --db-cluster-identifier
+<cluster-id>`, then verify promotion and repoint clients. Mode 3 requires A4; Mode 2
+hands this action to the customer's team. This is not Blue/Green conversion.
+
+**Best for:** Supported in-place upgrades within RDS or within Aurora, not RDS-to-Aurora conversion.
 
 **Downtime:** Typically < 1 minute (managed by AWS)
 
@@ -355,10 +400,10 @@ pool.end(() => { /* recreate with new credentials */ });
 ```bash
 # Step 1: Create Blue/Green deployment
 aws rds create-blue-green-deployment \
-  --blue-green-deployment-name "mysql-to-aurora" \
+  --blue-green-deployment-name "mysql-upgrade" \
   --source "arn:aws:rds:region:account:db:source-rds-instance" \
-  --target-engine-version "8.0.mysql_aurora.3.07.1" \
-  --target-db-cluster-parameter-group-name "aurora-mysql-params"
+  --target-engine-version "$SUPPORTED_RDS_MYSQL_VERSION" \
+  --target-db-parameter-group-name "$RDS_MYSQL_PARAMETER_GROUP"
 
 # Step 2: Wait for green environment to be ready and synchronized
 aws rds describe-blue-green-deployments \
@@ -371,7 +416,7 @@ aws rds switchover-blue-green-deployment \
   --switchover-timeout 300
 
 # Step 4: Verify (endpoint names are swapped — application sees no change)
-# The original endpoint now points to Aurora
+# The original endpoint now points to the upgraded green environment
 
 # Step 5: Delete blue environment (after monitoring period)
 aws rds delete-blue-green-deployment \
@@ -381,8 +426,9 @@ aws rds delete-blue-green-deployment \
 
 **Limitations:**
 - Only works when source is already on RDS (not EC2)
-- Cross-engine only supported for MySQL → Aurora MySQL
-- PostgreSQL Blue/Green doesn't support cross-engine (PG → Aurora PG)
+- No RDS-to-Aurora or MySQL-to-MariaDB conversion; validate service/version support.
+- Execute switchover only in Phase 8 after validation, soak, readiness, and A4 in Mode 3;
+  Mode 2 hands this command to the customer's cutover team.
 
 ---
 
@@ -448,7 +494,10 @@ Because reverse replication (Aurora → source) has been running since cutover, 
 current and failback loses no data. Rollback sequence:
 
 1. Set Aurora read-only: `SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;`
-   (PostgreSQL: `ALTER DATABASE your_db SET default_transaction_read_only=on;`)
+   (PostgreSQL: `ALTER DATABASE your_db SET default_transaction_read_only=on;` is only
+   supplementary). Fence reconnects, stop all app/jobs, and drain/terminate existing
+   writable sessions and transactions, including prepared transactions, before draining
+   reverse CDC. A new-session default alone does not freeze PostgreSQL.
 2. Confirm reverse CDC drained to zero lag (`CdcLatencySource`/`CdcLatencyTarget` = 0), then
    stop the reverse task.
 3. Reset AUTO_INCREMENT / sequences on the **source** above its new max (same query as
@@ -523,4 +572,4 @@ Document the chosen values in `migration-plan.md` as a Phase 7.5 / pre-cutover p
 - **Coordinated (all-at-once) restart** — stop every write client, repoint, start them all. **Fastest total pause (~10s)** and there is **no split-brain window** because no client is writing during the swap. Use this when a brief full write-pause is acceptable (the default for minimal-downtime cutovers). This is faster than waiting on Secrets Manager pool TTL (up to ~5 min) — change the config/unit and restart directly.
 - **Rolling restart** (restart instances one at a time behind a load balancer) — keeps *some* capacity serving, so no hard outage, **but** during the roll some instances point at the old DB and some at the new one → **split-brain writes**. Only safe if the source is already frozen read-only (cutover step 3) *before* the roll begins, so stragglers can't write the old DB. Prefer coordinated restart for write workloads; reserve rolling for read-heavy/stateless services.
 
-**3. Deploy RDS Proxy on the TARGET before cutover.** The initial EC2 → RDS/Aurora cutover still incurs the brief pause above — **RDS Proxy does not eliminate the *initial* cutover pause** — but standing it up *before* cutover pays off two ways: (a) point the app at the **proxy endpoint** at cutover instead of the cluster endpoint, so all *future* failovers/maintenance are handled by the proxy (it holds the client connections and reconnects to the new writer in **< 1s, no app restart, no pool refresh**); and (b) the proxy multiplexes the reconnect storm at cutover, so the pool refresh doesn't hammer the new DB. After this migration, failovers become effectively zero-downtime even though *this* cutover paused briefly. (Provision it in Phase 4 — see "RDS Proxy on the target".) Note: true Blue/Green sub-second switchover requires the source to **already be on RDS/Aurora** — it's for RDS→Aurora upgrades, not this initial EC2→RDS move.
+**3. Deploy RDS Proxy on the TARGET before cutover.** The initial EC2 → RDS/Aurora cutover still incurs the brief pause above — **RDS Proxy does not eliminate the *initial* cutover pause** — but standing it up *before* cutover pays off two ways: (a) point the app at the **proxy endpoint** at cutover instead of the cluster endpoint, so all *future* failovers/maintenance are handled by the proxy (it holds the client connections and reconnects to the new writer in **< 1s, no app restart, no pool refresh**); and (b) the proxy multiplexes the reconnect storm at cutover, so the pool refresh doesn't hammer the new DB. After this migration, failovers become effectively zero-downtime even though *this* cutover paused briefly. (Provision it in Phase 4 — see "RDS Proxy on the target".) Note: true Blue/Green sub-second switchover requires the source to **already be on RDS/Aurora** — it's for supported in-place upgrades, not RDS→Aurora conversions or this initial EC2→RDS move.

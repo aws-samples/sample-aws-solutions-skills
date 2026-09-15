@@ -8,7 +8,10 @@
 
 ## Scope & Coverage (Read First)
 
-**Engines covered.** This skill covers migration to **all RDS/Aurora engines**: MySQL, MariaDB, PostgreSQL, Oracle, SQL Server, Db2, Aurora MySQL, Aurora PostgreSQL.
+**Engines covered.** This skill has operational paths for MySQL, MariaDB, PostgreSQL,
+Oracle, SQL Server, Aurora MySQL, and Aurora PostgreSQL. **Db2 is out of operational
+scope**: stop and request an engine-specific assessment/runbook rather than inventing
+one. General AWS service support lists are not skill coverage.
 
 - **Homogeneous** (same engine family, e.g. EC2 MySQL → Aurora MySQL, **Oracle → RDS Oracle, SQL Server → RDS SQL Server**): the native-tool fast paths (see method-selection.md and execution-runbooks.md). DMS is *not* the default. Oracle and SQL Server lift-and-shift have **dedicated native paths** — Oracle Data Pump ([execution-runbooks.md](execution-runbooks.md) §"Oracle Data Pump") and SQL Server native backup/restore via S3 (execution-runbooks.md §"SQL Server Native Backup/Restore"). The matrix in [method-selection.md](method-selection.md) covers them.
 - **Heterogeneous** (Oracle/SQL Server → **Aurora/PostgreSQL/MySQL**, i.e. the engine family *changes*): requires schema/code conversion. See **[heterogeneous-migration.md](heterogeneous-migration.md)** — SCT / DMS Schema Conversion / Babelfish, PL/SQL→PL/pgSQL challenges, license implications. **Oracle → RDS Oracle and SQL Server → RDS SQL Server are NOT heterogeneous** — stay in this skill.
@@ -16,7 +19,7 @@
 
 **Korean enterprise scenarios (CHECK EARLY).** Korean enterprises almost always wrap the DB in a domestic **access-control/audit appliance** (Chakra Max, DBSafer, Petra) and a **DB encryption** product (Petra Cipher, D'Amo, CUBE-One). These break on managed RDS in their sniffing/agent/plug-in modes and are the **#1 cause of stalled migrations**. Before choosing a method, read **[third-party-db-security.md](third-party-db-security.md)** and **[regulatory-compliance.md](regulatory-compliance.md)** (PIPA encryption mandates, network separation (mangbunri), ISMS-P, audit-log retention). The rule: **access control → vendor gateway mode in the VPC + Database Activity Streams; encryption → vendor API mode or KMS at-rest + app-side column encryption.**
 
-> **Downtime expectation.** For EC2 → RDS/Aurora migrations, this skill targets a **10–30 second write-pause** at cutover (app restart or connection-pool refresh). True zero-downtime (0 lost requests) isn't achievable on this path without an intermediary proxy already in place — the skill optimizes for the *shortest* pause via CDC catch-up + coordinated cutover. To minimize further: pre-set connection-pool `maxLifetime` to 30s; prefer a coordinated app restart over Secrets Manager rotation (≈10s vs up to 5 min for pool TTL); deploy RDS Proxy on the **target** so future failovers are sub-second even though the initial cutover still pauses briefly. Blue/Green (< 1s with RDS Proxy) needs the source *already* on RDS — it applies to RDS→Aurora upgrades, not initial EC2→RDS moves. See cutover-procedures.md §"Minimize the Write-Pause Window".
+> **Downtime expectation.** For EC2 → RDS/Aurora migrations, this skill targets a **10–30 second write-pause** at cutover (app restart or connection-pool refresh). True zero-downtime (0 lost requests) isn't achievable on this path without an intermediary proxy already in place — the skill optimizes for the *shortest* pause via CDC catch-up + coordinated cutover. To minimize further: pre-set connection-pool `maxLifetime` to 30s; prefer a coordinated app restart over Secrets Manager rotation (≈10s vs up to 5 min for pool TTL); deploy RDS Proxy on the **target** so future failovers are sub-second even though the initial cutover still pauses briefly. Blue/Green (< 1s with RDS Proxy) needs the source *already* on RDS — it applies to supported in-place RDS upgrades, not RDS→Aurora conversions or initial EC2→RDS moves. See cutover-procedures.md §"Minimize the Write-Pause Window".
 
 ---
 
@@ -273,7 +276,8 @@ CIDR for that reverse path.
 Every command below (assessment, dump, cutover) needs DB credentials. **Passwords in command-line arguments are visible in `ps -ef`, shell history, and — when run via SSM/SSH — in CloudTrail and SSM command history.** Rules:
 
 - **Never** pass `-p<password>` or `--password=<pw>` on the command line.
-- Use **`MYSQL_PWD`** env var (`export MYSQL_PWD=...; mysql -h … -u …`) or a **`--defaults-extra-file`** with `[client] password=...` (chmod 600).
+- Use **`MYSQL_PWD`** in the on-host environment, or an existing customer-managed
+  `--defaults-extra-file` (chmod 600); never generate a credential file.
 - **Preferred:** fetch the secret **on the DB host** using the instance's IAM role, so the plaintext never transits your machine or appears in argv:
   ```bash
   # Run on the DB host (e.g. via SSM Send-Command); password stays on the host, out of argv
@@ -282,7 +286,8 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["password"])')
   mysql -h 127.0.0.1 -u admin -e "SELECT VERSION();"
   ```
-- PostgreSQL: use `PGPASSWORD` or a `~/.pgpass` (chmod 600) the same way.
+- PostgreSQL: use on-host `PGPASSWORD` or an existing customer-managed `~/.pgpass`
+  (chmod 600); never generate a credential file.
 - **Creating or rotating a credential (`CREATE USER … IDENTIFIED BY`, `ALTER USER … IDENTIFIED BY`,
   a replication user for reverse-replication arming, etc.) is a different case from
   authenticating with one** — there is no existing secret to fetch on-host; the new
@@ -389,10 +394,11 @@ A method is only viable if the bulk data can physically move within the transfer
 Estimate the over-the-wire transfer time from DB size and usable bandwidth:
 
 ```
-estimated_hours = db_size_gb / (bandwidth_mbps * 0.125 * 0.7)
+estimated_hours = db_size_gb * 1000 / (bandwidth_mbps * 0.125 * 0.7 * 3600)
 ```
 
 - `* 0.125` converts Mbps → MB/s (8 bits per byte).
+- `* 1000` converts decimal GB → MB; `/ 3600` converts seconds → hours.
 - `* 0.7` is a 70% real-world efficiency factor (TCP overhead, encryption, contention, restart
   retries). For a clean same-region 10 GbE path you can use 0.8; for busy shared internet egress
   use 0.5.
@@ -401,11 +407,11 @@ estimated_hours = db_size_gb / (bandwidth_mbps * 0.125 * 0.7)
 
 | DB size | Usable bandwidth | Estimated transfer | Implication |
 |---------|------------------|--------------------|-------------|
-| 50 GB | 1 Gbps (≈940 Mbps usable) | ~0.2 hr (~12 min) | Online copy trivially fits any window |
-| 500 GB | 200 Mbps (typical site VPN) | ~10 hr | Needs an overnight window or CDC catch-up |
-| 2 TB | 200 Mbps | ~40 hr | Wire transfer infeasible in a normal window → **Snow Family** |
-| 2 TB | 1 Gbps Direct Connect | ~8 hr | Feasible with DX + CDC; without DX, use Snow |
-| 10 TB | 500 Mbps | ~127 hr (>5 days) | **Snow Family mandatory** |
+| 50 GB | 1 Gbps (≈940 Mbps usable) | ~0.17 hr (~10 min) | Transfer fits a short window; budget restore/validation too |
+| 500 GB | 200 Mbps (typical site VPN) | ~7.94 hr | Needs an overnight window or CDC catch-up |
+| 2 TB | 200 Mbps | ~31.75 hr | Wire transfer may exceed the window → evaluate offline seed |
+| 2 TB | 1 Gbps Direct Connect | ~6.35 hr | Feasible with sufficient window + CDC |
+| 10 TB | 500 Mbps | ~63.49 hr (~2.6 days) | Evaluate offline seed if the window is shorter |
 
 **Decision rule:**
 

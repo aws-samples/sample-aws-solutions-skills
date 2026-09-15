@@ -118,25 +118,10 @@ done
 
 ### 2.2 Checksum Verification
 
-**MySQL — pt-table-checksum (Percona Toolkit):**
-```bash
-# Install Percona Toolkit
-apt-get install percona-toolkit
-
-# Run checksum comparison
-pt-table-checksum \
-  --host=$SOURCE \
-  --user=$USER \
-  \
-  --databases=$DB \
-  --replicate=percona.checksums \
-  --no-check-binlog-format \
-  --chunk-size=5000
-
-# Check results
-pt-table-sync --print --replicate percona.checksums \
-  --host=$SOURCE --user=$USER   # password via MYSQL_PWD
-```
+**MySQL — read-only comparison first.** `pt-table-checksum` writes checksum tables on
+the source; it is not part of this read-only battery and GATE 3 does not authorize it.
+Use independent read-only checksums below. Any proposed source mutation requires its
+own confirmed A2 block before execution; never substitute a blanket toolkit approval.
 
 **MySQL — Native CHECKSUM TABLE (simpler but locks tables):**
 ```sql
@@ -531,4 +516,3 @@ WHERE type IN ('S','U','G') AND name NOT LIKE '##%##' ORDER BY name;
 -- TDE state (3 = encrypted)
 SELECT DB_NAME(database_id) db, encryption_state FROM sys.dm_database_encryption_keys;
 ```
-

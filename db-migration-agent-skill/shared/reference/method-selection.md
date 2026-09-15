@@ -55,14 +55,20 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 > within a source, so exactly one row applies. "Bulk transfer fits window?" refers to the
 > Phase 2 throughput estimate (`estimated_hours` vs transfer window).
 
+Db2 has no operational assessment/execution path in this skill; stop rather than
+selecting a generic DMS row. Rows 5–6 exclude MariaDB on either side: for a MariaDB case
+not covered by another row, evaluate the documented logical dump (if a full frozen
+copy fits) or DMS Full Load + CDC, and record an approved matrix deviation. Do not
+substitute XtraBackup/S3 for an unsupported MariaDB physical import.
+
 | # | Source | Target | Size | Downtime tolerance | Bulk transfer fits window? | **Recommended Method** | Why |
 |---|--------|--------|------|--------------------|----------------------------|------------------------|-----|
 | 1 | RDS MySQL | Aurora MySQL | Any | < 1 min | n/a (same region) | **Aurora Read Replica promotion** | Built-in, seconds of downtime, migrates everything |
-| 2 | RDS MySQL **or** RDS MariaDB | RDS MySQL / RDS MariaDB / Aurora MySQL | Any | < 1 min | n/a | **Blue/Green Deployment** | Managed switchover w/ guardrails (MySQL↔Aurora MySQL cross-engine supported) |
+| 2 | RDS MySQL **or** RDS MariaDB | Same RDS engine as source (no Aurora conversion) | Any | < 1 min | n/a | **Blue/Green Deployment** | Supported in-place upgrade only; verify engine/version eligibility |
 | 3 | RDS PostgreSQL | Aurora PostgreSQL | Any | < 1 min | n/a | **Aurora Read Replica promotion** | Built-in |
 | 4 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | < 10 GB | Yes (< 1 hr) | Yes | **mysqldump** (`--routines --triggers --events`) | Simplest, migrates ALL objects |
-| 5 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | 10 GB – 1 TB | Yes (hours) | Yes | **Percona XtraBackup + S3** | 3–7× faster than DMS, physical copy incl. all objects |
-| 6 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | > 1 TB | Minimal (minutes) | Yes | **XtraBackup + S3 seed → binlog/DMS CDC catch-up** | Fast physical bulk, then drain delta; cutover = final drain |
+| 5 | EC2/on-prem MySQL (not MariaDB) | Aurora MySQL / RDS MySQL | 10 GB – 1 TB | Yes (hours) | Yes | **Percona XtraBackup + S3** | Supported MySQL physical import only |
+| 6 | EC2/on-prem MySQL (not MariaDB) | Aurora MySQL / RDS MySQL | > 1 TB | Minimal (minutes) | Yes | **XtraBackup + S3 seed → binlog/DMS CDC catch-up** | Fast physical bulk, then drain delta; cutover = final drain |
 | 7 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | Any | No (zero/seconds) | Yes | **DMS Full Load + CDC** | Only near-zero-downtime path from EC2/on-prem (see schema-objects note) |
 | 8 | On-prem MySQL/MariaDB/PostgreSQL | Aurora / RDS (same family) | > 1 TB | Any | **No** (bandwidth-bound) | **Snow Family seed + DMS CDC** (or DataSync for 100 GB–1 TB) | Wire can't carry it in time — see Offline-Seed Branch |
 | 9 | EC2/on-prem PostgreSQL | Aurora PostgreSQL / RDS PostgreSQL | < 10 GB | Yes | Yes | **pg_dump / pg_restore** (`-Fd -j`) | Complete (all objects), simple, parallel |
@@ -87,9 +93,9 @@ engine.
 **Notes on overlap resolution:**
 - Rows 13–15 (Oracle): prefer **Data Pump** (row 13) for the common downtime-OK case; **XTTS** (row 14) only when EE + very large + no encrypted tablespaces + source ≥ 12c; **DMS/GoldenGate CDC** (row 15) when downtime must be near-zero. RMAN whole-DB physical restore is **NOT** supported into managed RDS Oracle (EC2/RDS Custom only).
 - Rows 16–18 (SQL Server): prefer **native backup/restore** (row 16); use **full+diff+log** (row 17) to minimize the cutover window; **DMS** (row 18) only for near-zero downtime. Log Shipping, Replication, and `RESTORE FROM DISK` are not available on RDS.
-- Rows 1 vs 2 for RDS MySQL → Aurora MySQL: prefer **Read Replica promotion** (row 1) for the
-  lowest downtime; choose **Blue/Green** (row 2) when you want staged validation + one-command
-  switchover, or when also doing a version upgrade.
+- Row 1 converts RDS MySQL → Aurora MySQL via **Read Replica promotion**. Row 2 is
+  **Blue/Green** for a supported upgrade within the same RDS engine, not an alternative
+  conversion to Aurora; these rows do not overlap.
 - Snapshot migration (RDS-source, minutes of downtime) is a fallback only when Read Replica /
   Blue/Green are unavailable for the engine version — not a first choice, so it's omitted from the
   primary tree.

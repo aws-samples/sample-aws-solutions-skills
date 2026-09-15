@@ -174,16 +174,17 @@ distinct ids, no id repeated.
   },
   "soak": {
     "n_total": 3,
-    "consecutive_green": 2,
+    "consecutive_green": 1,
     "state": "active",
     "last_checked_at": "2026-09-02T09:00:11+00:00",
+    "started_at": "2026-08-31T09:00:00+00:00",
     "days": [
       {"date": "2026-09-01", "overall": "red", "needs_agent_review": true,
-       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": false, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable"},
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": false, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable", "period_evidence": null},
        "detail": {}},
       {"date": "2026-09-02", "overall": "green", "needs_agent_review": false,
-       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": true, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable"},
-       "detail": {}}
+       "checks": {"row_count": true, "checksum": true, "alarms": true, "headroom": true, "schema_drift": true, "replication_lag": true, "replication_errors": "not_applicable", "customer_test_suite": "not_applicable", "period_evidence": true},
+       "detail": {"period_evidence": "soak-report-day2.md — full-period history reviewed"}}
     ]
   }
 }
@@ -214,7 +215,7 @@ mark a gate `met:true` for either reason without one of these:
 
 | key | `met:true` only when | never mark true just because |
 |---|---|---|
-| `client_inventory` | Phase 7.5 table has every client at ✅✅ (hard constraint 6) | most clients are done — this is all-or-nothing |
+| `client_inventory` | every client has a reviewed, staged (inactive) repoint/revert plan and pool prep complete; every CDC consumer has a restart plan | clients already repointed — execution/verification belongs to authorized Phase 8, customer-executed in Mode 2 |
 | `validation` | GATE 3 evidence block confirmed **and**, if the chosen validation depth includes a customer test suite (Q18), its final pre-cutover sign-off is also in (`customer-test-integration.md`) | row counts/checksums pass but the customer's own suite hasn't run its final pass |
 | `soak` | the chosen parallel-run parameter is satisfied: N consecutive greens **and** the soak-exit block confirmed (`SKILL.md` Phase 7.7 requires both) — **or** a dated waiver block in `authorizations.md` for skipping/shortening it | N greens reached but soak-exit isn't confirmed yet; also applies to Mode 2 handover depth (b), where the customer runs the soak themselves — stays `false` until they report it done or confirm the skip waiver |
 | `rehearsal` | the chosen rehearsal parameter is satisfied (one clone rehearsal done, or repeat-until-converged reached) — **or** a dated waiver for rehearsal `none` | a rehearsal is scheduled but hasn't produced measured timings yet |
@@ -230,12 +231,16 @@ mark a gate `met:true` for either reason without one of these:
   cutover decision.
 - `soak` — rendered as its own prominent dashboard section, not folded into the phases
   list, because this is the one gate stakeholders ask about most. `last_checked_at` is set
-  by `soak_check.py` on every run, and the dashboard flags it if more than 36 hours pass
+  by either soak script on every run. Seed `started_at` when activating the schedule;
+  until the first check the dashboard uses that time. Missing both timestamps is flagged.
+  The dashboard flags it if more than 36 hours pass
   without an update — a missed scheduled run (host down, cron didn't fire) otherwise looks
   identical to "waiting for tomorrow." This is separate from the 15-minute chat-staleness
   badge, which assumes an active session and would misfire on a normal once-daily cadence.
   `n_total` and `consecutive_green` drive the "Day k / N" counter; `days[]` holds one entry
-  per period, each with the 8-check result set from `shared/templates/soak-report.md`.
+  per UTC calendar day, with the eight sampled checks plus `period_evidence` from
+  `shared/templates/soak-report.md`. Dates are sorted; missing dates and unknown/RED/review
+  days break the streak. Hourly compression is manual only.
   Each check value is one of **four** states, not just true/false:
   - `true`/`false` — actually measured, passed or failed.
   - `null` — something IS configured for this check on this engagement but the data came
@@ -249,8 +254,9 @@ mark a gate `met:true` for either reason without one of these:
     a clean engagement reach `soak.state: "complete"` instead of being stuck forever on a
     check that was never going to apply.
   `replication_lag` is measured from CloudWatch `CDCLatencySource`/`CDCLatencyTarget`
-  when a DMS task is configured, or `SHOW REPLICA STATUS`/a PostgreSQL replay-lag query
-  for non-DMS replication — `"not_applicable"` only when this engagement has no
+  when a DMS task is configured, or `SHOW REPLICA STATUS` for native MySQL.
+  Native PostgreSQL logical lag remains `null` pending manual apply-progress evidence;
+  physical replay age is not logical lag. `"not_applicable"` only when this engagement has no
   replication mechanism wired in at all. `replication_errors` pulls DMS task stats
   (`TablesErrored`, task status, last failure message) when a DMS task is configured,
   `"not_applicable"` otherwise. `customer_test_suite` can never be measured
@@ -258,6 +264,9 @@ mark a gate `met:true` for either reason without one of these:
   unless a suite was actually documented as provided at discovery Q18, in which case it
   stays `null` (a real, intentional "needs review" — waiting on that result) until the
   agent or the customer supplies `true`/`false`. Never guess any of these three.
+  `period_evidence` is also `null` until the full day's retained monitoring evidence is
+  reviewed (`execution-runbooks.md` §Soak automation). Every `null` blocks GREEN and
+  completion; neither a review flag nor a missing result may be ignored by the streak.
   `shared/scripts/soak_check.py` (reference implementation, run by hand) and
   `shared/scripts/soak_check_lambda.py` (the production path — VPC-attached Lambda on an
   EventBridge Scheduler cadence, writing straight into this bucket) both run every

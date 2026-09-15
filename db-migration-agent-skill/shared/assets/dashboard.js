@@ -22,7 +22,7 @@
   const LOG_URL = (typeof window !== 'undefined' && window.DASHBOARD_LOG_URL) || 'activity-log.jsonl';
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let lastLogCount = 0;
+  let lastLogContent = null;
   let appliedLang = null;
 
   const LABELS = {
@@ -67,7 +67,7 @@
       soakOverdueBanner: (hrs) => `No soak check in ${hrs}h — the scheduled run may have been missed (host down, cron didn't fire, script crashed). Verify it's still running.`,
       soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
       soakEmpty: 'Not started yet — begins once the target is current and validation is green.',
-      soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', replication_errors: 'Replication errors', customer_test_suite: 'Customer test suite' },
+      soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', replication_errors: 'Replication errors', customer_test_suite: 'Customer test suite', period_evidence: 'Full-period evidence' },
       soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
     },
     ko: {
@@ -111,7 +111,7 @@
       soakOverdueBanner: (hrs) => `${hrs}시간 동안 소크 점검이 실행되지 않았습니다 — 예약된 실행이 누락되었을 수 있습니다 (호스트 다운, cron 미실행, 스크립트 오류). 정상 동작 중인지 확인하세요.`,
       soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
       soakEmpty: '아직 시작되지 않았습니다 — 타깃이 최신 상태이고 검증이 green이 되면 시작됩니다.',
-      soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', replication_errors: '복제 오류', customer_test_suite: '고객 테스트' },
+      soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', replication_errors: '복제 오류', customer_test_suite: '고객 테스트', period_evidence: '전체 기간 증빙' },
       soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
     },
   };
@@ -129,7 +129,7 @@
 
   function fmtTime(iso) {
     if (!iso) return '';
-    try { return iso.replace('T', ' ').replace(/\+.*$/, '').slice(0, 19); } catch { return iso; }
+    return esc(String(iso).replace('T', ' ').replace(/\+.*$/, '').slice(0, 19));
   }
 
   function L() { return LABELS[appliedLang] || LABELS.en; }
@@ -187,9 +187,9 @@
       const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
       return `<div class="phase">
         <div class="phase-row">
-          <span class="badge ${p.status}">${l.phaseBadge[p.status] || p.status}</span>
+          <span class="badge ${esc(p.status)}">${esc(l.phaseBadge[p.status] || p.status)}</span>
           <span class="phase-name">Phase ${esc(p.id)} · ${esc(p.name)}</span>
-          <span class="phase-count">${p.done}/${p.total} · ${pct}%</span>
+          <span class="phase-count">${esc(p.done)}/${esc(p.total)} · ${pct}%</span>
         </div>
         <div class="pbar"><i style="width:${pct}%"></i></div>
         ${p.note ? `<div class="phase-count" style="margin-top:6px">${esc(p.note)}</div>` : ''}
@@ -221,7 +221,7 @@
     if (typeKey === 'tables') {
       return `<div class="obj-card obj-card-wide">
         <div class="obj-card-head"><span class="obj-title">${esc(label)}</span>
-          <span class="obj-count">${doneCount}/${o.total} ${esc(l.objectsCountSuffix)}</span></div>
+          <span class="obj-count">${esc(doneCount)}/${esc(o.total)} ${esc(l.objectsCountSuffix)}</span></div>
         <table class="obj-table">
           <thead><tr><th>${esc(l.objTableCol.name)}</th><th>${esc(l.objTableCol.src)}</th><th>${esc(l.objTableCol.tgt)}</th><th>${esc(l.objTableCol.cs)}</th><th>${esc(l.objTableCol.status)}</th></tr></thead>
           <tbody>${renderTableRows(o.items || [])}</tbody>
@@ -240,7 +240,7 @@
     }).join('') || '<div class="obj-item obj-empty">—</div>';
     return `<div class="obj-card">
       <div class="obj-card-head"><span class="obj-title">${esc(label)}</span>
-        <span class="obj-count">${doneCount}/${o.total}</span></div>
+        <span class="obj-count">${esc(doneCount)}/${esc(o.total)}</span></div>
       <div class="obj-items">${items}</div>
     </div>`;
   }
@@ -273,9 +273,10 @@
     // Distinct from the 15-min chat-staleness badge, which assumes an active session —
     // a soak check runs roughly daily, so "overdue" means missing a run, not missing
     // a few minutes. 36h gives one day's cadence a buffer before flagging.
-    const overdueHrs = soak.state === 'active' && soak.last_checked_at
-      ? (Date.now() - new Date(soak.last_checked_at).getTime()) / 3600000 : 0;
-    const isOverdue = overdueHrs > 36;
+    const lastExpectedRun = soak.last_checked_at || soak.started_at;
+    const overdueHrs = soak.state === 'active' && lastExpectedRun
+      ? (Date.now() - new Date(lastExpectedRun).getTime()) / 3600000 : 0;
+    const isOverdue = soak.state === 'active' && (!lastExpectedRun || !Number.isFinite(overdueHrs) || overdueHrs > 36);
 
     const dayCells = days.map((d, i) => {
       const cls = d.overall === 'green' ? 'green' : 'red';
@@ -294,7 +295,7 @@
       <div class="soak-explain">${esc(l.soakExplain(nTotal))}</div>
       ${isOverdue ? `<div class="soak-review-banner">${esc(l.soakOverdueBanner(Math.floor(overdueHrs)))}</div>` : ''}
       ${needsReview ? `<div class="soak-review-banner">${esc(l.soakReviewBanner(lastReviewDay.i + 1))}</div>` : ''}
-      <div class="soak-counter"><span class="n">${consecutive}</span><span class="of">${esc(l.soakCounterOf(nTotal))}</span></div>
+      <div class="soak-counter"><span class="n">${esc(consecutive)}</span><span class="of">${esc(l.soakCounterOf(nTotal))}</span></div>
       <div class="soak-days">${dayCells}</div>`;
   }
 
@@ -343,7 +344,8 @@
       renderPhases(status);
       renderObjects(status);
       renderSoak(status);
-      if (log.length !== lastLogCount) { renderLog(log); lastLogCount = log.length; }
+      const logContent = JSON.stringify([appliedLang, log]);
+      if (logContent !== lastLogContent) { renderLog(log); lastLogContent = logContent; }
       $('#updated-text').innerHTML = `${esc(L().updatedPrefix)} <b>${fmtTime(status.updated_at)}</b>`;
       // The 15-minute staleness badge assumes an active interactive session — correct
       // outside the soak window, but during an active soak (once-a-day cadence by

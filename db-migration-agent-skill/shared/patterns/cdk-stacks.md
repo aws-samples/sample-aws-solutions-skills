@@ -50,6 +50,10 @@ for (const sgId of constants.APP_CLIENT_SG_IDS) {
   dbSg.addIngressRule(ec2.Peer.securityGroupId(sgId), ec2.Port.tcp(constants.DB_PORT),
     `app client ${sgId}`);
 }
+if (constants.NATIVE_REPLICATION) {
+  dbSg.addEgressRule(ec2.Peer.ipv4(constants.SOURCE_CIDR), ec2.Port.tcp(constants.SOURCE_DB_PORT),
+    'native replication to source');
+}
 
 new rds.SubnetGroup(this, 'DbSubnets', { vpc,
   vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
@@ -85,7 +89,7 @@ constants and be user-confirmed at GATE 2: engine version, KMS key, Oracle chars
 DB_BLOCK_SIZE, SQL Server collation, license model, port.
 
 ```typescript
-// TWO cluster parameter groups — deploy with migration PG, swap to production PG later.
+// TWO cluster parameter groups — swap before validation/soak, never after go-live.
 const migrationParams = new rds.ParameterGroup(this, 'MigrationParams', { engine,
   description: 'import-optimized', parameters: {
     // MySQL-family examples; engine-specific values live in constants.ts
@@ -93,10 +97,14 @@ const migrationParams = new rds.ParameterGroup(this, 'MigrationParams', { engine
     innodb_flush_log_at_trx_commit: '2',          // relax durability DURING IMPORT ONLY
     foreign_key_checks: '0', unique_checks: '0',   // if the method needs them
     binlog_format: 'ROW',                          // needed for REVERSE replication later
+    require_secure_transport: constants.ENFORCE_TLS ? 'ON' : 'OFF',
+    time_zone: constants.SOURCE_TIME_ZONE,
   }});
 const productionParams = new rds.ParameterGroup(this, 'ProductionParams', { engine,
   description: 'steady-state', parameters: {
     binlog_format: 'ROW',
+    innodb_flush_log_at_trx_commit: '1',
+    foreign_key_checks: '1', unique_checks: '1',
     require_secure_transport: constants.ENFORCE_TLS ? 'ON' : 'OFF',
     time_zone: constants.SOURCE_TIME_ZONE,         // match source — Phase 1 adjustment
   }});
@@ -157,7 +165,11 @@ const instance = new dms.CfnReplicationInstance(this, 'DmsInstance', {
 const sourceEp = new dms.CfnEndpoint(this, 'SourceEp', { endpointType: 'source',
   engineName: constants.SOURCE_ENGINE, serverName: constants.SOURCE_HOST,
   port: constants.DB_PORT, databaseName: constants.DB_NAME,
-  username: constants.DMS_USER, password: constants.DMS_PASSWORD_FROM_SECRET });
+  sslMode: 'verify-ca', certificateArn: constants.SOURCE_DMS_CA_CERTIFICATE_ARN,
+  mySqlSettings: {
+    secretsManagerAccessRoleArn: constants.DMS_SECRET_ACCESS_ROLE_ARN,
+    secretsManagerSecretId: constants.SOURCE_DMS_SECRET_ARN,
+  } });
 // target endpoint analogous, pointing at cluster endpoint
 
 // FORWARD task (full-load-and-cdc) AND REVERSE task (cdc, created stopped) — the reverse
@@ -165,8 +177,11 @@ const sourceEp = new dms.CfnEndpoint(this, 'SourceEp', { endpointType: 'source',
 // ../reference/dms-best-practices.md; table mappings from constants.
 ```
 
-Secrets-in-CFN caveat: prefer `SecretsManagerAccessRoleArn`/`SecretsManagerSecretId` on
-endpoints over inline passwords. Test both endpoints post-deploy in
+This endpoint example is MySQL-specific: use the corresponding engine settings property
+for other engines. Use CA-verified TLS (`verify-ca` here, `verify-full` where supported)
+and the appropriate imported CA certificate on both endpoints. Verify engine/version
+support; any weaker mode needs explicit approval, never default to `none`. Use Secrets Manager references,
+never plaintext passwords in constants or synthesized templates. Test both endpoints post-deploy in
 `scripts/01-precondition-check.sh` via `aws dms test-connection`.
 
 ## proxy-stack.ts (conditional) / monitoring-stack.ts
@@ -329,6 +344,8 @@ const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
     // env-var schema and the "not_applicable" semantics of leaving all of them unset.
     DMS_TASK_ID: constants.SOAK_DMS_TASK_ID, DMS_REPLICATION_INSTANCE_ID: constants.SOAK_DMS_REPLICATION_INSTANCE_ID,
     DMS_TASK_ARN: constants.SOAK_DMS_TASK_ARN,
+    MYSQL_REPLICA_STATUS_SIDE: constants.SOAK_MYSQL_REPLICA_STATUS_SIDE ?? '',
+    PG_REPLICATION_LAG_SIDE: constants.SOAK_PG_REPLICATION_LAG_SIDE ?? '',
     CUSTOMER_TEST_SUITE_PROVIDED: `${constants.CUSTOMER_TEST_SUITE_PROVIDED}`,  // Q18 answer
     // Independent per side — an on-prem/legacy source and an RDS/Aurora target almost
     // always have DIFFERENT trust anchors. Leaving either *_SSL_CA_PATH unset now falls
@@ -416,7 +433,7 @@ new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
 
 ### Alerting — real, not just a dashboard banner nobody may be looking at
 
-Three alarms, all feeding the **same SNS topic this skill's monitoring baseline already
+Four alarms, all feeding the **same SNS topic this skill's monitoring baseline already
 uses** ([../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4) — not
 a second, disconnected channel:
 
@@ -429,11 +446,17 @@ new cloudwatch.Alarm(this, 'SoakFnErrorsAlarm', {
   threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 }).addAlarmAction(new cw_actions.SnsAction(alertTopic));
 
-// 2. The scheduled invocation never happening at all, or exhausting both retries — the
-//    DLQ above catches the second case; this alarm covers both by watching the DLQ depth.
+// 2. Exhausted delivery retries reach the DLQ; a disabled schedule does not.
 new cloudwatch.Alarm(this, 'SoakScheduleDlqAlarm', {
   metric: soakDlq.metricApproximateNumberOfMessagesVisible(),
   threshold: 1, evaluationPeriods: 1,
+}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+
+new cloudwatch.Alarm(this, 'SoakMissingInvocationAlarm', {
+  metric: soakFn.metricInvocations({ statistic: 'Sum', period: Duration.days(1) }),
+  threshold: 1, evaluationPeriods: 1,
+  comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+  treatMissingData: cloudwatch.TreatMissingData.BREACHING,
 }).addAlarmAction(new cw_actions.SnsAction(alertTopic));
 
 // 3. A day the Lambda ran but flagged needs_agent_review=true (any RED, or a check that
@@ -455,7 +478,7 @@ second topic; an engagement that deploys soak-stack without a monitoring-stack (
 but not impossible for a very light Mode-1-adjacent check) creates its own topic instead,
 with a subscription confirmed at the same time the customer's monitoring contacts are set up.
 
-**Presigned URLs — a one-time step, not part of this stack.** Run
+**Presigned URLs — initial issuance plus planned renewal, not part of this stack.** Run
 `shared/scripts/generate_presigned_urls.py` once, right after this stack deploys and the
 initial `dashboard/` contents are uploaded to `dashboardBucket` (index.html, assets/, empty
 status.json + activity-log.jsonl) — it presigns every file the page needs for the full soak
@@ -466,11 +489,14 @@ Lambda-invoked-at-deploy custom resource — read that script's credential-longe
 before running it: for a 3- or 7-day soak, sign with a throwaway IAM user's long-term
 access key, not the deploying operator's own temporary/SSO session, or the URLs stop
 working when that session expires, long before the `Expires` value they carry claims. Sign
-for slightly UNDER the tier's nominal length, not exactly the SigV4 ceiling — e.g.
-`--expires-seconds 561600` (6.5 days) for the 7-day tier, not `604800` — so the link is
-never the thing that expires first if soak-exit slips by a few hours past the nominal
-window; re-running the script (safe — see its docstring) extends it if the soak genuinely
-runs long.
+for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
+tier and `302400` (3.5 days) for the 3-day tier. Plan **648000 seconds (7.5 days) of
+coverage** for the 7-day tier, but never request a single S3 signature that long: SigV4
+rejects expiries over `604800` seconds. Issue with `--expires-seconds 604800`, renew by
+day 6 (earlier if signing credentials expire), and deliver the new customer link with
+an explicit instruction to reopen it. Re-signing does not update URLs embedded in an
+already-open page. Renew again if RED days extend the soak; keep signing credentials
+valid through the final half-day buffer.
 
 **Ending soak — pull the reports back, don't leave them only in S3.** Before tearing down
 or letting the bucket's presigned URLs lapse, sync the bucket's final contents (now
@@ -513,7 +539,7 @@ no placeholders left at generation time.
 
 ## Post-stabilization changes (the CDK project owns day-2)
 
-- Swap `parameterGroup` migration → production, deploy (reboot-scoped params noted in README).
+- Verify production parameters remain active; the swap/reboot occurs before validation/soak.
 - Scale writer down to steady-state instance type.
 - Remove migration-stack entirely (after the rollback window closes).
 - Hand the project to the customer: README documents every constant and the change log.

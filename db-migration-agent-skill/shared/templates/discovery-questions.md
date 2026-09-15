@@ -36,7 +36,11 @@ minutes, or a maintenance window measured in hours? This is the other half of th
 method-matrix lookup, and it sets the bar the cutover rehearsal has to clear before anyone
 quotes a real number.
 
-**Answer:** {a duration, or "we don't know yet — help us figure out what's reasonable"}
+Does this database currently serve live production traffic, especially **writes**?
+State production / non-production / unsure and whether live writers are active; this
+also determines the proposed 1/3/7-day soak risk tier.
+
+**Answer:** {downtime duration; production/non-production/unsure; live writes yes/no/unsure}
 
 ---
 
@@ -201,19 +205,20 @@ running production traffic exactly as it does today — nothing is at risk yet. 
 database sits alongside it, receiving every change in real time, and gets watched for
 some number of days before the actual cutover is recommended.
 
-A one-time check can only see what's true right now — it can't see a job that runs once a
-week at 2 AM, and that's not hypothetical: exactly this kind of thing has been caught by a
-soak window before. A multi-day window turns "looked fine when we checked" into "actually
-keeps working."
+A one-time check can only see what's true right now; daily samples also miss a job at
+2 AM or a recovered outage. Acceptance needs retained replication logs and CloudWatch
+alarm/metric history covering each full period, including scheduled-job windows.
+Missing evidence blocks acceptance; automation does not prove an incident-free day.
 
 For your case the signal is: **{tier signal, e.g. "non-production, no live write traffic,
 hours of downtime tolerance"}** — so the proposed length is **{N} day(s)** ({tier} risk
 tier). If you keep it, checks run automatically on AWS-managed infrastructure (not your
-own machine — that's not reliable left running for days), and you'll get one link, sent
-once at the start, showing the dashboard live for the whole window.
+own machine — that's not reliable left running for days), with full-period evidence
+reviewed separately. You'll get a dashboard link at the start and a replacement before
+URL/signing-credential expiry when needed; reopen the new link when it is issued.
 
 - [ ] A. Keep the proposed {N} day(s)
-- [ ] B. Shorten it — say how many days/hours below
+- [ ] B. Shorten it — say how many days (hours require a waiver and manual tracking) below
 - [ ] C. Skip it entirely — this is a waiver; the risk that moves into the cutover window
       is {state plainly, per `engagement-safety.md` §Waiver protocol}
 - [ ] D. Not sure — give me one line of advice for a case like mine

@@ -28,7 +28,7 @@ Mode rules:
 - Mode 3 is **locked unless an assessment exists** (this engagement's Phases 1–3 or a
   prior Mode-1 report) and requires the Mode-3 warnings below to be stated and recorded.
 - Mode changes are **new approvals, not silent upgrades** — moving 1→2 or 2→3 mid-
-  engagement needs its own authorization row.
+  engagement needs its own confirmed authorization block.
 - A **clone/staging rehearsal** is not a separate mode any more: it is a step available
   inside Mode 2 and Mode 3 (see engagement parameters), because measuring the cutover
   window on a clone is useful regardless of who ultimately executes it.
@@ -102,7 +102,7 @@ recommended default; every deviation from a default is a recorded waiver.
 | Parameter | Options | Default |
 |-----------|---------|---------|
 | **Rehearsal** | none / one clone rehearsal / repeat until the measured window converges (< 20% delta between runs) | **One clone rehearsal.** Repeat-until-converged when the write-pause budget is tight (≤ 60 s) or the estimate is business-critical |
-| **Parallel-run length** | not run / N consecutive green periods (days, or hours for compressed engagements) | **Risk-tiered — see table below.** Not a flat number: the default the agent proposes is derived from discovery input #4 (`method-selection.md`), not copied from the previous engagement. |
+| **Parallel-run length** | not run / N consecutive green days; compressed hours require a waiver and manual tracking | **Risk-tiered — see table below.** Not a flat number: the default the agent proposes is derived from discovery input #4 (`method-selection.md`), not copied from the previous engagement. |
 | **Validation depth** | counts + checksums + smoke test / + app-level & version-gap battery / + domain reconciliation aggregates | **counts + checksums + app-level checks**, plus the **customer's own test suite** whenever one exists (discovery Q18) |
 | **Rollback strategy** | snapshot/PITR restore (with acknowledged RPO) / reverse replication (zero RPO) / write-log replay | **Reverse replication** when the engines support it; otherwise state the RPO plainly and get it acknowledged |
 | **Approver(s)** | confirmed directly in `authorizations.md` per action class (no name captured); for Mode 3 also "present during the window" | Confirmed in `authorizations.md` before any production-touching step |
@@ -133,6 +133,31 @@ exactly as before (§Waiver protocol). The tier itself, and the signal that prod
 gets recorded alongside the parameter on `discovery-questions.md`'s #16c so a later reader
 can see *why* N was what it was, not just the number.
 
+The automated scripts support **UTC calendar days only**. Do not change their schedule
+to hourly and call the result an N-hour soak: same-date runs replace one another. For an
+approved compressed window, record the waiver and use manual reports with explicit UTC
+start/end timestamps, contiguous intervals, and one verdict per interval; missing,
+unknown, or RED intervals break the streak. Do not use the scripts' daily completion
+state as hourly evidence.
+
+### Static-validation window (offline/full-load-only alternative)
+
+Without CDC there is no live pipeline to soak. Record a soak waiver specifying this
+alternative and its freshness limitation. Validate the Phase 6 copy in an isolated,
+write-fenced target: full row counts, engine-appropriate content reconciliation, schema
+objects/constraints, read-only app tests, and a timed final-copy rehearsal. For
+heterogeneous copies use the conversion/reconciliation battery, not raw cross-dialect
+checksums. Record evidence and resolve every discrepancy before handover/readiness.
+
+This establishes **rehearsal readiness**, not a current production copy. The Phase 8
+runbook must budget and perform a final full export/backup and replacement restore
+while ALL source writers remain fenced, then repeat final reconciliation and smoke
+tests before repointing. Mode 2 hands that procedure to the customer; Mode 3 requires
+A4 before the freeze. A failed check or an outage budget too short for the final copy
+blocks cutover; reselect CDC rather than silently accepting stale data. No minimum
+static duration substitutes for these acceptance criteria. Close the waiver/soak-exit
+block separately from A4/A4b, with the final-copy obligation explicit.
+
 ### Soak decision script
 
 Never let the parallel-run parameter arrive as a bare number inside the engagement-parameters
@@ -147,10 +172,10 @@ customer's language; keep the structure, not the exact words):
 > ever recommend the actual switch.
 >
 > Why bother, if the data already checked out? Because a one-time check can only see what's
-> true *right now*. It can't see a job that only runs at 2 AM, or once a week — and that's
-> not hypothetical: exactly this (a cron job invisible to a point-in-time connection check)
-> is a real thing this same kind of migration has caught. A [N]-day window is what turns
-> "looked fine when we checked" into "actually keeps working."
+> true *right now*. Daily samples alone also miss a job at 2 AM or a recovered outage.
+> The [N]-day window must include review of retained replication logs and CloudWatch
+> alarm/metric history covering the full period, especially scheduled-job windows.
+> Missing evidence blocks acceptance; the automated sample is not a whole-day guarantee.
 >
 > For your case, the signal is [state the tier's signal — e.g. "non-production, no live
 > write traffic, hours of downtime tolerance"], so the proposed length is **[N] day(s)**.
@@ -159,8 +184,8 @@ customer's language; keep the structure, not the exact words):
 >
 > One logistics note if you keep it: for those [N] day(s), the checks run automatically on
 > AWS-managed infrastructure (not your own machine — that's not reliable left running for
-> days), and I'll send you a single link once, at the start, that shows the dashboard live
-> for the whole window — just keep it open or reopen it, no re-downloading anything.
+> days), and I'll send a dashboard link at the start. Longer windows require renewal
+> before URL or signing-credential expiry; reopen the new link when it is issued.
 > Nothing else about how you work changes.
 
 Record the answer **and the stated reasoning** on #16c's own `**Answer:**` line in
@@ -271,7 +296,7 @@ English form of the template — translate the header and every item into the us
 conversation language (the Language rule in `SKILL.md` applies here too); keep the box
 characters, emoji, and `[ ]`/numbering exactly as shown.
 
-Action classes requiring a row **before** first execution:
+Action classes requiring a confirmed context-and-mark block **before** first execution:
 1. Read-only source access (assessment)
 2. Source writes (blocker fixes, migration user creation — each listed individually)
 3. Target/production infrastructure deploys
@@ -361,4 +386,4 @@ decommission stage is signed:
 | 6.5 | Rehearsal per the chosen parameter (see execution-runbooks.md §Rehearsal) |
 | 7.7 | **Parallel-run soak**: target stays current; daily `soak-report.md`; customer may point read-only traffic/load tests at the target; cutover readiness requires N consecutive green periods |
 | 8 | **Mode 2** → assemble + verify the handover package, walk the customer through the runbook, sign A4b, then stop (offer read-only observation during their cutover). **Mode 3** → execute step-by-step with go/no-go per group, A4 signed first |
-| 9 | Post-migration + decommission authorization row; guardrail Deny lifted only after it. In Mode 2, Phase 9 runs *after the customer reports a completed cutover* |
+| 9 | Post-migration + confirmed decommission authorization block; guardrail Deny lifted only after it. In Mode 2, Phase 9 runs *after the customer reports a completed cutover* |

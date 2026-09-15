@@ -14,7 +14,7 @@ migration agent (Mode 3)} — same owner as the cutover runbook.
 | ✅ | Step | Command | Verify |
 |---|------|---------|--------|
 | ▢ | 1. Maintenance mode ON | {command} | banner |
-| ▢ | 2. Freeze TARGET | `SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;` on {target-endpoint} (PG: `default_transaction_read_only=on`) | 0 writers on target processlist |
+| ▢ | 2. Freeze TARGET | {fence app/job reconnects; stop writers; drain/terminate existing sessions and transactions, including prepared transactions}; MySQL read-only globals / PG read-only default are supplementary | no writable sessions/transactions; reconnect fence tested |
 | ▢ | 3. Drain reverse CDC to 0 | CDCLatencySource=0 ∧ CDCLatencyTarget=0 on {rev-arn} | =0 |
 | ▢ | 4. Stop reverse task | `aws dms stop-replication-task --replication-task-arn {rev-arn}` | `stopped` |
 | ▢ | 5. Reset AUTO_INCREMENT/sequences on SOURCE above new max | {generated statements} | next-val > max |

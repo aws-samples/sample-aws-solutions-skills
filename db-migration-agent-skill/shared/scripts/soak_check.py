@@ -25,8 +25,11 @@ exit code 1 for that case.
 import argparse
 import datetime
 import json
+import os
+import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Matches the CDCLatencySource/Target warning threshold used elsewhere in this skill.
@@ -161,12 +164,13 @@ def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insec
     MySQL-client or MariaDB-client spelling — confirmed live that a MariaDB client
     rejects `--ssl-mode` outright (see `_mysql_client_is_mariadb`'s docstring)."""
     script = "; ".join(f"{sql}; SELECT '{_SPLIT}'" for sql in sqls)
-    cmd = ["mysql", "-h", host, "-u", user, f"-p{password}"]
+    cmd = ["mysql", "-h", host, "-u", user]
     if port:
         cmd += ["-P", str(port)]
     cmd += _mysql_ssl_args(ssl_ca, ssl_insecure)
     cmd += ["-N", "-B", database, "-e", script]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                          env={**os.environ, "MYSQL_PWD": password})
     if proc.returncode != 0:
         # A client-side failure here (bad TLS flag, auth failure, unreachable host) used
         # to surface as an empty/short chunk list and a confusing IndexError many calls
@@ -206,15 +210,18 @@ def run_psql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecu
         env = {"PGPASSWORD": password, "PGSSLMODE": "require"}
     else:
         env = {"PGPASSWORD": password, "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(_DEFAULT_CA_BUNDLE)}
-    cmd = ["psql", "-h", host]
+    cmd = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-h", host]
     if port:
         cmd += ["-p", str(port)]
-    cmd += ["-U", user, "-d", database, "-t", "-A", "-c", script]
+    cmd += ["-U", user, "-d", database, "-t", "-A", "-F", "\t", "-c", script]
     # env= replaces the child's whole environment (not merged) — PATH must be carried over
     # explicitly or a bare "psql" argv[0] can fail to resolve on some shells/PATH configs.
     import os as _os
     env["PATH"] = _os.environ.get("PATH", "")
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env).stdout
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql client exited {proc.returncode}: {proc.stderr.strip()}")
+    out = proc.stdout
     chunks, current = [], []
     for line in out.splitlines():
         if line == _SPLIT:
@@ -230,6 +237,12 @@ def run_batch(family, conn, sqls):
     # above — strip it here so it isn't passed through as a stray keyword arg.
     conn_args = {k: v for k, v in conn.items()
                  if k in ("host", "user", "password", "database", "ssl_ca", "ssl_insecure")}
+    if "password" in conn:
+        raise ValueError("Use password_env, not a password in soak-config.json")
+    password_env = conn.get("password_env")
+    if not password_env or password_env not in os.environ:
+        raise ValueError("Connection requires password_env naming an on-host environment variable")
+    conn_args["password"] = os.environ[password_env]
     # soak-config.json's documented schema (execution-runbooks.md §Soak automation)
     # includes "port" per side, for BOTH families — confirmed live (real MySQL 8.0->8.4
     # version-gap pair, both sides reached through an SSM/bastion port-forward tunnel on
@@ -311,8 +324,8 @@ def db_headroom_pct(db_instance_id, region):
 
 def measure_replication_lag(cfg, family, source_conn, target_conn):
     """Returns (lag_seconds_or_None, mechanism_or_None) — DMS CloudWatch metrics if a DMS
-    task is configured, else SHOW REPLICA STATUS (MySQL-family) / a replay-lag query
-    (Postgres) on whichever side is configured as the replica, else (None, None) meaning
+    task is configured, else SHOW REPLICA STATUS (MySQL-family); native PostgreSQL
+    logical replication requires manual review, not physical replay age. (None, None) means
     genuinely nothing is configured (the caller treats that as "not_applicable")."""
     region = cfg.get("region", "us-east-1")
     dms_task_id = cfg.get("dms_task_id")
@@ -330,6 +343,8 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
                    "--region", region, "--query", "Datapoints[].Maximum", "--output", "json"]
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
             vals = json.loads(out) if out.strip() else []
+            if not vals:
+                return None, "dms"
             if vals:
                 worst = max(float(v) for v in vals)
                 best = worst if best is None else max(best, worst)
@@ -338,7 +353,10 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
     replica_side = cfg.get("mysql_replica_status_side")
     if family == "mysql" and replica_side:
         conn = cfg["target"] if replica_side == "target" else cfg["source"]
-        lines = run_one(family, conn, "SHOW REPLICA STATUS")
+        try:
+            lines = run_one(family, conn, "SHOW REPLICA STATUS")
+        except RuntimeError:
+            lines = []
         if not lines:
             lines = run_one(family, conn, "SHOW SLAVE STATUS")
         if not lines or not lines[0]:
@@ -357,10 +375,7 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
 
     pg_side = cfg.get("pg_replication_lag_side")
     if family == "postgres" and pg_side:
-        conn = cfg["target"] if pg_side == "target" else cfg["source"]
-        lines = run_one(family, conn, "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))")
-        val = lines[0].strip() if lines and lines[0].strip() else None
-        return (float(val), "postgres_replica_status") if val else (None, "postgres_replica_status")
+        return None, "postgres_logical_requires_review"
 
     return None, None
 
@@ -388,6 +403,66 @@ def replication_errors(cfg):
     return ok, detail
 
 
+def _table_parts(table):
+    pattern = r'\s*(?:"((?:[^"]|"")+)"|`((?:[^`]|``)+)`|([^.`"\s][^.`"]*?))\s*(\.|$)'
+    parts = []
+    offset = 0
+    for match in re.finditer(pattern, table):
+        if match.start() != offset:
+            raise ValueError(f"Invalid table identifier: {table!r}")
+        quoted, backtick, plain, separator = match.groups()
+        parts.append(quoted.replace('""', '"') if quoted is not None else
+                     backtick.replace('``', '`') if backtick is not None else plain.strip())
+        offset = match.end()
+    if offset != len(table) or not 1 <= len(parts) <= 2 or separator == '.':
+        raise ValueError(f"Invalid table identifier: {table!r}")
+    return parts
+
+
+def _table_sql(family, table):
+    quote = '`' if family == 'mysql' else '"'
+    return '.'.join(quote + part.replace(quote, quote * 2) + quote for part in _table_parts(table))
+
+
+def _sql_literal(family, value):
+    if family == "mysql":
+        return "CONVERT(X'" + value.encode("utf-8").hex() + "' USING utf8mb4)"
+    return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _columns_sql(family, table):
+    parts = _table_parts(table)
+    name = _sql_literal(family, parts[-1])
+    schema = (_sql_literal(family, parts[0]) if len(parts) == 2 else
+              "DATABASE()" if family == "mysql" else "current_schema()")
+    if family == "mysql":
+        return ("SELECT column_name, column_type, is_nullable, column_default FROM "
+                f"information_schema.columns WHERE table_schema={schema} AND table_name={name} ORDER BY column_name")
+    return ("SELECT attribute.attname, pg_catalog.format_type(attribute.atttypid, attribute.atttypmod), "
+            "CASE WHEN attribute.attnotnull THEN 'NO' ELSE 'YES' END, "
+            "pg_catalog.pg_get_expr(defaults.adbin, defaults.adrelid) "
+            "FROM pg_catalog.pg_attribute attribute JOIN pg_catalog.pg_class relation ON relation.oid=attribute.attrelid "
+            "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace "
+            "LEFT JOIN pg_catalog.pg_attrdef defaults ON defaults.adrelid=attribute.attrelid AND defaults.adnum=attribute.attnum "
+            f"WHERE namespace.nspname={schema} AND relation.relname={name} "
+            "AND attribute.attnum>0 AND NOT attribute.attisdropped ORDER BY attribute.attname")
+
+
+def _green_streak(days, current_date):
+    days.sort(key=lambda day: day["date"])
+    expected = datetime.date.fromisoformat(current_date)
+    consecutive = 0
+    for day in reversed(days):
+        if (datetime.date.fromisoformat(day["date"]) != expected
+                or day.get("overall") != "green" or day.get("needs_agent_review")
+                or any(value is not True and value != "not_applicable"
+                       for value in day.get("checks", {}).values())):
+            break
+        consecutive += 1
+        expected -= datetime.timedelta(days=1)
+    return consecutive
+
+
 def _column_fingerprint(family, lines):
     """Parses information_schema.columns rows (name, type, nullable, default — tab-
     separated) into name -> {type, nullable, default}, strengthened from a name-only
@@ -402,7 +477,7 @@ def _column_fingerprint(family, lines):
             continue
         typ = parts[1] if len(parts) > 1 else ""
         nullable = parts[2] if len(parts) > 2 else ""
-        default = parts[3] if len(parts) > 3 and parts[3] != "NULL" else None
+        default = parts[3] if len(parts) > 3 and parts[3] not in ("NULL", "") else None
         out[name] = {"type": typ, "nullable": nullable, "default": default}
     return out
 
@@ -418,21 +493,17 @@ def run_day(cfg):
         )
     family = source_family
     tables = cfg["tables"]
+    if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
+        raise ValueError("tables must be a nonempty list of table identifiers")
     checksum_tables = cfg.get("checksum_tables") or tables[:2]
 
     def _side_sqls(conn_engine_family):
         snapshot_start = ("START TRANSACTION WITH CONSISTENT SNAPSHOT" if conn_engine_family == "mysql"
                            else "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        row_sqls = [f"SELECT COUNT(*) FROM {t}" for t in tables]
-        checksum_sqls = ([f"CHECKSUM TABLE {t}" for t in checksum_tables] if conn_engine_family == "mysql"
-                          else [f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {t} t" for t in checksum_tables])
-        if conn_engine_family == "mysql":
-            col_sqls = [f"SELECT column_name, column_type, is_nullable, column_default FROM "
-                        f"information_schema.columns WHERE table_schema=DATABASE() AND "
-                        f"table_name='{t}' ORDER BY column_name" for t in tables]
-        else:
-            col_sqls = [f"SELECT column_name, data_type, is_nullable, column_default FROM "
-                        f"information_schema.columns WHERE table_name='{t}' ORDER BY column_name" for t in tables]
+        row_sqls = [f"SELECT COUNT(*) FROM {_table_sql(family, table)}" for table in tables]
+        checksum_sqls = ([f"CHECKSUM TABLE {_table_sql(family, table)}" for table in checksum_tables] if family == "mysql"
+                          else [f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {_table_sql(family, table)} t" for table in checksum_tables])
+        col_sqls = [_columns_sql(family, table) for table in tables]
         return [snapshot_start] + row_sqls + checksum_sqls + col_sqls + ["COMMIT"]
 
     # ONE batched, one-session call per side — the consistent-snapshot transaction at the
@@ -440,12 +511,14 @@ def run_day(cfg):
     # the SAME session, closing the "independent statements can straddle a write" gap.
     # True cross-engine (source vs target) synchronization isn't possible without a
     # distributed transaction spanning two different database servers — that residual
-    # skew (the few hundred ms between opening each side's session) is accepted, not
+    # skew (connection establishment and scheduling delay) is accepted, not
     # eliminated; only the WITHIN-one-side inconsistency is closed here.
     src_sqls = _side_sqls(family)
     tgt_sqls = _side_sqls(family)
-    src_chunks = run_batch(family, cfg["source"], src_sqls)
-    tgt_chunks = run_batch(family, cfg["target"], tgt_sqls)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        source_future = executor.submit(run_batch, family, cfg["source"], src_sqls)
+        target_future = executor.submit(run_batch, family, cfg["target"], tgt_sqls)
+        src_chunks, tgt_chunks = source_future.result(), target_future.result()
 
     def _unpack(chunks):
         # chunks[0] = snapshot-start's own (empty) result; then N row counts, then M
@@ -464,7 +537,7 @@ def run_day(cfg):
         sc = int(src_rows[idx][0]) if src_rows[idx] and src_rows[idx][0] else None
         tc = int(tgt_rows[idx][0]) if tgt_rows[idx] and tgt_rows[idx][0] else None
         row_check["detail"][t] = {"source": sc, "target": tc}
-        if sc != tc:
+        if sc != tc or sc is None:
             row_check["pass"] = False
 
     checksum_check = {"pass": True, "detail": {}}
@@ -473,6 +546,8 @@ def run_day(cfg):
         tline = tgt_cks[idx][0] if tgt_cks[idx] else None
         sc = sline.split("\t")[-1] if sline else None
         tc = tline.split("\t")[-1] if tline else None
+        sc = None if sc in ("NULL", "") else sc
+        tc = None if tc in ("NULL", "") else tc
         checksum_check["detail"][t] = {"source": sc, "target": tc}
         if sc != tc or sc is None:
             checksum_check["pass"] = False
@@ -480,7 +555,7 @@ def run_day(cfg):
     drift_check = {"pass": True, "detail": {}}
     for idx, t in enumerate(tables):
         sc, tc = _column_fingerprint(family, src_cols[idx]), _column_fingerprint(family, tgt_cols[idx])
-        if sc != tc:
+        if sc != tc or not sc or not tc:
             drift_check["pass"] = False
             mismatched = sorted(k for k in (set(sc) & set(tc)) if sc[k] != tc[k])
             drift_check["detail"][t] = {
@@ -514,13 +589,14 @@ def run_day(cfg):
         "replication_lag": lag_check,
         "replication_errors": repl_errors_check,
         "customer_test_suite": customer_test_suite_check,
+        "period_evidence": None,
     }
-    measured = [v for v in checks.values() if isinstance(v, bool)]
-    overall_green = all(measured) if measured else False
+    measured = [value for value in checks.values() if value != "not_applicable"]
+    overall_green = bool(measured) and all(value is True for value in measured)
     needs_review = (not overall_green) or any(v is None for v in checks.values())
 
     return {
-        "date": datetime.date.today().isoformat(),
+        "date": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         "checks": checks,
         "detail": {"row_count": row_check["detail"], "checksum": checksum_check["detail"],
                     "schema_drift": drift_check["detail"], "firing_alarms": firing_alarms,
@@ -545,12 +621,7 @@ def update_status_json(status_path, day_result, n_total):
         days[existing_idx] = day_result
     else:
         days.append(day_result)
-    consecutive = 0
-    for d in reversed(days):
-        if d.get("overall") == "green":
-            consecutive += 1
-        else:
-            break
+    consecutive = _green_streak(days, datetime.datetime.now(datetime.timezone.utc).date().isoformat())
     soak["consecutive_green"] = consecutive
     soak["n_total"] = n_total
     # Lets the dashboard flag a silently-missed run (host was down, cron didn't fire,
