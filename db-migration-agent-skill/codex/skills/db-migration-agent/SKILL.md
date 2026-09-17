@@ -203,10 +203,20 @@ over as a single copy-paste block and ask for the output).
    cutover-readiness gates separately — share this URL with any stakeholder who wants to
    watch progress without reading chat transcripts." Do not start the server yourself.
 4. Confirm the starting/resume phase from the preserved plan before running preconditions.
-5. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
+5. **Before the account-level preconditions**, check local tooling
+   (`shared/reference/preflight-iam-cost.md` §0) — `aws`/`python3` always, plus
+   `node`/`npm`/`cdk`/`boto3` only if the mode (already known from step 2) actually
+   provisions infrastructure — Mode 1 never does. A missing binary otherwise surfaces as
+   a raw shell error on the very next step, not a clean ❌. Offer to install anything
+   missing (with the exact command for the detected OS) and proceed only after a clear
+   yes — this is a machine-only courtesy check, **not** authorization to deploy anything
+   into AWS.
+6. Run the precondition checks (`shared/reference/preflight-iam-cost.md` §1) — identity,
    account, region, source reachability, engine-version availability, quotas, IAM
-   simulation. Report ✅/❌ table. **STOP on ❌ and wait.**
-6. Note which MCP servers are connected (`shared/reference/mcp-and-tooling.md`).
+   simulation. Report ✅/❌ table. **STOP on ❌ and wait** — except CDK-bootstrap-missing,
+   which the agent can offer to fix, but only through the normal **A3** infrastructure-
+   deploy authorization (§1's note on this), not a casual go-ahead.
+7. Note which MCP servers are connected (`shared/reference/mcp-and-tooling.md`).
    Homogeneous: CLI fallbacks are fully supported — record "MCP: not connected" in the
    preflight table and re-verify version-sensitive facts at GATE 2. **Heterogeneous: the
    Agent Toolkit (AWS MCP Server) is a prerequisite** — its absence is a Phase 0 blocker

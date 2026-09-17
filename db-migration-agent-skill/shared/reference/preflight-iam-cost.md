@@ -4,6 +4,58 @@
 > pass (or be explicitly waived by the user) before proceeding. On failure: **STOP and
 > report** — do not improvise around a missing permission.
 
+## 0. Local tooling (check before §1 — a missing binary makes every later check fail with a raw shell error, not a clean ❌)
+
+```bash
+# Required in every mode — everything else in this skill assumes these already work
+aws --version
+python3 --version
+
+# Required only if the engagement will provision infrastructure — Mode 1 (analysis-only)
+# never does (engagement-safety.md's Mode 1 row: read-only assessment, no Create*), so
+# skip these entirely for Mode 1. Mode is already known by this point (Phase 0 step 2
+# runs before this check).
+node --version && npm --version   # needed for cdk (target provisioning is CDK-based)
+cdk --version
+
+# Only affects generate_presigned_urls.py (soak dashboard presigned links) — also Mode
+# 2/3 only, same reasoning as above
+python3 -c "import boto3" 2>&1
+
+# Optional — only affects which source-access path is available; Send-Command
+# (running the client that already exists ON the source/target host via SSM) always
+# works without these, so their absence is never a blocker, just a narrower menu
+mysql --version 2>&1
+psql --version 2>&1
+```
+
+Report missing **required** items (for the mode in play) as a table with the exact install
+command for the detected OS (`uname -s`; ask rather than guess for anything unclear), then
+ask once — *"Want me to install these now?"* — same lightweight courtesy check-in as Phase
+0 step 1, not silent, since this touches the machine, not just the AWS account. Only run
+the install commands after a clear yes. If declined, stop here and let the user install
+manually, then re-run this check on the next turn — don't try to work around a missing
+binary. **This is about the local machine only — it is not authorization to deploy
+anything into AWS itself; `cdk bootstrap` specifically is covered under §1 below, under
+the normal A3 infrastructure-deploy rule, not this courtesy check.**
+
+| Missing | Install (Linux) | Install (macOS) |
+|---|---|---|
+| AWS CLI v2 | `curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install` | `brew install awscli` (or the official `.pkg`) |
+| Node.js + npm | [nvm](https://github.com/nvm-sh/nvm) is the safest default — no `sudo`, no fighting the OS package manager's often-stale version, AND its Node install is user-owned so a later global npm install won't hit `EACCES`. ⚠️ Piping a downloaded script to `bash` executes it with your privileges — this is nvm's own documented install method, but say so plainly rather than calling it "safest" without the caveat; offer to download and show the script first if the user wants to review it. `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh \| bash`, then **source it in the current shell** (`\. "$HOME/.nvm/nvm.sh"` — the installer edits shell profile files but does not affect the shell you're already in) before `nvm install --lts`. Any later non-interactive shell you run commands in (e.g. via SSM) needs that same `source` line first. | `brew install node` (or nvm, same as Linux) |
+| AWS CDK CLI | Check `npm config get prefix` first — if it's root-owned (common with an OS-package-manager Node install, not with nvm), `npm install -g aws-cdk` fails with `EACCES`; don't blindly prepend `sudo` to a global npm install. Prefer nvm's Node (avoids this entirely) or `npm config set prefix ~/.npm-global` + add it to `PATH`, then `npm install -g aws-cdk`. | same |
+| Python 3 | OS package manager (`dnf install python3` / `apt install python3`) — usually already present | usually already present; `brew install python3` if not |
+| `boto3` | `shared/scripts/requirements.txt` is for the soak **Lambda's** runtime only (`pymysql`/`pg8000` — no boto3 in it; don't point here for this). Many distros' Python is `EXTERNALLY-MANAGED` and reject a bare `pip3 install`: create a venv first — `python3 -m venv ~/.venvs/db-migration-agent && ~/.venvs/db-migration-agent/bin/pip install boto3`, then use that venv's `python3` (not the system one) for `generate_presigned_urls.py`. | same (`python3 -m venv` + venv pip, same reasoning) |
+
+Windows: point at the official installer/MSI for whichever is missing rather than trying
+to script it — package-manager conventions differ too much to guess safely.
+
+**Credentials configured is a separate question from the CLI being installed.** If
+`aws sts get-caller-identity` (§1 below) fails with a credentials/token error specifically
+(not "command not found" — that's the check above), don't just log a generic ❌: walk the
+user through `aws configure` (access key/secret) or `aws configure sso`, whichever matches
+how they said they access AWS.
+
 ## 1. Environment preconditions (agent runs these silently)
 
 ```bash
@@ -29,6 +81,14 @@ aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].St
 ```
 
 Report results as a table: ✅/❌ per check. Any ❌ → present the fix, wait for the user.
+**CDK bootstrap specifically** is a fix the agent can offer, not just report — but it is a
+real infrastructure deploy into the account (an S3 bucket, IAM roles, an ECR repo), so it
+falls under action class **A3** (`engagement-safety.md` §Action classes) like any other
+target/production infrastructure deploy — **not** the lightweight courtesy check-in §0
+uses for local tooling. If missing: propose `cdk bootstrap aws://$ACCOUNT/$REGION`
+(confirm the account/region shown above first), append the A3 context-and-mark block to
+`authorizations.md`, and wait for its `**Confirmed:**` line before running it — same as
+any other first-time infrastructure deploy.
 
 ## 2. IAM — what the migration executor needs
 
