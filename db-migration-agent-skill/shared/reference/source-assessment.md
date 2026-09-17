@@ -280,10 +280,24 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
   `--defaults-extra-file` (chmod 600); never generate a credential file.
 - **Preferred:** fetch the secret **on the DB host** using the instance's IAM role, so the plaintext never transits your machine or appears in argv:
   ```bash
-  # Run on the DB host (e.g. via SSM Send-Command); password stays on the host, out of argv
-  export MYSQL_PWD=$(aws secretsmanager get-secret-value \
+  # Run on the DB host (e.g. via SSM Send-Command); password stays on the host, out of argv.
+  # Print the key names FIRST — never assume the field is called "password". Real secrets
+  # seen in practice use db_password/app_password, username+password, or other shapes.
+  aws secretsmanager get-secret-value --secret-id ecommerce-demo/db-credentials \
+    --query SecretString --output text | python3 -c 'import sys,json;print(sorted(json.load(sys.stdin).keys()))'
+  # Then reference the actual key name you just saw. Assign BEFORE export, not
+  # `export MYSQL_PWD=$(...)` directly — confirmed live: with `export VAR=$(cmd)`, a
+  # failing/erroring `cmd` still leaves the *export builtin* itself reporting success, so
+  # `set -e` never trips and MYSQL_PWD silently ends up "" instead of stopping the script.
+  # A plain (non-export) assignment's exit status IS the substituted command's exit status,
+  # so `set -e` (or the explicit `|| exit 1` below, which works with or without `set -e`)
+  # actually catches it here. An empty MYSQL_PWD usually then just fails mysql's own auth
+  # loudly — but don't rely on that; catch the real cause at the source instead of
+  # debugging a confusing downstream authentication error.
+  MYSQL_PWD=$(aws secretsmanager get-secret-value \
     --secret-id ecommerce-demo/db-credentials --query SecretString --output text \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["password"])')
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["password"])') || exit 1  # ← the real key, not a guess
+  export MYSQL_PWD
   mysql -h 127.0.0.1 -u admin -e "SELECT VERSION();"
   ```
 - PostgreSQL: use on-host `PGPASSWORD` or an existing customer-managed `~/.pgpass`
