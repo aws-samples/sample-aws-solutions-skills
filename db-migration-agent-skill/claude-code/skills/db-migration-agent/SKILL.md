@@ -52,19 +52,35 @@ hard constraint 10.
    **During active work, publish each sub-step as `in_progress` in the active phase's
    `steps[]` and update `current_activity` before starting it.** In particular, a sub-step
    expected to take more than two minutes must be visible before its command starts,
-   never first reported at completion. **As each sub-step succeeds, mark it `done`
+   never first reported at completion. **This applies to ALL work meeting that bar,
+   whether or not the per-phase checkpoint table names it:** setup, discovery, credential
+   fetch, connection establishment and script preparation before the first enumerated
+   step; investigation/recovery after `blocked`; work between phases; and completion
+   verification. **A phase's first checkpoint must cover its own setup**, before setup
+   expected to exceed two minutes begins. If work unexpectedly approaches two minutes,
+   publish a checkpoint before that threshold, then maintain the same active-work cadence.
+   Treat contiguous work as one unit; a succession of short commands does not reset the
+   clock. **As each sub-step succeeds, mark it `done`
    immediately with a concrete one-line result in `detail`; record a failure as `blocked`
    with its reason.** Keep the existing phase and step ids; do not add duplicate phases.
+   **A step transition is a mandatory checkpoint: you may not begin step N+1's work until
+   step N's dashboard entry reflects its real, verified outcome.** Persist the previous
+   result in the plan and both dashboard files, read it back successfully, then publish
+   the next step's start before launching its work. An internal conclusion or a queued
+   write does not satisfy this dependency; a failed write blocks the transition.
    **While a sub-step is running, check and publish progress at least every five minutes.**
    Refresh `current_activity`, the step's `detail`, and `updated_at` with observed progress
    and the time checked, even if counters have not changed. If incremental progress is
    unavailable, report the observed job state and elapsed time; if that state cannot be
    checked, say it is unverified. Never invent counts, percentages, or completion.
-   Record every start, progress check, and result in `migration-plan.md` and refresh both
-   dashboard files as above — these are plan-update triggers within a phase, not just at
-   its boundaries. Use background jobs or bounded polling so a long command cannot prevent
-   these updates. Active work must not leave every step `pending` or `current_activity`
-   unchanged for more than five minutes.
+   Record every start, progress check, result, and transition in `migration-plan.md` and
+   refresh both dashboard files as above — these are plan-update triggers within a phase,
+   not just at its boundaries. **For backgrounded work without incremental telemetry,
+   implement the bounded supervisor loop in “Dashboard cadence within a phase” before
+   launching the job.** That loop owns the job, checks, and writes through completion
+   verification; backgrounding a command and remembering to revisit it is insufficient.
+   Active work must not leave every step `pending` or `current_activity` unchanged for
+   more than five minutes.
    **Exception: Phase 7.7's scheduled soak checks remain once daily, with the existing
    36-hour-overdue banner; the two-minute/five-minute rules do not apply to soak.**
    Concurrent active work, such as the clone rehearsal, still follows the active-work
@@ -167,8 +183,12 @@ during assessment, data load, and validation. Phase 7.7 soak retains its daily c
 
 These checkpoints supplement `shared/reference/dashboard.md`'s **What to populate, and
 when** table. Each checkpoint updates the plan, snapshot, and activity log under hard
-constraint 1. Apply its start/completion and five-minute rules to active work; **Phase 7.7
+constraint 1. Apply its start/completion and five-minute rules, plus the transition
+checkpoint below, to active work; **Phase 7.7
 soak is exempt and remains once daily, with the existing 36-hour-overdue banner.**
+The table is a minimum, not an exhaustive work list. Represent unlisted work with steps
+in the existing owning phase, reusing matching ids and adding missing steps as needed.
+Include setup first; assign work between phases to its owning phase before starting it.
 
 | Phase | Required checkpoints during the work |
 |---|---|
@@ -177,17 +197,138 @@ soak is exempt and remains once daily, with the existing 36-hour-overdue banner.
 | Phase 7 — validation | Publish each table's validation step before its queries run. **As each table's checksum is confirmed, immediately update its `migration_objects.tables.items[]` entry's `checksum_match` and `status:"validated"` and refresh the `validated` count; never batch these updates at the end.** Report per-table progress in `current_activity` and step `detail`. A mismatch is a failed validation, blocks the validation gate, and must not be reported as a successful step. Preserve the existing validation scope and GATE 3 acceptance requirement. |
 | Phase 7.7 — soak | Keep the scheduled once-daily report/sample updates and 36-hour-overdue detection. These active-work checkpoints add no five-minute soak polling, extra daily samples, or compressed green periods; existing waiver/manual-tracking rules still apply. Concurrent rehearsal uses the active-work cadence without changing soak cadence or overwriting the scheduler's latest data. |
 
-**Worked Phase 6 example (illustrative observations, not seed data; not a soak schedule):**
-each row is a plan + snapshot + log update, modifying the same phase/step objects.
-Log starts/progress as `result:"in_progress"` and successful completions as
-`result:"success"` (`done` is the step status, not a log result).
+**Why both a transition checkpoint and a supervisor loop:** a live four-table
+`mysqldump | mysql` test published the first two tables correctly and checked `orders`
+after 26 seconds, then went silent for over ten minutes. Independent DB/process checks
+found all 29,900,000 `orders` rows loaded and `order_items` already dumping while the
+dashboard still said `load-orders: in_progress`. The advisory five-minute reminder
+depended on the agent returning to it; neither completion nor the next launch required
+a successful write in the work's control flow.
+
+**Transition checkpoint (every active phase):** put the previous result write and
+read-back on the path that launches the next command, including inside per-table loops
+and delegated workers. Confirm the plan result, existing `steps[]` entry, applicable
+object counts/status, and activity-log result agree with the verified evidence. Only then
+write/read back the next step's `in_progress` checkpoint and launch it. Forward progression
+stops on failure or incomplete verification; recovery uses the same supervision below.
+A vanished PID alone does not prove success.
+For independent work explicitly planned to overlap, first publish the previous job's
+freshly checked running state and keep its supervisor active; do not imply it finished.
+Each concurrent job needs supervision, with coordinated writes per `dashboard.md`.
+
+**Required recipe for a job with no incremental telemetry:** implement a supervisor in
+one shell/Python invocation that launches one step in the background and runs the loop
+below itself. It must keep running if the tool returns a session handle; separate agent
+turns or a sequence of manually scheduled tool calls are not the timer. Before launch,
+implement and check the publisher against the actual plan/dashboard location and record
+a finite monitoring budget. The pseudocode names below are contracts to implement for
+the approved method, not existing repository helpers:
+
+- `publish_and_confirm` updates `migration-plan.md`, `status.json`, and the activity log,
+  then reads them back to confirm the checkpoint persisted. Update `current_activity`,
+  the existing step's status/`detail`, `updated_at`, observed/check times and elapsed time,
+  plus the phase-specific fields in the table above. Bound the entire publish/read-back,
+  including retries, to 15 seconds; any failure raises and prevents further launches.
+  Log starts/checks as `result:"in_progress"`, completions as `result:"success"`, and
+  failures as `result:"blocked"` (`done` is a step status, not a log result).
+- The background job covers the operation **and its required completion verification**,
+  records its handle and exit/result evidence, and cannot launch the next step. For a
+  streaming pipe, capture both producer and consumer failures (e.g. `pipefail`); success
+  requires the verified target result as well as successful process exits. Long row-count
+  or checksum queries run under this same supervision: report “load exited; verifying”
+  while they run, without prematurely marking the step `done`.
+- `probe` reads the job state/result within 15 seconds. A timeout or unavailable state
+  returns an observation explicitly marked unverified, which must still be published.
+  Process liveness is evidence of running only; it supplies no invented row count.
+- `require_previous_checkpoint_read_back` requires verified success for sequential work.
+  Only a recovery step may follow its failed step's persisted/read-back `blocked` result.
+  Recovery investigates, fixes, and verifies the fix; it does not retry the failed operation.
+  Its `done` result must persist/read back before a fresh `run_step` retries that operation.
+
+```text
+run_step(step, previous, monitoring_budget_seconds):
+    require_previous_checkpoint_read_back(previous, next_step=step)  # success, or BLOCKED -> its recovery only
+    publish_and_confirm(step, in_progress, "starting")  # failure => no launch
+    job = launch_operation_and_verification_in_background(step)
+    return supervise(step, job, monotonic_now() + monitoring_budget_seconds)
+
+supervise(step, job, deadline):
+    loop:
+        observed = probe(job, timeout_seconds=15)
+        if observed.verified_success:
+            publish_and_confirm(step, done, observed.result_and_evidence)
+            return DONE                         # only after completion is persisted
+        if observed.failed:
+            publish_and_confirm(step, blocked, observed.failure_and_evidence)
+            return BLOCKED
+        capped = monotonic_now() >= deadline
+        publish_and_confirm(step, in_progress,
+                            observed + cap_details(job.handle, "resume supervision") if capped else observed)
+        if capped:
+            return PAUSED_WITH_HANDLE(job)       # never success or permission for N+1
+        sleep(min(60, max(0, deadline - monotonic_now())))
+
+previous = None                                 # no previous checkpoint for the first step
+# Include setup and all unlisted work; insert newly discovered work before executing it.
+for step in planned_sequential_steps:
+    outcome = run_step(step, previous, configured_finite_budget)
+    while outcome == BLOCKED and recovery_planned_within_existing_retry_limits(step):
+        recovery = recovery_step_for(step)       # e.g. recover-load-seed_numbers
+        outcome = run_step(recovery, step, configured_finite_budget)
+        if outcome != DONE:
+            break                               # resolve recovery before any retry
+        outcome = run_step(step, recovery, configured_finite_budget)
+    if outcome != DONE:
+        break                                   # PAUSED: resume same job; BLOCKED: ask user
+    previous = step
+```
+
+The 60-second sleep leaves room within the five-minute limit for the bounded probe,
+publication, retries, and read-back. Measure the limit between persisted checkpoints,
+not sleep calls; five minutes is not a sleep duration to which query/write time may be
+added. Every iteration writes, even when nothing changed. Use monotonic time for the
+deadline and actual UTC times in the records. Completion/failure writes occur on
+detection, before returning or launching anything else. This follows
+`shared/scripts/soak_check_lambda.py`'s bounded CAS-retry
+structure: observe fresh state, attempt the write, return only on confirmed success,
+and surface exhaustion rather than silently continuing.
+
+On `BLOCKED`, either stop and surface the blocker to the user or immediately publish/read
+back recovery as `in_progress` before investigation starts. Recovery uses the same
+`current_activity`, step `detail`, activity log, and supervised check-ins; leaving the load
+step `blocked` does not cover ongoing recovery work or permit silence until the retry.
+
+At the cap, persist the actual state, elapsed time, live job handle, and next action
+before returning control. If the job is still active, immediately call `supervise` with
+that **same** job and a new finite deadline or transfer it to another running supervisor;
+do not leave it unmonitored, relaunch it, or start N+1. A publication failure stops workflow advancement
+and must surface as an error to the agent for repair, including whether the job is still
+running; it is not a successful check-in. Keep the loop active during verification so a
+blocking `COUNT(*)` cannot recreate the silent window.
+
+**Worked Phase 6 example (reproduced failure sequence; not seed data or a soak schedule):**
+each row below requires a plan + snapshot + log write and read-back on the same
+phase/step objects. The first two tables are `seed_numbers` (1,000 verified rows) and
+`customers` (10,000,000 verified rows); both have already been published as `done`/loaded,
+so `tables.loaded` is 2. Subsequent checks/timing describe the required supervisor behavior.
 
 | Moment in a four-table load | Published state |
 |---|---|
-| Before launch | Phase `6` and step `load-customers` are `in_progress`; `current_activity`: “Table 1/4 loading: customers — starting.” Other table steps remain `pending`. |
-| Five minutes later | From the loader's actual report: `current_activity`: “Table 1/4 loading: customers — 120,000 rows copied; checked 09:05 UTC.” Update the running step's `detail` and `updated_at`; it is still `in_progress`. |
-| Customers finishes | Mark `load-customers` `done`, `detail`: “200,000 rows loaded.” Set that table's `rows_target:200000`, `status:"loaded"`, and `tables.loaded:1`. Publish `load-orders` as `in_progress` and “Table 2/4 loading: orders — starting” before starting it. Loading does not establish checksum validation. |
-| Throughout the remaining hours | Repeat checks at intervals no longer than five minutes and publish each actual table/chunk completion. For example, show “Table 3/4 loading” while that table is running. Mark the final load step `done` only after verified completion; publish any remaining schema/CDC/rehearsal work rather than marking Phase 6 complete from bulk-load completion alone. |
+| Before `orders` starts at 17:53:30Z | Read back the completed `customers` checkpoint, then publish Phase `6` and `load-orders` as `in_progress`; `current_activity`: “Table 3/4 loading: orders — starting.” Only after this write/read-back may the supervisor launch the `orders` pipe. `load-order_items` stays `pending`. |
+| Proactive check at 17:53:56Z | Publish the observed loader state and elapsed 26 seconds in `current_activity`/`detail`, with the check time and `updated_at`. This one early check does not replace the recurring loop. |
+| Next loop iterations, including the previously silent ten minutes | Each iteration checks and writes automatically, with at most 60 seconds sleeping and bounded probe/write time as above: actual process state, elapsed time, and check time, or explicitly unverified state if probing fails. No incremental row count is claimed for the pipe. |
+| `orders` pipe exits; verification is pending | Publish “orders load exited; verifying target row count,” keeping `load-orders` `in_progress`. The supervisor keeps checking/writing while the verification query runs; `order_items` cannot start. |
+| `orders` completion is verified | With successful pipe exits and target `COUNT(*) = 29,900,000` matching the source, publish `load-orders: done`, `detail`: “29,900,000 rows loaded; source/target counts match,” that table's `rows_target:29900000`, `status:"loaded"`, and `tables.loaded:3`. Read back the plan, snapshot, and success log entry **before** returning `DONE`. Loading does not establish checksum validation. |
+| Before any `order_items` dump or spot-check begins | The transition guard requires the persisted `orders` completion above. Then write/read back `load-order_items: in_progress` and “Table 4/4 loading: order_items — starting” before launching its supervised job. A missing/stale completion or failed write stops this launch; the observed “orders finished → order_items started, zero writes” sequence cannot pass the guard. |
+| Through `order_items` completion | Keep the same loop through loading and verification of the 69,700,000-row source table; publish only observed target counts. Mark the final load step `done` only after verified completion; publish any remaining schema/CDC/rehearsal work rather than marking Phase 6 complete from bulk-load completion alone. |
+
+A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from its step list:
+
+| Moment in the follow-up load | Published state |
+|---|---|
+| Task starts at 18:16:29Z; setup precedes the first table | Publish/read back a setup step as `in_progress` before starting setup expected to exceed two minutes; if unexpectedly long, its first checkpoint must appear by ~18:18:29Z. Cover source connection setup, credential fetch, discovery of what to load, and script preparation with the same supervised check-ins. The observed first dashboard write at 18:27:55Z left 11 minutes 26 seconds silent and violates this rule. |
+| Load fails at 18:28:57Z | Publish/read back `load-seed_numbers: blocked` with the real SSM script error, `set: Illegal option -o pipefail`. If investigating, immediately/within moments publish/read back `recover-load-seed_numbers: in_progress` before that work starts; keep checking/writing during investigation and the fix. The observed silence until the 18:32:09Z retry (3 minutes 12 seconds) is not allowed. |
+| Recovery resolves before the retry | Persist/read back the verified recovery result as `done`, then publish/read back a fresh `load-seed_numbers: in_progress` before retrying via `run_step`. If recovery fails, publish/read back its `blocked` reason and escalate to the user instead. |
 
 ## Knowledge sources (load on demand — do not preload)
 
