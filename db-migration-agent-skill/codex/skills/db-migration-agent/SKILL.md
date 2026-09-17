@@ -247,12 +247,13 @@ and, if it arrived via chat, backfill the corresponding `**Answer:**` line in
 relieve you of hard constraint 13 — a terse or contradictory answer still gets a follow-up
 question, same as it would in an all-chat flow.
 
-⛔ **GATE 1** — the lock-in mark lives in `discovery-questions.md`'s own closing block
-(its "GATE 1" section), not a duplicate row in `authorizations.md` — that file's §2 just
-points there. Before asking for that mark, explain what each non-obvious choice (mode,
-parallel-run length, rehearsal depth) actually means and what its default assumes — see
-`engagement-safety.md` §How to present a gate. From the moment that block is marked, the
-chosen parameters are binding and any deviation is a recorded waiver.
+⛔ **GATE 1** — confirmed by a clear go-ahead in chat, not a written mark (the one gate
+that works this way — nothing irreversible has happened yet; Phase 2 is read-only). Before
+asking for that go-ahead, explain what each non-obvious choice (mode, parallel-run length,
+rehearsal depth) actually means and what its default assumes — see `engagement-safety.md`
+§How to present a gate. Once confirmed, note the date in `migration-plan.md`'s GATE 1 row
+yourself; from that point the chosen parameters are binding and any deviation is a
+recorded waiver.
 
 ### Phase 2: Assess the source (read-only)
 
@@ -276,9 +277,10 @@ return here for data movement. Prepare the **cost estimate**
 rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
 terms the customer can independently evaluate, not a one-line justification clause — see
 `engagement-safety.md` §How to present a gate. User approves, and you **append the GATE 2
-block to `authorizations.md` §3 immediately** (same discipline as GATE 1/3 — a verbal
+block to `authorizations.md` §3 immediately** (same discipline as GATE 3 — a verbal
 "approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
-must not proceed until that block's `**Confirmed:**` line is actually filled in). **If the
+must not proceed until that block's `**Confirmed:**` line is actually filled in — GATE 1
+is the one gate that doesn't work this way, see its own entry above). **If the
 chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
 replication), plan the **CDC-proof probe** described in
 `execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a

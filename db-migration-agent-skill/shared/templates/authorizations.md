@@ -5,7 +5,9 @@
 > a **date/timestamp only** — no name, no role, no other identifying detail, by design. A
 > block's `**Confirmed:**` line is filled in directly by whoever is present at that moment;
 > the agent drafts the block and appends it, then stops — it never fills in that line
-> itself. `migration-plan.md` gate rows point at the corresponding block here. Rules and
+> itself. `migration-plan.md` gate rows point at the corresponding block here. **GATE 1 is
+> the one exception** — nothing irreversible has happened yet at that point, so it's
+> confirmed by a clear go-ahead in chat instead of a written mark; see §2. Rules and
 > action classes: `shared/reference/engagement-safety.md`.
 >
 > Not every item below needs its own block. Items that just restate a decision already
@@ -23,8 +25,10 @@
 
 ## 2. GATE 1 — Discovery + mode + engagement parameters
 
-**Locked in `discovery-questions.md`, not duplicated here.** See that file's closing
-block for the mark and date. GATE 1 line in `migration-plan.md` points there.
+**Confirmed via chat, not a written mark.** Unlike every block in §3, GATE 1 doesn't need
+you to edit a file — once you're satisfied with the discovery-questions.md summary, just
+say so in chat; the agent notes the date in `migration-plan.md`'s GATE 1 row itself. See
+that file's closing block for the underlying content.
 
 ## 3. Standalone authorization blocks (appended as each moment arises)
 

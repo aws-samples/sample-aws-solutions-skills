@@ -19,9 +19,11 @@
 | Status | ⏳ Phase {n} |
 
 > Approvals of record live in **`authorizations.md`** as a `**Confirmed:**` mark + date
-> per block — no name captured, by design; gate rows below reference it. GATE 1 itself is
-> locked in `discovery-questions.md`'s own closing block, not a separate authorizations.md
-> row. IAM guardrail active: {session policy / boundary / simulate-proof}.
+> per block — no name captured, by design; gate rows below reference it. GATE 1 is the one
+> exception: nothing irreversible has happened yet at that point, so it's confirmed by a
+> clear go-ahead in chat rather than a written mark — the agent notes the date below once
+> that lands, it's not a separate authorizations.md row. IAM guardrail active: {session
+> policy / boundary / simulate-proof}.
 
 ## Phase 0 — Preflight ▢
 - Account/region verified: ▢ ({account-id}, {region})
@@ -29,7 +31,7 @@
 - Quotas OK: ▢ · Engine version available: ▢ · CDK bootstrapped: ▢/n.a.
 - MCP servers connected: {list or "none — CLI fallback"}
 
-## Phase 1 — Discovery answers (GATE 1 sign-off: ▢ {date} — see `discovery-questions.md`)
+## Phase 1 — Discovery answers (GATE 1: ▢ confirmed in chat {date} — agent-noted, see `discovery-questions.md`)
 | # | Question | Answer |
 |---|----------|--------|
 | — | *#1–2 answered in chat at Phase 0/1; #3–20 collected via `discovery-questions.md` (or chat, if preferred) and transcribed below.* | |

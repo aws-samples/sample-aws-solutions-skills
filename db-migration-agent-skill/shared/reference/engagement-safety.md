@@ -229,13 +229,15 @@ a record of *what* was authorized and *when*; it does not answer *who*, and it n
 **The agent drafts and appends the block; it never fills in the `**Confirmed:**` line
 itself.** Gathering and recording evidence (a green validation battery, a green soak
 period) is ordinary agent work and can happen without a round-trip. *Confirming* that
-evidence — GATE 1/2/3/4 or a soak-exit block — is the approver's own act, and requires
-their own reply addressing that specific block, entered directly by them in the file. A
-broader instruction like "proceed with execution" authorizes the work it names; it is not
-advance confirmation of whatever gate the work happens to produce evidence for. If a
-gate's evidence goes green mid-flight, stop, present it with its own ACTION NEEDED block,
-and wait — don't carry an earlier "proceed" forward as a mark on a block the user hasn't
-seen yet.
+evidence — GATE 2/3/4 or a soak-exit block — is the approver's own act, and requires their
+own reply addressing that specific block, entered directly by them in the file. A broader
+instruction like "proceed with execution" authorizes the work it names; it is not advance
+confirmation of whatever gate the work happens to produce evidence for. If a gate's
+evidence goes green mid-flight, stop, present it with its own ACTION NEEDED block, and
+wait — don't carry an earlier "proceed" forward as a mark on a block the user hasn't seen
+yet. **GATE 1 is the one exception to all of this** — nothing irreversible has happened
+yet at that point (Phase 2 is read-only), so a clear go-ahead in chat is enough; the agent
+notes the date in `migration-plan.md` itself once that lands, the only gate where it does.
 
 ## How to present a gate
 
@@ -253,7 +255,8 @@ For each gate, at minimum:
   replacement for it. In chat, for anything not already covered there — Mode 2 vs 3 in
   particular, since that's settled before the file exists — say what it actually changes
   and what the recommended default assumes about risk tolerance. Don't just restate the
-  customer's own answers back as a bullet list.
+  customer's own answers back as a bullet list. Confirmation itself is just a clear
+  go-ahead in chat, not a file edit — see `authorizations.md` §2.
 - **GATE 2** (method): say why *this* method over the rejected alternatives, in terms the
   customer can independently evaluate (downtime budget, cost, what breaks if a bandwidth
   estimate is wrong) — not just "chosen method: X" with a one-line justification clause.
@@ -382,7 +385,7 @@ decommission stage is signed:
 | Phase | Addition |
 |-------|----------|
 | 0 | **Mode question first** (1/2/3, Mode 2 recommended); mode gates the whole session; guardrail policy generated for that mode |
-| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 locked via that file's own closing block, `authorizations.md` §2 just points there |
+| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 confirmed by a clear go-ahead in chat (not a written mark), agent notes the date in `migration-plan.md`, `authorizations.md` §2 just points there |
 | 6.5 | Rehearsal per the chosen parameter (see execution-runbooks.md §Rehearsal) |
 | 7.7 | **Parallel-run soak**: target stays current; daily `soak-report.md`; customer may point read-only traffic/load tests at the target; cutover readiness requires N consecutive green periods |
 | 8 | **Mode 2** → assemble + verify the handover package, walk the customer through the runbook, sign A4b, then stop (offer read-only observation during their cutover). **Mode 3** → execute step-by-step with go/no-go per group, A4 signed first |

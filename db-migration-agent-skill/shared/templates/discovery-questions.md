@@ -289,15 +289,16 @@ owns it afterward, and feeds the Phase 9 decommission/handoff step.
 
 ---
 
-### GATE 1 — Lock in discovery, mode, and engagement parameters
+### GATE 1 — Discovery, mode, and engagement parameters lock in here
 
-Once #1–20 above (across this file and chat) are answered, this is the actual GATE 1
-sign-off — not a separate step in `authorizations.md`. Locking this in means the chosen
-mode and engagement parameters are binding from here on; any later deviation is a recorded
-waiver, not a quiet change.
-
-**Confirmed:** {date — filled in once you're satisfied with the summary above; the agent
-never fills this in itself}
+Once #1–20 above (across this file and chat) are answered — or you just say "go with
+recommendations" — tell the agent you're ready in chat and it moves straight to Phase 2.
+Nothing to write down here: unlike the authorization blocks later in the engagement
+(source writes, cutover, rollback, decommission), nothing irreversible has happened yet at
+this point, so a clear go-ahead in conversation is enough — no file to sign. Locking this
+in just means the chosen mode and engagement parameters are binding from here on; any
+later deviation gets called out explicitly rather than quietly slipped in. The agent notes
+the date in `migration-plan.md`'s GATE 1 row once you've said so.
 
 ---
 
