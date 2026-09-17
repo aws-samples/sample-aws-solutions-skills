@@ -292,27 +292,6 @@ rehearsal and the parallel run, in *your* CI/QA systems pointed at the target en
 
 ---
 
-### 19. Named operational contact, source side
-
-Not who *decides* things (that's the approver on each authorization block) — who would
-you actually call if something on the source host looked odd during this migration? A
-DBA/ops handle, not a manager.
-
-**Answer:** {a role/contact description is fine — e.g. "on-call DBA rotation," a Slack
-channel, whatever's real for your team}
-
----
-
-### 20. Post-migration ownership
-
-Once this migration is complete, who operates the target going forward? Distinct from
-#16e's handover depth (which is about how much prep work happens now) — this is about who
-owns it afterward, and feeds the Phase 9 decommission/handoff step.
-
-**Answer:** {a role/team description}
-
----
-
 ### GATE 1 — Discovery, mode, and engagement parameters lock in here
 
 Once #1–20 above (across this file and chat) are answered — or you just say "go with
