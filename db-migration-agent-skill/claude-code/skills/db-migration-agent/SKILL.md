@@ -50,12 +50,16 @@ hard constraint 10.
 3. **The user approves the method, the cost, and the cutover** (GATES 2 and 4). Present
    options with trade-offs; never silently pick, never start a cutover unprompted. **Every
    ⛔-marked gate (1, 2, 3, 4) and the soak-exit block is the same kind of stop** — the agent
-   gathers and records evidence, drafts the corresponding block in `authorizations.md`, and
-   appends it — but only the approver's own reply, addressing that specific block, marks it
-   `**Confirmed:**`. Never fill in that line yourself off the back of a broader "proceed"
-   instruction that didn't actually address that block — a green validation result is
-   evidence to present, not a mark to fill in yourself. If you catch yourself about to mark
-   a block the user didn't explicitly address, stop and ask.
+   gathers and records evidence, drafts the corresponding block (GATE 2/3/4, soak-exit,
+   every A-numbered action, every waiver) in `authorizations.md` and appends it; **GATE 1
+   is the one exception with no separate block there at all** — its mark lives in
+   `migration-plan.md`'s own GATE 1 row instead, since its content already lives in
+   `discovery-questions.md`. Either way, only the approver's own reply — one that
+   affirmatively accepts that specific block **in full**, not a broader "proceed"
+   instruction that didn't actually address it — is what lets you fill in the
+   `**Confirmed:**` date yourself; a green validation result is evidence to present, not
+   something that lets you mark the block on its own. If you catch yourself about to mark
+   a block the user didn't explicitly and fully accept, stop and ask.
 4. **No credentials in argv or in files you generate.** `MYSQL_PWD`/`PGPASSWORD`/
    defaults-file or Secrets Manager fetched on-host only — rules in
    `shared/reference/source-assessment.md`.
@@ -242,7 +246,7 @@ else.
   networking being provisioned (`target-provisioning.md` §Network Placement)?
 
 **Once #1/#2 land, generate `discovery-questions.md`** from the template
-(`shared/templates/discovery-questions.md`) for items **#3–20**, tailored to the branch
+(`shared/templates/discovery-questions.md`) for items **#3–18**, tailored to the branch
 #1/#2 selected (e.g. drop OS-access-dependent sub-questions for a managed-DB source). Tell
 the customer plainly what you just did and that answering in chat instead is equally
 fine — never frame the file as the only path. Every item in that file already carries its
@@ -265,8 +269,8 @@ each non-obvious choice (mode, parallel-run length, rehearsal depth) actually me
 what its default assumes — see `engagement-safety.md` §How to present a gate. Once
 confirmed, note the date in `migration-plan.md`'s GATE 1 row yourself (this one has no
 separate `authorizations.md` block, since its content already lives in
-`discovery-questions.md`); from that point the chosen parameters are binding and any
-deviation is a recorded waiver.
+`discovery-questions.md`); from there, go with those choices unless something changes —
+say so plainly if it does, rather than quietly switching, and record that as a waiver.
 
 ### Phase 2: Assess the source (read-only)
 
@@ -441,9 +445,9 @@ works. Details + install: `shared/reference/mcp-and-tooling.md`.
 
 By the end of an engagement the working directory contains:
 
-1. **`migration-plan.md`** — complete, every gate signed, evidence embedded.
-2. **`authorizations.md`** — mode + engagement-parameter sign-offs, action-class
-   authorizations (incl. A4b handover acceptance in Mode 2), waivers — the audit record.
+1. **`migration-plan.md`** — complete, every gate confirmed, evidence embedded.
+2. **`authorizations.md`** — action-class authorizations (incl. A4b handover acceptance
+   in Mode 2), waivers — the audit record.
 3. **`{prefix}-migration/`** — the deployed CDK project (`shared/patterns/cdk-stacks.md`
    layout) with README + Mermaid architecture diagram, owned by the customer.
 4. **`cutover-runbook.md` + `rollback-runbook.md`** — as executed, with measured timings

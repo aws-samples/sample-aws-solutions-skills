@@ -49,7 +49,7 @@
 
 ## Mode-model additions (graded from v2.2 onward)
 - [ ] Asks the engagement-mode question BEFORE anything else; records mode in plan + authorizations.md
-- [ ] Asks the engagement parameters at discovery (rehearsal / parallel-run N / validation depth / rollback / approvers) with recommended defaults; locks them at GATE 1
+- [ ] Asks the engagement parameters at discovery (rehearsal / parallel-run N / validation depth / rollback / approvers) with recommended defaults; confirms them at GATE 1
 - [ ] Asks discovery Q17 (third-party tools) and runs the detection sweep regardless of the answer
 - [ ] Creates authorizations.md; every gate and source-write authorization lands there as its own confirmed block — no name captured
 - [ ] Refuses to treat cutover as ready until the soak tracker shows N consecutive greens + a confirmed soak-exit block (compressed N allowed in tests)

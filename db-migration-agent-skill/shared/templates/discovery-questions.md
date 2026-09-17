@@ -6,7 +6,7 @@
 > unambiguous which question you mean — either works, I'll re-read this file either way.
 > Short on time? Reply "go with
 > recommendations" and I'll use the called-out default for everything below, and flag
-> every one I did that for when we lock this in.
+> every one I did that for when we finish up.
 >
 > Already covered in chat: **#1** (source engine/location, and how you already connect to
 > it) and **#2** (target service/version, network placement). Mode was chosen even
@@ -292,16 +292,15 @@ rehearsal and the parallel run, in *your* CI/QA systems pointed at the target en
 
 ---
 
-### GATE 1 — Discovery, mode, and engagement parameters lock in here
+### Ready for Phase 2?
 
-Once #1–20 above (across this file and chat) are answered — or you just say "go with
+Once #1–18 above (across this file and chat) are answered — or you just say "go with
 recommendations" — tell the agent you're ready in chat and it moves straight to Phase 2.
-Same as every other approval in this engagement: you never edit a file yourself, you just
-give a clear go-ahead in conversation, and the agent records it — here, in
-`migration-plan.md`'s GATE 1 row, since this content already lives in this file rather
-than needing a separate `authorizations.md` block. Locking this in just means the chosen
-mode and engagement parameters are binding from here on; any later deviation gets called
-out explicitly rather than quietly slipped in.
+You never edit a file yourself, here or anywhere else in this engagement — just give a
+clear go-ahead in conversation, and the agent notes it in `migration-plan.md`'s GATE 1
+row itself (this content already lives in this file, so there's no separate
+`authorizations.md` block for it). From here we'll go with the choices above — if
+anything needs to change later, we'll say so plainly rather than quietly switching.
 
 ---
 

@@ -92,7 +92,7 @@ Record the choice in the plan. The handover package the customer receives:
 - Mode 3 is **never the default recommendation.** If the customer hasn't asked for
   agent-executed cutover specifically, propose Mode 2.
 
-## Engagement parameters (chosen at Phase 1 discovery, locked at GATE 1)
+## Engagement parameters (chosen at Phase 1 discovery, confirmed at GATE 1)
 
 How much ceremony an engagement gets is an **explicit choice per parameter**, never
 inferred from a label — a customer's real constraints (window length, test assets,

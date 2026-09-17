@@ -30,7 +30,7 @@ From there:
      if you explicitly ask for it, with the risks stated and an approver present.
 
 2. **A short interview.** Two quick routing questions in chat first (what kind of source,
-   how you already connect to it), then the rest — about 18 more — in a file you fill out
+   how you already connect to it), then the rest — 16 more — in a file you fill out
    at your own pace, each one with enough context to know why it's being asked and a
    recommended default. Say **"go with recommendations"** and it skips to the end, or just
    answer in chat instead if you'd rather. It asks the things teams forget until it's too
@@ -79,9 +79,12 @@ From there:
 **You'll be asked** at four gates: to confirm the interview answers (mode + parameters),
 to approve the method + cost, to accept the validation evidence, and — in Mode 2 — to
 accept the cutover handover, or in Mode 3 to green-light the cutover window.
-Every approval is recorded in a generated `authorizations.md` with a confirmation mark and
-a date/timestamp — never a name — an audit record you can hand to your security team. Skipping a safety step (like the
-rehearsal) is possible, but only as a **written waiver** with the risk spelled out.
+Every approval gets a confirmation mark and a date/timestamp — never a name — recorded in
+`authorizations.md` (the first one, confirming the interview answers, lands in
+`migration-plan.md`'s own row instead) — an audit record you can hand to your security
+team. You never edit either file yourself; a clear go-ahead in chat is all it takes, and
+the agent records it. Skipping a safety step (like the rehearsal) is possible, but only as
+a waiver, recorded the same way, with the risk spelled out.
 
 **You'll never be asked** to paste a password into chat (credentials live in AWS Secrets
 Manager and are fetched on-host), to approve vague actions ("can I fix some things?" —
