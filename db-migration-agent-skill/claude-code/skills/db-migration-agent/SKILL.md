@@ -44,6 +44,31 @@ hard constraint 10.
    and sign-off as it lands. A step without its result written down is not done. **Every
    time you update it, also refresh `dashboard/status.json` and append one line to
    `dashboard/activity-log.jsonl`** (`shared/reference/dashboard.md`) — one habit, not two.
+   Mirror phase outcomes, findings, remaining work and evidence; keep risks, cost/timing
+   estimates, architecture rationale, and individual gate requirements current using that
+   reference's optional schema and population schedule. Mirror each pending ACTION NEEDED
+   request into `customer_actions`, resolving it only after the specific reply is recorded.
+   Missing facts stay unrecorded; the page never supplies approvals or computes readiness.
+   **During active work, publish each sub-step as `in_progress` in the active phase's
+   `steps[]` and update `current_activity` before starting it.** In particular, a sub-step
+   expected to take more than two minutes must be visible before its command starts,
+   never first reported at completion. **As each sub-step succeeds, mark it `done`
+   immediately with a concrete one-line result in `detail`; record a failure as `blocked`
+   with its reason.** Keep the existing phase and step ids; do not add duplicate phases.
+   **While a sub-step is running, check and publish progress at least every five minutes.**
+   Refresh `current_activity`, the step's `detail`, and `updated_at` with observed progress
+   and the time checked, even if counters have not changed. If incremental progress is
+   unavailable, report the observed job state and elapsed time; if that state cannot be
+   checked, say it is unverified. Never invent counts, percentages, or completion.
+   Record every start, progress check, and result in `migration-plan.md` and refresh both
+   dashboard files as above — these are plan-update triggers within a phase, not just at
+   its boundaries. Use background jobs or bounded polling so a long command cannot prevent
+   these updates. Active work must not leave every step `pending` or `current_activity`
+   unchanged for more than five minutes.
+   **Exception: Phase 7.7's scheduled soak checks remain once daily, with the existing
+   36-hour-overdue banner; the two-minute/five-minute rules do not apply to soak.**
+   Concurrent active work, such as the clone rehearsal, still follows the active-work
+   cadence; preserve the live soak snapshot using `dashboard.md`'s S3 write rules.
 2. **Never write to the production source.** Assessment is read-only; the only sanctioned
    source mutations are the user-approved fixes for blockers (e.g. `ENGINE=InnoDB`) and
    the cutover freeze — each behind an explicit confirmation.
@@ -135,6 +160,35 @@ over as a single copy-paste block and ask for the output).
 | Validation queries, evidence collection, plan updates | Accepting a non-lossless rollback (RPO sign-off) |
 | Retrying transient AWS errors (≤3, backoff) | Quota increases, cross-account access, anything needing other teams |
 
+Silent execution still publishes dashboard progress under hard constraint 1, including
+during assessment, data load, and validation. Phase 7.7 soak retains its daily cadence.
+
+### Dashboard cadence within a phase
+
+These checkpoints supplement `shared/reference/dashboard.md`'s **What to populate, and
+when** table. Each checkpoint updates the plan, snapshot, and activity log under hard
+constraint 1. Apply its start/completion and five-minute rules to active work; **Phase 7.7
+soak is exempt and remains once daily, with the existing 36-hour-overdue banner.**
+
+| Phase | Required checkpoints during the work |
+|---|---|
+| Phase 2 — assessment | Use separate steps for each major check category: blocker scan, inventory/sizing, replication readiness, throughput estimate, and performance baseline. Publish each as `in_progress` as it starts and its concrete findings as it finishes; do not batch the sweep into one end-of-phase update. Populate discovered `migration_objects` totals progressively. |
+| Phase 6 — data load | Publish a step for each table/chunk when the method exposes that granularity, updating observed progress while it loads (e.g. “table 3/4 loading”). As each table finishes, immediately update its `migration_objects.tables.items[]` entry with observed `rows_target` and `status:"loaded"`, and the `loaded` count. For a backup/restore or dump with no incremental telemetry, keep the real load stage `in_progress` and report job state/elapsed time at each check; never fabricate table/chunk progress. |
+| Phase 7 — validation | Publish each table's validation step before its queries run. **As each table's checksum is confirmed, immediately update its `migration_objects.tables.items[]` entry's `checksum_match` and `status:"validated"` and refresh the `validated` count; never batch these updates at the end.** Report per-table progress in `current_activity` and step `detail`. A mismatch is a failed validation, blocks the validation gate, and must not be reported as a successful step. Preserve the existing validation scope and GATE 3 acceptance requirement. |
+| Phase 7.7 — soak | Keep the scheduled once-daily report/sample updates and 36-hour-overdue detection. These active-work checkpoints add no five-minute soak polling, extra daily samples, or compressed green periods; existing waiver/manual-tracking rules still apply. Concurrent rehearsal uses the active-work cadence without changing soak cadence or overwriting the scheduler's latest data. |
+
+**Worked Phase 6 example (illustrative observations, not seed data; not a soak schedule):**
+each row is a plan + snapshot + log update, modifying the same phase/step objects.
+Log starts/progress as `result:"in_progress"` and successful completions as
+`result:"success"` (`done` is the step status, not a log result).
+
+| Moment in a four-table load | Published state |
+|---|---|
+| Before launch | Phase `6` and step `load-customers` are `in_progress`; `current_activity`: “Table 1/4 loading: customers — starting.” Other table steps remain `pending`. |
+| Five minutes later | From the loader's actual report: `current_activity`: “Table 1/4 loading: customers — 120,000 rows copied; checked 09:05 UTC.” Update the running step's `detail` and `updated_at`; it is still `in_progress`. |
+| Customers finishes | Mark `load-customers` `done`, `detail`: “200,000 rows loaded.” Set that table's `rows_target:200000`, `status:"loaded"`, and `tables.loaded:1`. Publish `load-orders` as `in_progress` and “Table 2/4 loading: orders — starting” before starting it. Loading does not establish checksum validation. |
+| Throughout the remaining hours | Repeat checks at intervals no longer than five minutes and publish each actual table/chunk completion. For example, show “Table 3/4 loading” while that table is running. Mark the final load step `done` only after verified completion; publish any remaining schema/CDC/rehearsal work rather than marking Phase 6 complete from bulk-load completion alone. |
+
 ## Knowledge sources (load on demand — do not preload)
 
 | File | Read when |
@@ -156,7 +210,7 @@ over as a single copy-paste block and ask for the output).
 | `shared/reference/customer-test-integration.md` | Phase 6.5/7.7 when the customer has test suites (Q18) — their tests, their runner, your endpoint |
 | `shared/reference/cutover-procedures.md` | Phases 7.5–8 — client discovery, freeze, write-pause minimization, reverse replication, rollback |
 | `shared/templates/{migration-plan,authorizations,discovery-questions,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
-| `shared/reference/dashboard.md` | Phase 0 to scaffold; every phase after, whenever `migration-plan.md` is updated |
+| `shared/reference/dashboard.md` | Phase 0 to scaffold; every plan update, including active-work checkpoints under hard constraint 1 (Phase 7.7 soak remains daily) |
 | `shared/reference/post-migration.md` | Phase 9 |
 | `shared/reference/troubleshooting.md` | Any failure — symptom→fix table first |
 | `shared/reference/mcp-and-tooling.md` | Session start if MCP available; anytime tooling questions arise |
@@ -196,8 +250,9 @@ over as a single copy-paste block and ask for the output).
    `dashboard/index.html`, seed `status.json` with every phase `pending`, every
    cutover gate `met:false`, and `migration_objects` present with `total:0` per type
    (filled in once Phase 2 discovers the real counts — `shared/reference/dashboard.md`),
-   and **create an empty `activity-log.jsonl`** — the page
-   fetches both files together and a missing one fails the whole render. Set `status.json`'s
+   and **create an empty `activity-log.jsonl`** — required even though the renderer tolerates
+   a missing log for older scaffolds. Seed customer actions from current requests and risks
+   from reviewed findings; follow `dashboard.md` for unknown vs empty values. Set `status.json`'s
    `lang` field to match the conversation language you're actually operating in (`"ko"`,
    `"en"`, etc. — `shared/reference/dashboard.md`); the dashboard's own UI chrome (section
    headers, badges, table columns) renders from this field, separately from the phase
@@ -454,9 +509,11 @@ By the end of an engagement the working directory contains:
    — plus the **soak reports** when a parallel run was performed. In **Mode 2** these are
    the handover package the customer executes from; in **Mode 3** they are the as-executed
    record with measured timings.
-5. **`dashboard/`** — a local page the customer opens themselves showing overall progress,
-   per-phase status, and — the reason it exists — a plain-language cutover-readiness
-   verdict (`shared/reference/dashboard.md`). Kept current throughout, not just at the end.
+5. **`dashboard/`** — a page the customer opens themselves showing phase findings and work,
+   risks and mitigations, itemized cost and timing estimates, the approach and its rationale,
+   pending customer requests, detailed cutover requirements, and soak sample trends alongside
+   the agent's cutover-readiness verdict (`shared/reference/dashboard.md`). Kept current
+   throughout, using local files or the existing presigned URLs during soak.
 (**Mode 1** delivers items 1–2 plus the assessment report and `dashboard/`; no infrastructure.)
 
 ## Common mistakes (learned the hard way)

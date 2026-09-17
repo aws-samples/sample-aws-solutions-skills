@@ -145,6 +145,15 @@ Typical shape of the sanity check to state aloud: *"steady-state moves you from 
 instance you patch yourself to ~$X/mo managed; the migration itself costs ~$Y one-time,
 dominated by the DMS instance and double-running the source for the rollback window."*
 
+Record the pricing date, currency, assumptions, unpriced items and exclusions in the
+plan. At GATE 2 presentation, mirror the totals/ranges and itemization into
+`dashboard/status.json`'s `estimates.cost`, the downtime forecast and dependencies into
+`estimates.timeline`, and the chosen architecture/method rationale into `strategy`.
+Use the schema in [dashboard.md](dashboard.md) §Optional insight fields. An unpriced line
+stays unknown and makes the estimate partial; do not turn it into zero. Mirror GATE 2's
+pending acceptance into `customer_actions`, then resolve it after the specific confirmation
+is recorded. Refresh these fields when scope or rehearsal timings change.
+
 ## 4. Monitoring baseline (set up BEFORE cutover, not after)
 
 Capture a **pre-migration performance baseline on the source** while it still serves

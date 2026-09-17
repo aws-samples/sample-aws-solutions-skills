@@ -15,8 +15,8 @@
   <div id="updated"><span id="updated-text">updated —</span><span id="stale-badge"></span></div>
 </header>
 
-<div id="conn-error" style="display:none;background:rgba(224,84,106,.12);border:1px solid rgba(224,84,106,.4);
-  color:#E0546B;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px"></div>
+<main>
+<div id="conn-error" role="status" style="display:none"></div>
 
 <div class="tiles">
   <div class="tile">
@@ -36,23 +36,40 @@
   </div>
 </div>
 
+<section aria-labelledby="lbl-actions-h2">
+  <h2 id="lbl-actions-h2"></h2>
+  <div id="actions"></div>
+</section>
+
 <div id="cutover" class="cutover notready">
   <div class="verdict"><span class="dot"></span><span id="verdict-text"></span></div>
   <div class="verdict-sub" id="verdict-sub"></div>
   <div class="gates" id="gates"></div>
 </div>
 
+<section aria-labelledby="lbl-outlook-h2">
+  <h2 id="lbl-outlook-h2"></h2>
+  <div id="outlook"></div>
+  <div id="strategy"></div>
+</section>
+
+<section aria-labelledby="lbl-risks-h2">
+  <h2 id="lbl-risks-h2"></h2>
+  <div id="risks"></div>
+</section>
+
 <h2 id="lbl-phases-h2"></h2>
 <div id="phases"></div>
-
-<h2 id="lbl-objects-h2"></h2>
-<div id="objects"></div>
 
 <h2 id="lbl-soak-h2"></h2>
 <div id="soak"></div>
 
+<h2 id="lbl-objects-h2"></h2>
+<div id="objects"></div>
+
 <h2 id="lbl-log-h2"></h2>
 <div id="log"><div id="log-empty"></div></div>
+</main>
 
 <footer id="footer-text"></footer>
 

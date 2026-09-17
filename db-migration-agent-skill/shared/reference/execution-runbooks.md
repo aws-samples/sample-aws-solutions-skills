@@ -197,6 +197,15 @@ age. Review subscription workers/table sync plus the source slot's confirmed flu
 and a timed end-to-end apply observation; do not convert WAL bytes or physical replay
 timestamps into seconds. Keep the day blocked until that evidence resolves the check.
 
+The dashboard's sample trends read the numeric values both scripts already write in
+`soak.days[].detail` (`replication_lag_seconds`, `replication_lag_mechanism`,
+`headroom_pct`); preserve these when recording the reviewed day. Do not substitute daily
+extrema for those sampled values or fabricate a lag number for manual PostgreSQL evidence.
+See [dashboard.md](dashboard.md) §Soak trends and rendering behavior for the display contract.
+Mirror pending customer results and soak-exit requests into `customer_actions` at the same
+time as the plan/chat update. During S3 hosting, update the live snapshot without overwriting
+the scheduler's newer results; the dashboard reference describes coordination.
+
 **`soak-config.json` schema** (written once by the agent at Phase 7.7 setup, next to
 `status.json`):
 
@@ -895,3 +904,9 @@ Before executing against production, perform a full dry-run:
 6. **Destroy the clone**: Delete all rehearsal resources.
 
 This de-risks production by: confirming time estimates, catching permission/network/compatibility issues, giving team confidence, and providing a realistic timeline for stakeholders.
+
+When recording rehearsal results, also refresh the existing phase's findings/work/evidence,
+the `rehearsal` gate's item details, and `estimates.timeline` in the dashboard
+([dashboard.md](dashboard.md) §What to populate, and when). State measured durations and
+which parts remain estimated; do not promote a reconstructed or partly estimated pause to
+fully measured. Update the next milestone and dependency text alongside the plan.

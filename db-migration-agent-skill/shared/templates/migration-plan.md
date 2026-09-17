@@ -4,6 +4,9 @@
 > The agent creates it at Phase 0 and updates it as every result lands. A step is "done"
 > only when its result is recorded here. Decisions carry their *why*. Chat scrollback is
 > not the record — this file is.
+> For every phase, record the outcome, substantive findings, remaining work and evidence.
+> Mirror these into the dashboard using `shared/reference/dashboard.md`; keep the current
+> risk register, customer requests, estimates and rationale consistent with phase results.
 
 | | |
 |---|---|
@@ -25,6 +28,15 @@
 > already lives in `discovery-questions.md`, so its own go-ahead is noted below rather
 > than as a separate authorizations.md row — same mechanism, just no duplicate block. IAM
 > guardrail active: {session policy / boundary / simulate-proof}.
+
+## Customer actions — current requests and recorded resolutions
+
+Mirror the pending ACTION NEEDED checklist from chat, in the same order. Keep resolved
+requests with the recorded response; a request row never grants approval on its own.
+Use existing gate/A-number IDs where available; owners are roles/teams, not approver names.
+
+| ID | Exact response / input needed | Why it matters | Owner | Needed by | Status / resolution |
+|---|---|---|---|---|---|
 
 ## Phase 0 — Preflight ▢
 - Account/region verified: ▢ ({account-id}, {region})
@@ -67,6 +79,17 @@
 ## Phase 3 — Method decision (GATE 2 sign-off: ▢)
 - Matrix row #: … · Alternatives rejected & why: …
 - Cost estimate presented: steady ~${}/mo, one-time ~${} — approved ▢
+- Architecture rationale and rollback path: …
+- Estimate basis: {currency, pricing date, region, incremental vs existing costs}
+- Estimate scope: {complete / partial — identify unpriced items and exclusions}
+
+| Cost item | Monthly / one-time | Amount or range | Assumptions / pricing evidence |
+|---|---|---|---|
+
+- Expected write pause: {duration or range} · budget: {duration} · basis: {estimated / measured / mixed}
+- Estimated engagement completion: {window with timezone, or unknown} · dependencies: …
+- Next milestone and what it depends on: …
+- Timing evidence / rehearsal revision: …
 
 ## Phase 4/5 — Target provisioning
 - Immutables confirmed BEFORE create (charset/collation/block-size/license/KMS): ▢
@@ -133,8 +156,11 @@ Downstream replication/CDC consumers (Debezium/replicas/ELT — cutover-procedur
 - Source decommission date: {cutover + 7d} · reverse replication stopped ▢ · DMS deleted ▢
 
 ## Risk & assumption log
-| # | Risk/assumption | Mitigation / verification | Status |
-|---|-----------------|---------------------------|--------|
+Keep current when a result resolves or changes a risk. Accepted residual risks stay
+distinct from closed ones; leave severity/owner unrecorded until assessed/assigned.
+
+| # | Risk/assumption and customer impact | Mitigation / verification and evidence | Status (open / mitigating / accepted / closed) | Severity (if assessed) | Owner / next review |
+|---|---|---|---|---|---|
 
 ## Rollback record (only if executed)
 - Trigger: … · executed runbook steps: … · data loss: {none / description}

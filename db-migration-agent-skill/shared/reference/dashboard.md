@@ -6,7 +6,9 @@
 > binding elsewhere in this skill (hard constraint 6, GATE 3, the Phase 7.7 soak counter,
 > the rehearsal step, the runbook, `authorizations.md`). It invents no new criteria and
 > makes no decisions — it shows what you already know and lets the customer read it
-> without opening `migration-plan.md`.
+> without opening `migration-plan.md`. It also shows what each phase established, the
+> risks still being managed, the cost and timing assumptions, why the approach was
+> chosen, and exactly what the customer needs to provide next.
 
 ## Scaffold at Phase 0, alongside `migration-plan.md`/`authorizations.md`
 
@@ -19,10 +21,11 @@ cp <skill>/shared/templates/dashboard.html dashboard/index.html   # verbatim, no
 ```
 
 🔴 **Both data files must exist from the first moment, not just `status.json`.**
-`dashboard.js` fetches `status.json` and `activity-log.jsonl` together in one `Promise.all` — if
-the log file is missing, that 404 fails the *entire* render, including the parts (progress,
-cutover gates) that were otherwise fine. Create the empty file at scaffold time even before the
-first activity line exists.
+`dashboard.js` fetches `status.json` and `activity-log.jsonl` together in one `Promise.all`.
+Create the empty log even before the first activity line exists. The renderer tolerates a
+log HTTP 404 as an empty history for older/incomplete scaffolds; other fetch failures,
+including HTTP 403 on expired presigned URLs, show the connection-error banner. Previously
+rendered facts remain visible with their timestamps.
 
 Seed `dashboard/status.json` with the phase list populated (all `pending`, `done:0`) and
 `cutover_gates` populated (all `met:false`) the moment the plan is created — never leave the
@@ -48,9 +51,9 @@ only *where* they live changes, never their shape.
 
 ## Presigned-URL viewing (soak window only)
 
-`shared/scripts/generate_presigned_urls.py` (run once, at soak start) presigns GET URLs
+`shared/scripts/generate_presigned_urls.py` (run at soak start; renew per the runbook) presigns GET URLs
 for `index.html`, both files under `assets/`, `status.json`, and `activity-log.jsonl`, all
-expiring together at the end of the soak window, then rewrites `index.html` so its CSS
+expiring together for the requested coverage, then rewrites `index.html` so its CSS
 `href`, JS `src`, and the two data-fetch targets are those absolute presigned URLs instead
 of the relative paths used for local viewing. `dashboard.js` picks this up automatically:
 it reads `window.DASHBOARD_STATUS_URL`/`window.DASHBOARD_LOG_URL` if the page defines them
@@ -87,7 +90,12 @@ actually involved.
 
 **Expiry**: presigned URLs work for repeated GETs until they expire — not single-use — so
 the dashboard's 5-second polling keeps working against the same link for the entire soak
-duration without anything being regenerated mid-window. Past expiry, confirmed against a
+coverage without regenerating a URL on each poll. Follow execution-runbooks.md's
+half-day exit buffer and renewal schedule: 1.5/3.5 days for the 1/3-day tiers; the 7-day
+tier exceeds the per-URL ceiling once the buffer is included, so renew by day 6 and have
+the customer reopen the new link. Rewriting the bucket's page never extends URLs in an
+already-open page. Renew earlier if credentials expire or the soak resets/runs long.
+Past expiry, confirmed against a
 real browser (not just `curl`): every S3 GET — the initial page load and every 5-second
 poll alike — comes back HTTP 403 with a small XML body (`<Error><Code>AccessDenied</Code>
 <Message>Request has expired</Message>...`). If the link itself (`index.html`) has expired,
@@ -109,6 +117,18 @@ already have: every GATE sign-off, every phase completion, every soak-report day
 client-inventory row confirmed, rehearsal completion, runbook generation, A4b/A4 signature.
 If it was worth a line in the plan, it is worth updating both dashboard files.
 
+Also mirror each pending chat **ACTION NEEDED** item into `customer_actions` when you
+present it, and resolve it when the specific reply and its record land. The dashboard is
+read-only: answering in chat is still required; it adds no approval mechanism.
+
+Keep the current snapshot consistent with the plan's current findings and risk register.
+Reconcile stale plan rows before publishing their dashboard counterparts; do not silently
+close a risk just because a later phase is done. Historical log events can be superseded
+by later corrections and must never be used to infer current approvals, risks, or actions.
+During soak, read/modify/write the live S3 snapshot, preserving the Lambda's latest `soak`
+and all optional sections; never upload a stale local snapshot over it. Coordinate writes
+with the scheduler or use ETag-conditional writes and retry from the fresh object.
+
 🔴 **`phases[]` must stay at exactly 11 entries, one per id, every time you overwrite
 `status.json` — never 10, never 12.** The failure mode seen in practice: advancing several
 phases in one turn and hand-authoring the new JSON, which re-adds the phases you just
@@ -122,6 +142,25 @@ the existing objects for whichever phase(s) changed, and write back the same 11 
 never compose the array from scratch or insert a fresh object for a phase id that already
 has one. Before moving on, re-open the file you just wrote and confirm: 11 entries, 11
 distinct ids, no id repeated.
+
+### What to populate, and when
+
+The optional schema below is backward compatible, not optional effort for new work:
+populate it as the corresponding facts become known. Do not fabricate values to fill
+the page. Keep summaries brief and meaningful, with units, scope, consequences, and
+evidence references; do not paste transcripts or credential material.
+
+| Moment | Dashboard update (alongside the plan) |
+|---|---|
+| Phase 0 | Seed the same 11 phases and 6 gates. Seed `customer_actions` from current requests; use `[]` only if none are pending. Seed `risks` after reviewing preflight findings; omit it until reviewed. Omit unknown estimates/strategy fields. |
+| Every phase/result | Update that existing phase's `summary`, `findings`, `steps`, `next_step`, `evidence`. A summary states the outcome and its consequence, not just “complete.” Update risks and requests affected by the result. |
+| Phase 2 | Summarize measured DB size, inventory, compatibility blockers and their resolution, replication readiness, throughput vs downtime window, and baseline findings. Distinguish estimates from exact row counts. Preserve the progressive `migration_objects` update rule below. |
+| Phase 3 / GATE 2 presentation and confirmation | Publish `strategy`, itemized `estimates.cost`, and `estimates.timeline` from the plan and `preflight-iam-cost.md` §3. Identify exclusions and unpriced items. Show GATE 2's pending acceptance as a customer action; numbers being displayed are not approval. Record confirmation through the existing approval record, phase result, and resolved action. |
+| Phases 4–7 | Record concrete provisioning, load, and validation outcomes and unresolved work in phase steps. Update estimates if scope changes, preserving their basis in the plan. Mirror new risks immediately. |
+| Phase 7.5 / any gate update | Add `cutover_gates[].items` showing individual requirement outcomes, exact missing evidence or next step, and owner when known. For inventory, each client's staged repoint/revert plan and pool preparation, plus CDC-consumer restart plans, belong here; actual repointing is Phase 8. |
+| Rehearsal | Replace the downtime forecast with measured timings where available; label mixed measured/estimated timings honestly, retain assumptions and evidence, and update the next milestone. |
+| Phase 7.7 | Keep daily numeric sample `detail` from either writer intact. Review full-period evidence as before. Publish pending customer test results / soak-exit acceptance as actions; numeric trends never resolve checks or gates. |
+| Phase 8–9 | Surface walkthrough, A4b/A4 acceptance, the customer's reported outcome, and cleanup decisions when actually requested. Update timing/next milestone and close risks only with recorded evidence. |
 
 ## `status.json` — full snapshot, OVERWRITTEN every time (never appended)
 
@@ -301,6 +340,238 @@ mark a gate `met:true` for either reason without one of these:
     guidance. Only flip to `"created"` as part of the cutover sequence itself.
   - This section updates on the same "whenever `migration-plan.md` changes" trigger as
     everything else on this page — no separate habit to remember.
+
+## Optional insight fields — additive to the snapshot above
+
+All fields in this section are **new and optional**. Existing fields keep their exact
+names and meanings. Old snapshots and logs work unmodified; missing nested fields and
+empty arrays render safely. Omission means **not recorded**, never zero cost, no risk,
+no customer work, or approval. `customer_actions: []` means reviewed with no pending
+requests; `risks: []` means reviewed with no risks recorded. These meanings differ from
+omitting the arrays. All prose follows the engagement language.
+
+### Phase and gate detail
+
+Add these fields to an **existing** phase object (this fragment is not a replacement
+`phases` array):
+
+```json
+{
+  "summary": "294.6 MB across four tables; no compatibility blockers. Exact counts replace the discovery estimates.",
+  "findings": [
+    "3,001,000 exact rows; all four tables have primary keys.",
+    "A pooled client was found despite the initial no-client answer; its configuration needs tracing."
+  ],
+  "steps": [
+    {"id": "inventory", "label": "Privileged object inventory", "status": "done",
+     "detail": "No routines, triggers, views or events, cross-checked with a second tool.",
+     "evidence": ["migration-plan.md §Phase 2"]},
+    {"id": "client-trace", "label": "Trace the discovered client", "status": "pending",
+     "detail": "Continue under Phase 7.5.", "owner": "Migration engineer"}
+  ],
+  "next_step": "Present the method choice and its trade-offs at GATE 2.",
+  "evidence": ["migration-plan.md §Phase 2", "evidence/source-performance-baseline.txt"]
+}
+```
+
+| Field | Type / meaning |
+|---|---|
+| `phases[].summary` | String: concise current outcome and customer consequence; always visible. Existing `note` remains visible separately. |
+| `phases[].findings` | Array of strings: substantive measured facts, surprises, constraints, and their implications. |
+| `phases[].steps` | Array of objects with stable string `id`, string `label`, `status` = `pending\|in_progress\|done\|blocked`, optional string `detail`, string `owner`, string-array `evidence`. A blocked **step** does not introduce a new phase-status value. |
+| `phases[].next_step` | String: the next planned work or dependency; omit if nothing remains. |
+| `phases[].evidence` | Array of string references to plan sections or engagement-relative artifact paths. |
+| `cutover_gates[].items` | Array of objects with stable string `id`, string `label`, boolean `met`, optional string `detail`, string `owner`, string-array `evidence`. `detail` explains what resolved the item or exactly what remains. |
+
+Gate items explain the **existing** requirement; they add no gates or criteria. For
+example, add to `client_inventory`:
+
+```json
+{
+  "items": [
+    {"id": "app-service", "label": "App service repoint/revert plan and pool prep", "met": true,
+     "detail": "Inactive changes reviewed; restart and revert instructions staged.",
+     "evidence": ["migration-plan.md §Phase 7.5"]},
+    {"id": "nightly-report", "label": "Scheduled report repoint/revert plan", "met": false,
+     "detail": "Confirm the upstream config source; the job also has a hardcoded fallback.",
+     "owner": "Application team"}
+  ]
+}
+```
+
+Unmet items appear first. Unmet gate details and in-progress phase details open initially;
+other details are expandable. Neither step counts nor item booleans recompute the phase
+totals, gate `met`, or **agent-computed `cutover_ready`**.
+
+Each phase also shows its three newest matching activity entries (newest first), explicitly
+as **history**, including timestamps, action, detail, and references. Legacy log phase
+`6.5` (rehearsal) appears under phase `6`; it never adds a twelfth phase. Without a phase
+summary, the latest historical title is shown with a historical label. The full log remains
+below for corrections across phases. The page never parses the plan's Markdown.
+
+### Customer requests and risk register
+
+Optional top-level arrays:
+
+```json
+{
+  "customer_actions": [
+    {"id": "A4b", "title": "Accept the handover package", "status": "pending",
+     "request": "Review the runbook walkthrough and reply to the A4b block in chat.",
+     "why": "Confirms who owns execution and that the rollback procedure is understood.",
+     "owner": "Customer", "due": "Before handover", "phase": "8",
+     "evidence": ["authorizations.md §A4b"]}
+  ],
+  "risks": [
+    {"id": "R18", "title": "AUTO_INCREMENT counters reset during load", "status": "mitigating",
+     "impact": "Counters can diverge from the source's reserved ID range.",
+     "mitigation": "Reseed at freeze time and verify with SHOW CREATE TABLE.",
+     "owner": "Migration engineer", "phase": "8",
+     "updated_at": "2026-09-01T07:09:00+00:00",
+     "evidence": ["migration-plan.md §Finding A-2"]}
+  ]
+}
+```
+
+- `customer_actions[]`: stable string `id` matching the chat checklist's identifier
+  (use an existing gate/A-number when available), string `title`, `status` =
+  `pending|resolved`, string `request` (exact response/input needed), string `why`,
+  optional string `owner` (role/team), string `due` (a phase dependency or date/time with
+  timezone), string `phase`, string-array `evidence`, string `resolution`. Keep pending
+  requests in the same order as the current numbered ACTION NEEDED list. Resolve an
+  item only after recording the specific response; include what changed in `resolution`.
+  Keep resolved items for reference in a collapsed history. Do not pre-request future
+  approvals that have not been presented.
+- `risks[]`: string `id` preserving the plan's risk ID, string `title`, `status` =
+  `open|mitigating|accepted|closed`, optional `severity` = `high|medium|low`, string
+  `impact`, string `mitigation`, string `owner` (role/team), string `phase`, ISO timestamp
+  `updated_at`, string-array `evidence`. Normalize the plan's status into this vocabulary
+  without losing qualifications in `mitigation`. `mitigating` still has work outstanding;
+  `accepted` is a recorded residual risk, **not closed**. Do not invent a severity or
+  owner when the plan has not assessed/assigned one. Open/mitigating risks are shown
+  first, by explicit severity (unknown last), then accepted risks; closed risks are
+  collapsed. Counts never affect readiness.
+
+### Estimates and architecture rationale
+
+Optional top-level `estimates` and `strategy` objects:
+
+```json
+{
+  "estimates": {
+    "cost": {
+      "currency": "USD", "as_of": "2026-09-01T06:35:00+00:00", "scope": "complete",
+      "monthly": {"min": 50}, "one_time": {"min": 3.25},
+      "basis": "GATE 2 on-demand estimate; existing target, incremental migration cost.",
+      "items": [
+        {"label": "DMS instance", "cadence": "one_time", "amount": {"min": 2.68},
+         "basis": "dms.t3.small, 3 days"},
+        {"label": "DMS storage", "cadence": "one_time", "amount": {"min": 0.57},
+         "basis": "50 GB, 3 days"},
+        {"label": "Existing target and storage", "cadence": "monthly", "amount": {"min": 50},
+         "basis": "Rounded estimate"}
+      ],
+      "assumptions": ["Existing source cost is not incremental; 1-day soak and 2-day rollback window."],
+      "evidence": ["migration-plan.md §Phase 3 cost estimate"]
+    },
+    "timeline": {
+      "downtime_estimate": "About 4m 11s; allow 6 minutes", "downtime_budget": "1–2 hours",
+      "basis": "mixed", "next_milestone": "Recovery decision, then reload and validation",
+      "cutover_window": "Customer to choose after recovery and handover",
+      "assumptions": ["Reconstructed from clone and task timings; incident recovery must finish first."],
+      "evidence": ["evidence/rehearsal-run.txt", "migration-plan.md §Incident I-1"]
+    }
+  },
+  "strategy": {
+    "source": "Self-managed MySQL 8.0.46", "target": "Existing RDS MySQL 8.0.46",
+    "method": "DMS Full Load + CDC with schema pre-created from a native dump",
+    "rationale": "The customer chose to exercise the DMS path; CDC and a reverse task support the handover.",
+    "rollback": "Reverse DMS task, connection-tested and stopped until authorized cutover",
+    "tradeoffs": ["A plain dump fits the data size and downtime budget with fewer moving parts; DMS is a recorded deviation."],
+    "evidence": ["migration-plan.md §Phase 3"]
+  }
+}
+```
+
+- `estimates.cost.currency`: currency code, e.g. `USD`; show it explicitly, with no
+  conversion or live pricing lookup. `as_of`: ISO date or timestamp of the estimate.
+  `scope`: `complete|partial`; partial totals are prominently labeled, unknown scope
+  is labeled unrecorded. Unknown or omitted amounts are never zero. An amount is
+  `{"min": number, "max": number}` with nonnegative finite numbers and `max >= min`;
+  omit `max` for a single estimate. This shape is used for `monthly`, `one_time`, and
+  each line's `amount`. Ranges avoid false precision.
+- `cost.basis`: string describing pricing basis and incremental vs existing costs.
+  `items`: array of string `label`, `cadence` = `monthly|one_time`, optional amount
+  object `amount`, optional string `basis`. Include unpriced lines with no amount,
+  mark scope partial, and explain them in `assumptions` (string array). `evidence`:
+  string array. Headline totals are supplied by the agent; the page does not sum,
+  price, or approve anything.
+- `estimates.timeline`: string `downtime_estimate`, string `downtime_budget`, `basis` =
+  `estimated|measured|mixed`, optional strings `estimated_completion`, `cutover_window`,
+  `next_milestone`, string arrays `assumptions` and `evidence`. Use units and timezone
+  for dates/windows. Distinguish bulk-load elapsed time, write pause, and engagement
+  completion. No estimate is derived from the progress percentage or green streak.
+  Keep dependency/uncertainty text visible; do not show a firm date without evidence.
+- `strategy`: strings `source`, `target`, `method`, `rationale`, `rollback`; string
+  arrays `tradeoffs` and `evidence`. Summarize topology, architecture decisions, rejected
+  alternatives and their customer consequences. The full diagram stays in the plan;
+  this page renders source → target plus method and rationale, without a diagram library.
+
+These are snapshot facts, not binding approvals. The plan and authorization record remain
+authoritative. Examples above illustrate field shapes at different moments, not a seed
+snapshot to copy into an engagement.
+
+## Soak trends and rendering behavior
+
+**No new soak fields or writer changes are needed.** Both scripts already return:
+
+- `soak.days[].detail.replication_lag_seconds`: numeric seconds or `null`.
+- `soak.days[].detail.replication_lag_mechanism`: `dms`, `mysql_replica_status`,
+  `postgres_logical_requires_review`, or `null`.
+- `soak.days[].detail.headroom_pct`: numeric free-storage percentage or `null`.
+
+The page plots these existing numeric samples by UTC date, with latest-day value, change
+from the previous consecutive/comparable day, and an expandable exact-values table.
+Headroom change is **percentage points**; lag change is seconds. Zero is valid. Missing,
+null, nonnumeric, or not-applicable values are not plotted as zero, and never substituted
+with an older value for the latest day. Missing dates and changes of lag mechanism break
+lines and prevent delta comparisons. A lone sample is labeled insufficient for a trend.
+Lag's vertical scale starts at zero with its maximum shown; headroom uses 0–100%.
+
+**These are samples, not daily maxima/minima or a forecast.** DMS samples are the maximum
+of source/target lag over the preceding 15 minutes; native MySQL is an invocation-time
+sample; headroom uses the preceding 30-minute average. The page states those limits.
+No hardcoded chart threshold, extrapolated completion date, automated gate decision, or
+full-period acceptance is inferred from a chart. The nine existing `checks` keys and
+their `true`/`false`/`null`/`"not_applicable"` meanings remain unchanged.
+
+Each day is keyboard/touch expandable (latest open initially), showing all nine checks
+with text and symbols, plus recorded `detail` as escaped JSON evidence. An absent check
+renders “needs review”, not pass or not-applicable. The page displays the writer's daily
+`overall`, review banner, consecutive-green count, and 36-hour overdue banner independently;
+it never recomputes them from the plots. An active soak with missing/invalid timestamps
+gets an explicit message. Waivers retain their reason view and never imply gate completion.
+
+All evidence references are **escaped plain text**, including those in activity logs:
+they identify engagement files/sections but are not unsigned links into a private S3
+bucket (only the five existing dashboard objects are presigned). No Markdown/HTML from
+the data is executed. All new static labels, empty states, units and badges have `en`/`ko`
+dictionary entries; missing/unsupported `lang` defaults to `en`.
+
+Polling is still every 5 seconds with the same local/S3 URL globals and `cache:no-store`,
+and never modifies presigned query strings. Overlapping polls are skipped. Unchanged
+regions retain their DOM; changed regions preserve open disclosures and focused summaries
+by stable keys. Dates keep their recorded timezone. Tables scroll within narrow screens;
+charts have text alternatives and value tables.
+
+Legacy `migration_objects.*.done` counters (seen in the real `large` fixture) are rendered
+as recorded completion counts when `validated`/`created`/`loaded` are absent, never relabeled
+as checksum validation. New writers continue using the documented object fields above.
+
+For renderer changes, run `node scripts/test-dashboard.cjs /path/to/dryrun3/engagements`
+from the skill repository. It reads every real `*/dashboard/status.json` and sibling log
+without writing them, tests local and presigned fetch targets, and checks optional-field
+omission cases against this reference's JSON examples. It uses only Node built-ins.
 
 ## `activity-log.jsonl` — JSON Lines, APPEND ONLY, never rewritten
 
