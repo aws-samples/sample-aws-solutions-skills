@@ -64,14 +64,15 @@ From there:
 7. **Cutover — handed to you (Mode 2) or executed for you (Mode 3).** Either way you get a
    runbook rehearsed on a clone with **measured** timings, a rollback runbook, and the
    exact per-application repoint changes. In **Mode 2** the agent walks you through it,
-   you sign the handover, and *your team* runs the freeze-and-flip in your window — with
+   you confirm the handover, and *your team* runs the freeze-and-flip in your window — with
    the agent available to watch read-only and verify afterwards. In **Mode 3** the agent
    executes it step by step with go/no-go checks and reports the measured pause straight,
    whatever it is. Reverse replication is armed **before** the flip, so for the whole
    rollback window the old server stays a live, current standby — failback loses nothing.
 
-8. **Nothing is deleted without written sign-off.** The old server is only decommissioned
-   after the rollback window closes and you've signed the exact teardown list.
+8. **Nothing is deleted without your confirmation.** The old server is only decommissioned
+   after the rollback window closes and you've confirmed the exact teardown list — the
+   agent records that confirmation, you never have to go edit a file yourself.
 
 ## What you'll be asked — and never asked
 
@@ -149,16 +150,19 @@ works if someone is there to answer.
 **6. Large-scale migrations are planned honestly, not waved through.** The decision
 matrix has explicit > 1 TB paths — XtraBackup + S3 physical seed with CDC catch-up
 (MySQL-family), Oracle transportable tablespaces (EE-only, with real preconditions),
-SQL Server full+diff+log chains (≤ 64 TiB per native restore), and an offline-seed
-branch (Snow Family / DataSync) with the record-the-replication-position discipline that
+SQL Server full+diff+log chains (≤ 64 TiB per native restore), and a low-bandwidth
+seed branch (AWS DataSync) with the record-the-replication-position discipline that
 keeps an offline seed lossless. But hard bounds remain that no tool changes: moving N
-terabytes takes `N / usable-bandwidth` — the skill computes this in Phase 2 and routes
-to Snow (adding days–weeks of device shipping) rather than pretending; Aurora storage
+terabytes takes `N / usable-bandwidth` — the skill computes this in Phase 2 and, when
+DataSync can't close that gap either, says so plainly as a hard blocker (get more
+bandwidth, or accept a longer window — physical device transfer is outside what this
+skill or any coding agent can arrange) rather than pretending; Aurora storage
 caps at 128 TiB; a single S3 dump object at 5 TiB. For any multi-TB engagement treat the
 rehearsal as mandatory, and note that multi-TB + near-zero-downtime +
 heterogeneous *combined* is a phased program, not one engagement. The skill will give
-you an honest plan and run the data workstream — expect it to tell you things (shipping
-time, multi-week CDC catch-up, phased cutover) that no tool can make disappear.
+you an honest plan and run the data workstream — expect it to tell you things (a
+multi-week CDC catch-up, a phased cutover, a bandwidth ceiling it can't solve for you)
+that no tool can make disappear.
 
 **7. Some sources have no tooling fast-path.** Tibero, CUBRID, Altibase (no AWS
 DMS/SCT support): the skill plans a PoC + JDBC extraction path and says so plainly
@@ -184,7 +188,7 @@ db-migration-agent-skill/
 ├── shared/
 │   ├── reference/
 │   │   ├── preflight-iam-cost.md           Phase 0 — preconditions, IAM roles, cost, monitoring baseline
-│   │   ├── source-assessment.md            Phase 2 — blockers, access paths, credential rules, sizing, Snow branch
+│   │   ├── source-assessment.md            Phase 2 — blockers, access paths, credential rules, sizing, low-bandwidth branch
 │   │   ├── rds-aurora-limitations.md       Full blocker/adjustment catalog with queries
 │   │   ├── method-selection.md             Phase 3 — 19-row decision matrix, binlog gate, edge cases
 │   │   ├── heterogeneous-migration.md      SCT / DMS SC / Babelfish; Tibero/CUBRID/Altibase

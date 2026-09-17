@@ -208,7 +208,7 @@ Field notes:
   `false` — the dashboard is still valid to show, it just reports nothing is gate-eligible.
 
 **When each gate is allowed to flip to `met:true`** — a gate is a *requirement being resolved*,
-not necessarily *work being performed*: a customer-signed, dated waiver for a skipped or
+not necessarily *work being performed*: a confirmed, dated waiver for a skipped or
 shortened step satisfies the gate exactly as completing the step would, because
 `engagement-safety.md`'s waiver protocol is itself a valid way to close a requirement. Never
 mark a gate `met:true` for either reason without one of these:

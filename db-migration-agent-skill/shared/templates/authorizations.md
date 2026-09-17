@@ -1,14 +1,17 @@
 # Authorizations of Record — {engagement} ({source} → {target})
 
 > **This file is the audit anchor.** Every genuine authorization moment lives here as its
-> own block — chat approvals are working conversation, not the record. Each block carries
-> a **date/timestamp only** — no name, no role, no other identifying detail, by design. A
-> block's `**Confirmed:**` line is filled in directly by whoever is present at that moment;
-> the agent drafts the block and appends it, then stops — it never fills in that line
-> itself. `migration-plan.md` gate rows point at the corresponding block here. **GATE 1 is
-> the one exception** — nothing irreversible has happened yet at that point, so it's
-> confirmed by a clear go-ahead in chat instead of a written mark; see §2. Rules and
-> action classes: `shared/reference/engagement-safety.md`.
+> own block — what was authorized and when. Each block carries a **date/timestamp only** —
+> no name, no role, no other identifying detail, by design. **The customer never edits
+> this file.** The agent drafts each block and, once the customer's reply **affirmatively
+> accepts that exact block in full** — not merely a reply that mentions or partially
+> addresses it — fills in its `**Confirmed:**` date itself, recording what was actually
+> presented. A broader instruction like "proceed with execution" authorizes only the work
+> it names — it is not advance confirmation of a block the customer hasn't actually seen
+> yet; the agent waits for full acceptance of that specific block before writing anything.
+> `migration-plan.md`
+> gate rows point at the corresponding block here. Rules and action classes:
+> `shared/reference/engagement-safety.md`.
 >
 > Not every item below needs its own block. Items that just restate a decision already
 > made and dated elsewhere (§1) are pure reference — nothing to confirm twice.
@@ -25,10 +28,10 @@
 
 ## 2. GATE 1 — Discovery + mode + engagement parameters
 
-**Confirmed via chat, not a written mark.** Unlike every block in §3, GATE 1 doesn't need
-you to edit a file — once you're satisfied with the discovery-questions.md summary, just
-say so in chat; the agent notes the date in `migration-plan.md`'s GATE 1 row itself. See
-that file's closing block for the underlying content.
+Confirmed the same way as every block in §3 — a clear go-ahead in chat, agent fills in the
+date — except the mark lives in `migration-plan.md`'s GATE 1 row instead of a block here,
+since this content already lives in `discovery-questions.md`; no need to duplicate it.
+Once you're satisfied with that file's summary, just say so in chat.
 
 ## 3. Standalone authorization blocks (appended as each moment arises)
 
@@ -43,7 +46,8 @@ Template for every new block:
 {2–3 sentences: what this touches, why it's needed now, and what happens if declined
 — e.g. "the migration can't proceed past this blocker" / "we'd redesign X instead"}
 
-**Confirmed:** {date — filled in by whoever is present, when they're ready to proceed}
+**Confirmed:** {date — the agent fills this in once a clear, specific reply addressing
+this exact block lands in chat; never inferred from a broader "proceed" instruction}
 ```
 
 Tags in use, appended as they arise:

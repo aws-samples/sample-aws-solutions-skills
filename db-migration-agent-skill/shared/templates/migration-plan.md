@@ -19,11 +19,12 @@
 | Status | ⏳ Phase {n} |
 
 > Approvals of record live in **`authorizations.md`** as a `**Confirmed:**` mark + date
-> per block — no name captured, by design; gate rows below reference it. GATE 1 is the one
-> exception: nothing irreversible has happened yet at that point, so it's confirmed by a
-> clear go-ahead in chat rather than a written mark — the agent notes the date below once
-> that lands, it's not a separate authorizations.md row. IAM guardrail active: {session
-> policy / boundary / simulate-proof}.
+> per block — no name captured, by design; gate rows below reference it. **The customer
+> never edits either file themselves** — a clear, specific reply in chat addressing that
+> exact block is what's required; the agent then fills in the date. GATE 1's content
+> already lives in `discovery-questions.md`, so its own go-ahead is noted below rather
+> than as a separate authorizations.md row — same mechanism, just no duplicate block. IAM
+> guardrail active: {session policy / boundary / simulate-proof}.
 
 ## Phase 0 — Preflight ▢
 - Account/region verified: ▢ ({account-id}, {region})

@@ -77,8 +77,10 @@ hard constraint 10.
    any client, or execute the cutover — you prepare, validate, rehearse, and hand over,
    and the customer runs the cutover. **Mode 3** is the only mode where you execute a
    production cutover, and only with the A4 authorization signed and the warnings stated.
-   Approvals of record live in `authorizations.md` as a `**Confirmed:**` mark + date,
-   entered directly by the approver — never a name, never in chat scrollback.
+   Approvals of record live in `authorizations.md` as a `**Confirmed:**` mark + date —
+   never a name, never left only in chat scrollback. The customer never edits this file;
+   the agent fills in the date once the approver's own clear, specific reply to that exact
+   block lands in chat.
 10. **Never build a self-managed target.** If the requested target is not Aurora/RDS (e.g.
     "on-prem MySQL → MySQL on EC2"), stop at Phase 0 and say so plainly. Then: (a) name what
     this skill *can* still contribute — source assessment and sizing, client discovery,
@@ -257,20 +259,22 @@ and, if it arrived via chat, backfill the corresponding `**Answer:**` line in
 relieve you of hard constraint 13 — a terse or contradictory answer still gets a follow-up
 question, same as it would in an all-chat flow.
 
-⛔ **GATE 1** — confirmed by a clear go-ahead in chat, not a written mark (the one gate
-that works this way — nothing irreversible has happened yet; Phase 2 is read-only). Before
-asking for that go-ahead, explain what each non-obvious choice (mode, parallel-run length,
-rehearsal depth) actually means and what its default assumes — see `engagement-safety.md`
-§How to present a gate. Once confirmed, note the date in `migration-plan.md`'s GATE 1 row
-yourself; from that point the chosen parameters are binding and any deviation is a
-recorded waiver.
+⛔ **GATE 1** — confirmed by a clear go-ahead in chat, same mechanism as every other gate
+(the customer never edits a file directly). Before asking for that go-ahead, explain what
+each non-obvious choice (mode, parallel-run length, rehearsal depth) actually means and
+what its default assumes — see `engagement-safety.md` §How to present a gate. Once
+confirmed, note the date in `migration-plan.md`'s GATE 1 row yourself (this one has no
+separate `authorizations.md` block, since its content already lives in
+`discovery-questions.md`); from that point the chosen parameters are binding and any
+deviation is a recorded waiver.
 
 ### Phase 2: Assess the source (read-only)
 
 Per `shared/reference/source-assessment.md`: settle the **access path** (direct / bastion
 / SSM port-forward / SSM send-command), then run the blocker + adjustment queries for the
 engine, sizing, binlog/WAL state, and the **throughput estimate vs the transfer window**
-(route to the Snow/DataSync offline-seed branch if it doesn't fit). Capture the
+(route to the low-bandwidth DataSync branch if it doesn't fit — a hard bandwidth blocker
+if DataSync can't close the gap either, not a method to improvise around). Capture the
 **performance baseline** (top-20 statements + plans). Korean-enterprise check runs here.
 Any blocker → present resolution options, get approval, verify the fix before proceeding.
 
@@ -286,11 +290,13 @@ return here for data movement. Prepare the **cost estimate**
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
 rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
 terms the customer can independently evaluate, not a one-line justification clause — see
-`engagement-safety.md` §How to present a gate. User approves, and you **append the GATE 2
-block to `authorizations.md` §3 immediately** (same discipline as GATE 3 — a verbal
-"approved, recorded" in chat is not the record; A2/A3 actions that depend on this gate
-must not proceed until that block's `**Confirmed:**` line is actually filled in — GATE 1
-is the one gate that doesn't work this way, see its own entry above). **If the
+`engagement-safety.md` §How to present a gate. Once the user's reply **affirmatively
+accepts the whole block as presented** — approving the method alone is not approving its
+cost/architecture/rollback terms too — **append the GATE 2 block to `authorizations.md`
+§3 and fill in its `**Confirmed:**` date yourself immediately** (same discipline as every
+other gate — a vague "approved, recorded" or a reply that only addresses part of the
+block isn't enough; A2/A3 actions that depend on this gate must not proceed until that
+block's date is actually filled in). **If the
 chosen method is CDC-based** (DMS Full Load + CDC, binlog replication, PG logical
 replication), plan the **CDC-proof probe** described in
 `execution-runbooks.md` §CDC Proof Probe — proving change data capture actually carries a
@@ -369,8 +375,9 @@ customer; any RED period resets the consecutive-green counter. Client discovery 
 alongside. Invite read-only test/load traffic at the target; write-tests use an isolated clone
 during this window. Cutover readiness unlocks only at **N consecutive greens + the confirmed
 soak-exit block** in `authorizations.md` — present the final soak report and stop with its
-own ACTION NEEDED block; the user's own `**Confirmed:**` mark is what counts, not the agent
-recording that the periods came up green. Shortening or skipping is a waiver
+own ACTION NEEDED block; the customer's own full acceptance of that specific block is what
+counts, not the agent recording that the periods came up green — write the date only once
+that reply lands. Shortening or skipping is a waiver
 (engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
 concurrently with this soak, not after it** — they test different things and don't depend
 on each other; don't serialize two independent waits.

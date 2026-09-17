@@ -45,7 +45,7 @@
       keeps it as a cold copy).
     - Delete DMS tasks, endpoints, then the replication instance.
     - **If a physical-copy method was used (XtraBackup+S3, native backup/restore staged
-      via S3, Snow Family/DataSync seed)**: delete the intermediate S3 objects
+      via S3, DataSync seed)**: delete the intermediate S3 objects
       (`aws s3 rm s3://your-bucket/xtrabackup/ --recursive`, or the equivalent prefix) —
       a full copy of the database sits there from the restore step
       (execution-runbooks.md §XtraBackup + S3) and nothing deletes it automatically once

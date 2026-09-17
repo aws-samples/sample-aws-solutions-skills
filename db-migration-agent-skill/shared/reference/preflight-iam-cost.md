@@ -137,7 +137,7 @@ figure before they approve the plan. Use `awslabs.aws-pricing-mcp-server` when c
 | Backup beyond retention free tier | monthly | |
 | DMS replication instance | one-time (days–weeks) | Runs until rollback window closes (reverse replication!) — budget the full window, not just the load |
 | RDS Proxy | monthly | Priced per vCPU of the target |
-| Data transfer | one-time | Same-region private = free; cross-region/DX/internet ≠ free; Snow Family per-device |
+| Data transfer | one-time | Same-region private = free; cross-region/DX/internet ≠ free; DataSync has its own per-GB task cost |
 | Source EC2 kept 7 days post-cutover | one-time | The rollback window is a real cost line |
 | Performance Insights, Enhanced Monitoring, Database Activity Streams | monthly | PI free tier = 7 days retention; DAS has Kinesis costs |
 

@@ -105,7 +105,7 @@ recommended default; every deviation from a default is a recorded waiver.
 | **Parallel-run length** | not run / N consecutive green days; compressed hours require a waiver and manual tracking | **Risk-tiered — see table below.** Not a flat number: the default the agent proposes is derived from discovery input #4 (`method-selection.md`), not copied from the previous engagement. |
 | **Validation depth** | counts + checksums + smoke test / + app-level & version-gap battery / + domain reconciliation aggregates | **counts + checksums + app-level checks**, plus the **customer's own test suite** whenever one exists (discovery Q18) |
 | **Rollback strategy** | snapshot/PITR restore (with acknowledged RPO) / reverse replication (zero RPO) / write-log replay | **Reverse replication** when the engines support it; otherwise state the RPO plainly and get it acknowledged |
-| **Approver(s)** | confirmed directly in `authorizations.md` per action class (no name captured); for Mode 3 also "present during the window" | Confirmed in `authorizations.md` before any production-touching step |
+| **Approver(s)** | a clear, specific chat reply per action class, agent-recorded in `authorizations.md` (no name captured); for Mode 3 also "present during the window" | Recorded in `authorizations.md` before any production-touching step |
 
 Guidance to offer when the customer is unsure: *"If this database being wrong or down for
 an hour would stop revenue or reach customers, take the full rehearsal, a 7-day parallel
@@ -209,7 +209,8 @@ When the customer declines a recommended parameter (rehearsal, parallel-run leng
 reverse replication):
 1. State plainly, in one or two sentences, what risk moves into the cutover window.
 2. Append the waiver block to `authorizations.md` §4 — what was skipped, the risk as
-   stated — and get its `**Confirmed:**` date filled in directly.
+   stated — get a clear, specific reply confirming it, and fill in its `**Confirmed:**`
+   date yourself once that reply lands.
 3. Recover what value you can (e.g. declined rehearsal → component-test every
    freeze-window command against the real target; see execution-runbooks.md §Rehearsal).
 4. Never silently skip. A waiver the customer doesn't remember confirming is a failure.
@@ -219,25 +220,33 @@ is all it takes to turn a 40-second freeze into a 5-minute write pause.
 
 ## Approvals of record
 
-Chat approvals drift and scroll away. Every gate, action-class authorization, and waiver
-lives in **`authorizations.md`** (template in `shared/templates/`) as its own block — what
-was authorized, why, and a `**Confirmed:**` date. **No name, no role, no other identifying
-detail is ever captured, by design** — see that template's header note. `migration-plan.md`
-gate rows point at the corresponding block. The customer can hand the file to an auditor as
-a record of *what* was authorized and *when*; it does not answer *who*, and it never will.
+Chat approvals drift and scroll away — that's why every gate, action-class authorization,
+and waiver gets its own durable block in **`authorizations.md`** (template in
+`shared/templates/`) instead of living only in scrollback: what was authorized, why, and a
+`**Confirmed:**` date. **No name, no role, no other identifying detail is ever captured,
+by design** — see that template's header note. `migration-plan.md` gate rows point at the
+corresponding block. The customer can hand the file to an auditor as a record of *what*
+was authorized and *when*; it does not answer *who*, and it never will.
 
-**The agent drafts and appends the block; it never fills in the `**Confirmed:**` line
-itself.** Gathering and recording evidence (a green validation battery, a green soak
+**The customer never edits `authorizations.md` themselves.** The agent drafts and appends
+each block; gathering and recording evidence (a green validation battery, a green soak
 period) is ordinary agent work and can happen without a round-trip. *Confirming* that
-evidence — GATE 2/3/4 or a soak-exit block — is the approver's own act, and requires their
-own reply addressing that specific block, entered directly by them in the file. A broader
+evidence — GATE 1/2/3/4, an A-numbered action, a soak-exit block, or a waiver — is the
+approver's own act: an affirmative reply that accepts the block **as presented, in full**
+— not merely a reply that mentions or touches on it. "The method sounds good" approves
+the method; it does not by itself also approve the same block's cost, architecture, and
+rollback strategy if those are part of the same presented block — treat a partial,
+conditional, or ambiguous reply as still pending, re-present exactly what's outstanding,
+and don't write a date until the whole block is accepted or the customer explicitly asks
+to change its scope (in which case re-present the revised block for its own fresh
+acceptance). Once a genuine full acceptance lands, the agent fills in the `**Confirmed:**`
+date itself, recording what was actually presented — not a paraphrase. A broader
 instruction like "proceed with execution" authorizes the work it names; it is not advance
-confirmation of whatever gate the work happens to produce evidence for. If a gate's
-evidence goes green mid-flight, stop, present it with its own ACTION NEEDED block, and
-wait — don't carry an earlier "proceed" forward as a mark on a block the user hasn't seen
-yet. **GATE 1 is the one exception to all of this** — nothing irreversible has happened
-yet at that point (Phase 2 is read-only), so a clear go-ahead in chat is enough; the agent
-notes the date in `migration-plan.md` itself once that lands, the only gate where it does.
+confirmation
+of whatever gate the work happens to produce evidence for later. If a gate's evidence goes
+green mid-flight, stop, present it with its own ACTION NEEDED block, and wait for a reply
+to *that* block — don't carry an earlier "proceed" forward as confirmation of something the
+user hasn't actually seen yet, and don't write a date until the specific reply lands.
 
 ## How to present a gate
 
@@ -385,7 +394,7 @@ decommission stage is signed:
 | Phase | Addition |
 |-------|----------|
 | 0 | **Mode question first** (1/2/3, Mode 2 recommended); mode gates the whole session; guardrail policy generated for that mode |
-| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 confirmed by a clear go-ahead in chat (not a written mark), agent notes the date in `migration-plan.md`, `authorizations.md` §2 just points there |
+| 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 confirmed the same way as every other gate (clear go-ahead in chat, agent notes the date), just in `migration-plan.md`'s own row rather than a separate `authorizations.md` §3 block, since this content already lives in `discovery-questions.md` — `authorizations.md` §2 just points there |
 | 6.5 | Rehearsal per the chosen parameter (see execution-runbooks.md §Rehearsal) |
 | 7.7 | **Parallel-run soak**: target stays current; daily `soak-report.md`; customer may point read-only traffic/load tests at the target; cutover readiness requires N consecutive green periods |
 | 8 | **Mode 2** → assemble + verify the handover package, walk the customer through the runbook, sign A4b, then stop (offer read-only observation during their cutover). **Mode 3** → execute step-by-step with go/no-go per group, A4 signed first |

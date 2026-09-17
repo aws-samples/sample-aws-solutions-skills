@@ -1,8 +1,10 @@
 # Discovery Questions — {engagement} ({source} → {target})
 
 > Check a lettered option and/or write your own answer on the **Answer:** line under each
-> question, save, and let me know — or just answer any of these here in chat instead,
-> either works, I'll re-read this file either way. Short on time? Reply "go with
+> question or labeled sub-question (e.g. 4a/4b, 16a-16e), save, and let me know — or just
+> answer any of these here in chat instead, referencing the number/letter so it's
+> unambiguous which question you mean — either works, I'll re-read this file either way.
+> Short on time? Reply "go with
 > recommendations" and I'll use the called-out default for everything below, and flag
 > every one I did that for when we lock this in.
 >
@@ -19,28 +21,49 @@
 
 ### 3. Database size
 
-Total data + index size, and the count/size of your largest tables. This is the single
-biggest input to which migration method even qualifies (matrix rows are keyed on size
-bands) and to the throughput-vs-window math in Phase 2 — a 2 TB database over a 100 Mbps
-link is a multi-day copy no matter which tool moves it.
+Total data + index size. This is the single biggest input to which migration method even
+qualifies (matrix rows are keyed on these exact size bands) and to the
+throughput-vs-window math in Phase 2 — a 2 TB database over a 100 Mbps link is a
+multi-day copy no matter which tool moves it. If you know table count and your largest
+table(s)' size too, add that on the Answer line — useful, not required.
 
-**Answer:** {total GB/TB, table count, largest table(s) and their size — or "not sure yet,
-help me measure it"}
+- [ ] A. < 10 GB
+- [ ] B. 10 GB – 100 GB
+- [ ] C. 100 GB – 1 TB
+- [ ] D. > 1 TB
+
+**Answer:** {A/B/C/D, or exact numbers if you have them, or "not sure — measure it for me"}
 
 ---
 
-### 4. Downtime tolerance
+### 4. Downtime tolerance and production status
 
-How long can the application be unable to write during the actual cutover? Seconds,
-minutes, or a maintenance window measured in hours? This is the other half of the
-method-matrix lookup, and it sets the bar the cutover rehearsal has to clear before anyone
-quotes a real number.
+Two related but separate questions — answer each with its own letter (e.g. "4a: B, 4b: C")
+so they can't be mixed up, especially if you reply in chat instead of this file.
 
-Does this database currently serve live production traffic, especially **writes**?
-State production / non-production / unsure and whether live writers are active; this
-also determines the proposed 1/3/7-day soak risk tier.
+**4a. Downtime tolerance.** How long can the application be unable to write during the
+actual cutover? This is the other half of the method-matrix lookup, and it sets the bar
+the cutover rehearsal has to clear before anyone quotes a real number.
 
-**Answer:** {downtime duration; production/non-production/unsure; live writes yes/no/unsure}
+- [ ] A. Zero — cannot tolerate any write-pause
+- [ ] B. Seconds
+- [ ] C. Minutes
+- [ ] D. Hours (a real maintenance window)
+
+**Answer:**
+
+**4b. Production status and live writes.** Does this database currently serve live
+production traffic — and separately, are there active **writers** hitting it right now?
+A production database can be read-heavy with no live writers (e.g. a reporting replica),
+which matters for risk independently of the production/non-production label — this also
+determines the proposed 1/3/7-day soak risk tier.
+
+- [ ] A. Production, with active writers
+- [ ] B. Production, but read-only right now — no active writers
+- [ ] C. Non-production (dev/test/staging) — no live production traffic
+- [ ] D. Not sure
+
+**Answer:**
 
 ---
 
@@ -59,8 +82,9 @@ Zero (nothing) shapes the rollback strategy toward reverse replication; a nonzer
 The *actual* sustained throughput on the path the data will travel (VPN/Direct
 Connect/internet), not the link's rated speed — those are often very different. This
 feeds directly into "how long will the initial copy take," which is what decides whether
-a multi-TB migration needs the offline-seed (Snow Family/DataSync) branch instead of
-copying over the wire.
+a multi-TB migration needs the low-bandwidth (DataSync) branch instead of copying over
+the wire — or, in the most extreme cases, hits a hard bandwidth blocker this skill can't
+resolve on its own (see `source-assessment.md` §Low-Bandwidth Branch).
 
 **Answer:** {Mbps, or "not measured — we'll run an iperf3 test"}
 
@@ -293,12 +317,12 @@ owns it afterward, and feeds the Phase 9 decommission/handoff step.
 
 Once #1–20 above (across this file and chat) are answered — or you just say "go with
 recommendations" — tell the agent you're ready in chat and it moves straight to Phase 2.
-Nothing to write down here: unlike the authorization blocks later in the engagement
-(source writes, cutover, rollback, decommission), nothing irreversible has happened yet at
-this point, so a clear go-ahead in conversation is enough — no file to sign. Locking this
-in just means the chosen mode and engagement parameters are binding from here on; any
-later deviation gets called out explicitly rather than quietly slipped in. The agent notes
-the date in `migration-plan.md`'s GATE 1 row once you've said so.
+Same as every other approval in this engagement: you never edit a file yourself, you just
+give a clear go-ahead in conversation, and the agent records it — here, in
+`migration-plan.md`'s GATE 1 row, since this content already lives in this file rather
+than needing a separate `authorizations.md` block. Locking this in just means the chosen
+mode and engagement parameters are binding from here on; any later deviation gets called
+out explicitly rather than quietly slipped in.
 
 ---
 

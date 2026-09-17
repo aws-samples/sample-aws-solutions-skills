@@ -3,7 +3,7 @@
 > Read this during **Phase 2 (Assess)**. It covers: engine scope, the blocker/adjustment
 > catalog with assessment queries (MySQL/MariaDB/PostgreSQL/Oracle/SQL Server), how to
 > physically reach a private-subnet source, credential-handling rules, sizing queries,
-> throughput estimation, and the offline-seed (Snow/DataSync) branch.
+> throughput estimation, and the low-bandwidth (DataSync) branch.
 > Full per-limitation detail: [rds-aurora-limitations.md](rds-aurora-limitations.md).
 
 ## Scope & Coverage (Read First)
@@ -263,7 +263,7 @@ The source DB is almost always in a **private subnet**, and your execution envir
 
 Network path for the DATA (separate question from command access): Direct Connect or
 Site-to-Site VPN carries dump/CDC traffic; the Phase 2 throughput math below decides
-whether the wire suffices or the Snow/DataSync offline-seed branch applies. Also note:
+whether the wire suffices or the low-bandwidth DataSync branch applies. Also note:
 DMS reaches on-prem sources fine (the replication instance lives in the VPC and connects
 out over DX/VPN), and reverse replication for rollback works the same way in the other
 direction — but confirm the customer's firewall allows the DB port inbound from the VPC
@@ -418,25 +418,26 @@ estimated_hours = db_size_gb * 1000 / (bandwidth_mbps * 0.125 * 0.7 * 3600)
 1. Compute `estimated_hours`.
 2. If `estimated_hours` ≤ transfer window → online method (dump/restore, XtraBackup+S3, DMS) is fine.
 3. If `estimated_hours` > transfer window **and** source is on-prem/other-cloud **and** size > 1 TB
-   → **flag it** and route to the offline-seed branch below. Do not silently pick a method that
+   → **flag it** and route to the low-bandwidth branch below. Do not silently pick a method that
    can't finish in time.
 4. If only modestly over window → DMS Full Load + CDC: the bulk full-load can run for days while
    the app stays up, and CDC closes the gap — the *downtime* is just the final CDC drain, not the
    whole transfer.
 
-### Offline-Seed Branch — Snow Family / DataSync (on-prem + low bandwidth + > 1 TB)
+### Low-Bandwidth Branch — DataSync (on-prem + low bandwidth)
 
-When the wire can't carry the data in time, seed Aurora/RDS from a physical/offline copy, then
-catch up the delta with CDC:
+When the wire can't carry the data in the customer's required window, seed Aurora/RDS via a
+managed network transfer instead of a raw dump/copy, then catch up the delta with CDC:
 
 | Condition | Approach |
 |-----------|----------|
-| > 1 TB, on-prem, bandwidth-bound, hard cutover deadline | **AWS Snowball Edge**: export dump/XtraBackup to the device → ship to AWS → load into S3 → `restore-db-cluster-from-s3` (MySQL) or import → then **DMS CDC** from on-prem to close the delta accumulated since the export LSN/binlog position. |
 | 100 GB – 1 TB, on-prem, slow but no hard deadline | **AWS DataSync** over DX/VPN to land the dump in S3 (managed, resumable, checksummed), then restore + CDC catch-up. |
 | Continuous/repeated file sync from on-prem | **DataSync** scheduled tasks. |
+| > 1 TB, bandwidth-bound, and DataSync still can't close the gap in the required window | **This is a hard blocker, not a method choice.** Physical/offline device transfer (shipping a device to AWS) requires physical logistics coordination that is outside what this skill — or any coding agent — can execute. Present it plainly: the real options are (a) get more bandwidth (temporary Direct Connect, additional/bonded VPN tunnels), (b) accept a longer transfer window, or (c) the customer arranges an offline transfer through their own AWS account team, entirely separate from this engagement. Never silently pick a method that can't finish in time, and never attempt to coordinate physical device logistics. |
 
-**Critical for Snow + CDC**: record the source's binlog file+position (MySQL) or LSN/replication
-slot (PostgreSQL) **at the moment the offline export is taken**, so the subsequent DMS CDC task
-starts exactly from that point. Mismatched start position = duplicate or missing rows.
+**CDC catch-up after any DataSync-seeded load**: record the source's binlog file+position
+(MySQL) or LSN/replication slot (PostgreSQL) **at the moment the offline export is taken**,
+so the subsequent DMS CDC task starts exactly from that point. Mismatched start position =
+duplicate or missing rows.
 
 ---
