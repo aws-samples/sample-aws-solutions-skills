@@ -19,6 +19,18 @@ Before changing anything, enumerate EVERY client that connects to the source DB.
 without repointing all clients = **split data** (a missed client keeps writing the old DB) or
 **outage** (a missed client can't reach the new one). This is the single highest operational risk.
 
+**Start from what the customer already told you, don't re-derive from zero.** Discovery
+item #9 (`discovery-questions.md`) already asked the customer to list every
+application/service that connects and where each finds its host config — pull that answer
+into the inventory table as the starting rows before running Steps 1–4 below. Steps 1–4
+are how you *verify* that list and *catch what it's missing* (the customer's team usually
+knows their main applications well; what they habitually forget is the long tail — an old
+cron job, a nightly batch script, a BI/ELT sync someone set up once) — they are not a
+from-scratch rediscovery that ignores what was already said. If a forensic step finds a
+client the customer didn't mention, or fails to find one they did mention, surface that
+mismatch explicitly and resolve it with them — don't silently prefer one source over the
+other.
+
 ### Step 1 — Trace via Security Group
 
 The source DB's security-group ingress reveals who is allowed to connect:

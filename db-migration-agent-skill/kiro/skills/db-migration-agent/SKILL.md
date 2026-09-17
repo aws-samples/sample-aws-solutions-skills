@@ -328,14 +328,18 @@ user reviews and explicitly accepts before the GATE 3 block you append to
 
 ### Phase 7.5: Discover every DB client (mandatory)
 
-Per `shared/reference/cutover-procedures.md` §client discovery: SG-ingress trace → each
-client's connection config in **override order** (process args → env → systemd → config →
-secret → hardcoded IPs; ECS task defs / K8s ConfigMaps / Lambda env for containerized
-clients) → cross-check against the live processlist → plan for **downstream
-replication/CDC consumers** (Debezium, replicas, ELT tools — they can't be repointed,
-they restart from the target's coordinates). Pre-tune connection pools; disable ORM
-auto-DDL. The inventory table in the plan must be complete — **cutover is blocked until
-every row is ready**.
+Start from discovery item #9's answer (`discovery-questions.md`) as the inventory's
+starting rows — the customer already told you what they know. Per
+`shared/reference/cutover-procedures.md` §client discovery, the rest is verifying and
+extending that list, not re-deriving it from zero: SG-ingress trace → each client's
+connection config in **override order** (process args → env → systemd → config → secret →
+hardcoded IPs; ECS task defs / K8s ConfigMaps / Lambda env for containerized clients) →
+cross-check against the live processlist → plan for **downstream replication/CDC
+consumers** (Debezium, replicas, ELT tools — they can't be repointed, they restart from
+the target's coordinates). Surface and resolve any mismatch between what the customer said
+and what the forensic steps find — don't silently pick one side. Pre-tune connection
+pools; disable ORM auto-DDL. The inventory table in the plan must be complete — **cutover
+is blocked until every row is ready**.
 
 ### Phase 7.7: Parallel-run soak (cutover readiness stays locked until it passes)
 
