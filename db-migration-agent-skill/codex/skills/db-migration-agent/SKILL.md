@@ -459,6 +459,16 @@ and, if it arrived via chat, backfill the corresponding `**Answer:**` line in
 relieve you of hard constraint 13 — a terse or contradictory answer still gets a follow-up
 question, same as it would in an all-chat flow.
 
+**If #9 is unknown or partial, escalate access now**, not at Phase 7.5: ask the customer
+to confirm a writable access/deployment path for each known client host/runtime, who
+will operate it, and how repoint/revert changes can be applied. Record reachable SSM/SSH
+or pipeline access plus required permissions (SSM registration/profile and connectivity
+where relevant); DB connectivity or IaC/UserData alone does not prove config write access.
+In Mode 2 the customer verifies host access and reports evidence; the agent keeps the
+application-host Deny. Track missing access as an explicit blocker/customer action with
+an owner and resolution checkpoint before Phase 7.5; do not let "unknown" silently pass
+as repoint-ready. This is an access check, not authorization to change a client.
+
 ⛔ **GATE 1** — confirmed by a clear go-ahead in chat, same mechanism as every other gate
 (the customer never edits a file directly). Before asking for that go-ahead, explain what
 each non-obvious choice (mode, parallel-run length, rehearsal depth) actually means and
@@ -480,8 +490,9 @@ Any blocker → present resolution options, get approval, verify the fix before 
 
 ### Phase 3: Select the method
 
-Per `shared/reference/method-selection.md`: walk the decision matrix top-down, take the
-first matching row; apply the **binlog state gate** ("zero-downtime" with `log_bin=OFF` is
+Per `shared/reference/method-selection.md`: apply the **version and rollback front-gates**
+before walking the matrix top-down to the first eligible matching row; apply the
+**binlog state gate** ("zero-downtime" with `log_bin=OFF` is
 a contradiction — surface it). Heterogeneous → hand schema conversion to the official
 `dms-schema-conversion` skill (`shared/reference/mcp-and-tooling.md` §Chaining), then
 return here for data movement. Prepare the **cost estimate**
@@ -490,7 +501,13 @@ return here for data movement. Prepare the **cost estimate**
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
 rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
 terms the customer can independently evaluate, not a one-line justification clause — see
-`engagement-safety.md` §How to present a gate. Once the user's reply **affirmatively
+`engagement-safety.md` §How to present a gate. **Before offering reverse replication as
+RPO 0**, check `cutover-procedures.md` §When Reverse Replication is NOT Possible via
+`method-selection.md`'s rollback-direction gate. A newer target major + reverse rollback
+choice requires explicitly revisiting GATE 1 #16d and its RPO in chat; do not accept the
+contradictory choice, silently substitute reverse DMS, or lower RPO without acceptance.
+Only present feasible, evidenced rollback terms for approval.
+Once the user's reply **affirmatively
 accepts the whole block as presented** — approving the method alone is not approving its
 cost/architecture/rollback terms too — **append the GATE 2 block to `authorizations.md`
 §3 and fill in its `**Confirmed:**` date yourself immediately** (same discipline as every
@@ -531,7 +548,8 @@ Phase 8. Validation/soak must not run against import-only settings.
 Per `shared/reference/validation-patterns.md`: row counts (all tables), checksums
 (critical tables), schema-object counts, FK orphans, app-level checks (collation order,
 timezone shift, auto-increment high-water marks, aggregate fidelity), read-only smoke
-test. Major-version gap → also run the version-gap battery
+test, and **application accounts + effective grants + authentication through the intended
+endpoint** (§2.6, mandatory before GATE 3). Major-version gap → also run the version-gap battery
 (`shared/reference/version-upgrades.md`). Paste evidence into the plan.
 
 ⛔ **GATE 3** — present the validation evidence table and stop with a standalone ACTION
@@ -559,6 +577,16 @@ and what the forensic steps find — don't silently pick one side. Pre-tune conn
 pools; disable ORM auto-DDL. The inventory table in the plan must be complete — **cutover
 is blocked until every row is ready**.
 
+**Mode 2 host checks are a customer handoff:** give the customer the specific read-only
+inspection block from `cutover-procedures.md` §Step 2 and collect redacted evidence of
+effective overrides, exact repoint/revert locations, deployment origin, and writable
+access. The agent may inspect permitted control-plane metadata and reconcile it with the
+DB processlist; IaC/UserData is a lead, not proof of live config. Do not bypass the
+application-host SSM Deny via SSH or another executor. Customer-applied pool/ORM prep
+must also be reported; missing host evidence keeps the inventory gate blocked.
+If new accounts appear here, run Phase 7 §2.6 for them and re-present affected GATE 3
+evidence before readiness.
+
 ### Phase 7.7: Parallel-run soak (cutover readiness stays locked until it passes)
 
 Applies to CDC methods in Mode 2 handover depth (a) and Mode 3. Offline/full-load-only
@@ -568,6 +596,9 @@ The target runs live and CDC-current
 while production stays on the source, for the parallel-run length chosen at GATE 1
 (risk-tier default: Low 1, Moderate 3, High 7 consecutive green days). The scripts support
 UTC calendar days only; hourly compression needs a recorded waiver and manual tracking.
+If observed traffic contradicts the discovery-derived risk tier, follow
+`engagement-safety.md` §Reassessing the tier during soak: present evidence, revised tier,
+and remaining duration for explicit chat reconfirmation; never silently shorten it.
 Each period:
 generate a report from `shared/templates/soak-report.md` (lag, spot counts/checksums,
 alarms, drift, plus the customer's test-suite result when one exists) and send it to the

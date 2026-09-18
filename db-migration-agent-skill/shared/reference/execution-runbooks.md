@@ -53,6 +53,32 @@ pg_restore -Fd -j 8 -h $AURORA_ENDPOINT -U postgres -d your_db /backup/
 > restoring — this is PostgreSQL's DEFINER-clause equivalent, and the rehearsal (§Migration
 > Rehearsal below) is where it should surface if skipped.
 
+### If mysqldump Seed + Binlog/DMS CDC Catch-up (10 GB–1 TB MySQL, minutes downtime — matrix row 5a)
+
+Use the logical-dump procedure above for the seed, then the **recorded-position
+catch-up** procedure in §If XtraBackup Seed + Binlog/DMS CDC Catch-up below; substitute
+the dump's consistent binlog coordinates for `xtrabackup_binlog_info`. This is an
+online seed, not a full dump squeezed into the final minutes-long freeze.
+
+1. Confirm the version and binlog gates in [method-selection.md](method-selection.md).
+   Retain source binlogs for the entire export + transfer + restore + catch-up with
+   margin; measure that online seed window separately from cutover downtime.
+2. Capture snapshot-consistent coordinates **in the dump**: for a compatible MySQL
+   client, add `--source-data=2` (`--master-data=2` on older clients) to
+   `--single-transaction`. Verify client/server compatibility first. This can briefly
+   take a global read lock at snapshot start — disclose/budget it; it is not zero
+   disruption. All copied tables must support the consistent snapshot, and coordinate
+   a DDL freeze during the dump. Do not use a separately sampled status position.
+3. Import the complete seed and record both export/import success and its coordinates.
+   Apply §Schema Object Migration's load order (especially triggers/events) for the
+   chosen CDC mechanism; application accounts/grants are handled separately.
+4. Start **one** catch-up channel from those exact coordinates: native binlog
+   replication using the target version's RDS procedure, or a **DMS CDC-only** task
+   with `--cdc-start-position file:position`. Do not run DMS Full Load over the seed.
+5. Prove CDC with §CDC Proof Probe, keep it current through validation/soak, and rehearse
+   the final freeze/drain/repoint within the minutes budget. Missing/expired coordinates
+   require a new consistent seed; do not guess a start point.
+
 ### If Percona XtraBackup + S3 (large MySQL, physical)
 
 ```bash
@@ -885,6 +911,13 @@ ALTER USER [appuser] WITH LOGIN = [appuser];
 > timing measurement. The canonical failure this prevents: an untested
 > `SHOW BINARY LOG STATUS` (MySQL 8.4 syntax) against Aurora 8.0, discovered mid-freeze,
 > turning a 40-second window into a 5-minute one.
+
+For version-crossing migrations, record **source and target commands separately** in
+[../templates/cutover-runbook.md](../templates/cutover-runbook.md) §Commands by side and
+version, using [version-upgrades.md](version-upgrades.md)'s rename list. Component-test
+read-only commands on each real side; exercise mutating commands on corresponding
+version-matched clones or under their existing action-specific authorization. A syntax
+check is not permission to freeze production. Include output-parser checks per side.
 
 **Run the rehearsal concurrently with the parallel-run soak, not after it.** They verify
 different things and have no dependency on each other — rehearsal measures the cutover

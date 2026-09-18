@@ -42,6 +42,38 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 14. **Encryption requirement at creation time?** (KMS key type: AWS-managed vs CMK. Cannot change after cluster creation.)
 15. **Cross-region or cross-account?** (Routes to different networking/KMS/DMS setup.)
 
+### Version and Rollback Front-Gates (BEFORE the matrix or GATE 2)
+
+Use the exact source and target versions from discovery, verified during assessment.
+Compare **engine compatibility majors**, not Aurora product-version labels or just the
+first numeric component: MySQL **8.0 → 8.4 is a major-version crossing**.
+
+1. **Physical-method gate:** if target major > source major, disqualify XtraBackup,
+   native backup/restore, snapshot, and transportable tablespaces from this skill's
+   one-hop migration selection, even when their size/downtime row matches. Select a
+   compatible **logical** method (`mysqldump`/`pg_dump`, Data Pump, DMS), with CDC when
+   the final full copy cannot fit the outage budget. This is a conservative selection
+   rule for this skill, not a claim that every engine forbids every physical upgrade.
+   MySQL XtraBackup/S3 import requires a matching compatibility major; a supported
+   service-managed upgrade such as Blue/Green has its own version-eligibility checks.
+   Never silently insert an intermediate restore + upgrade or lower the target major.
+   Record rejected methods and the logical replacement in the plan; if no remaining
+   matrix row fits, present that replacement as an explicit matrix deviation.
+2. **Rollback-direction gate:** before presenting or accepting reverse replication
+   (#16d) as RPO 0, check
+   [cutover-procedures.md §When Reverse Replication is NOT Possible](cutover-procedures.md#when-reverse-replication-is-not-possible)
+   against the versions, log state, and privileges. When target major > source major
+   and reverse replication was chosen, surface the contradiction immediately and
+   revisit **GATE 1's rollback parameter and discovery #5's RPO** before GATE 2 can
+   pass. Native MySQL replication back to an older major is unsupported. Do not infer
+   that reverse DMS is supported or lossless just because forward CDC works: an
+   alternative logical reverse path needs documented endpoint/version compatibility
+   and a rehearsed apply/replay proof. Present the table's alternatives and their real
+   RPO; an unchanged zero-RPO requirement without a proven feasible path is a blocker.
+   Update #16d and the plan after the customer's explicit chat reconfirmation; record
+   any non-lossless choice through the existing waiver/RPO acknowledgment protocol.
+   Then present the revised rollback terms in the full GATE 2 block.
+
 ### Method Decision Matrix
 
 > **Homogeneous only.** This matrix is for same-engine-family migrations, including **Oracle → RDS
@@ -51,7 +83,7 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 > schema/code conversion (SCT / DMS Schema Conversion / Babelfish) before any data move.
 >
 > **Deterministic read order.** Rows are evaluated **top to bottom; take the FIRST row whose
-> Source + Target + Size + Downtime + Bandwidth all match.** Conditions are mutually exclusive
+> Source + Target + Size + Downtime + Bandwidth all match AND the front-gates allow.** Conditions are mutually exclusive
 > within a source, so exactly one row applies. "Bulk transfer fits window?" refers to the
 > Phase 2 throughput estimate (`estimated_hours` vs transfer window).
 
@@ -68,6 +100,7 @@ substitute XtraBackup/S3 for an unsupported MariaDB physical import.
 | 3 | RDS PostgreSQL | Aurora PostgreSQL | Any | < 1 min | n/a | **Aurora Read Replica promotion** | Built-in |
 | 4 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | < 10 GB | Yes (< 1 hr) | Yes | **mysqldump** (`--routines --triggers --events`) | Simplest, migrates ALL objects |
 | 5 | EC2/on-prem MySQL (not MariaDB) | Aurora MySQL / RDS MySQL | 10 GB – 1 TB | Yes (hours) | Yes | **Percona XtraBackup + S3** | Supported MySQL physical import only |
+| 5a | EC2/on-prem MySQL (not MariaDB) | Aurora MySQL / RDS MySQL | 10 GB – 1 TB | Minimal (minutes) | Yes (online seed window) | **mysqldump logical seed → native binlog or DMS CDC-only catch-up** | Seed while the source serves traffic; cutover drains the delta. Logical seed supports a compatible newer target major; see execution-runbooks.md §If mysqldump Seed + Binlog/DMS CDC Catch-up. |
 | 6 | EC2/on-prem MySQL (not MariaDB) | Aurora MySQL / RDS MySQL | > 1 TB | Minimal (minutes) | Yes | **XtraBackup + S3 seed → binlog/DMS CDC catch-up** | Fast physical bulk, then drain delta; cutover = final drain |
 | 7 | EC2/on-prem MySQL or MariaDB | Aurora MySQL / RDS MySQL / RDS MariaDB | Any | No (zero/seconds) | Yes | **DMS Full Load + CDC** | Only near-zero-downtime path from EC2/on-prem (see schema-objects note) |
 | 8 | On-prem MySQL/MariaDB/PostgreSQL | Aurora / RDS (same family) | > 1 TB | Any | **No** (bandwidth-bound) | **DataSync seed + DMS CDC** — if DataSync still can't close the gap in the required window, this is a hard blocker (more bandwidth or a longer window), not a method choice | Wire can't carry it in time — see Low-Bandwidth Branch |
@@ -109,7 +142,7 @@ Every near-zero-downtime path (DMS CDC, binlog replication, reverse replication 
 
 | Source `log_bin` | DB size | Recommendation |
 |------------------|---------|----------------|
-| **ON** (`binlog_format=ROW`) | Any | CDC methods available — matrix rows 6–8 (XtraBackup+CDC, DMS) are on the table. |
+| **ON** (`binlog_format=ROW`) | Any | CDC methods available — matrix rows 5a and 6–8 (logical/physical seed + CDC, DMS), subject to the version/rollback front-gates. |
 | **OFF** | Small (rough guide: **< ~1–2 GB**, fits a brief maintenance window per the Phase 2 throughput estimate) | **Prefer a brief dump cutover** (mysqldump → import → repoint app). Enabling binlog requires a **source restart = downtime anyway**; for a tiny DB the one-shot dump cutover causes *less total disruption* than "restart to enable binlog, then stand up DMS." |
 | **OFF** | Large | You must **enable binlog first** (`log_bin=ON`, `binlog_format=ROW`, adequate `binlog retention`) — and **acknowledge the restart cost** with the user — before any CDC method. There is no zero-downtime path while binlog is off. |
 

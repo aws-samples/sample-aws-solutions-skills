@@ -171,6 +171,20 @@ On the target, enable at provisioning time (all are in the CDK stacks —
   `DatabaseConnections` > 80% of `max_connections`, `ReadLatency`/`WriteLatency` > 20 ms,
   `AuroraReplicaLag` > 1000 ms, and during migration `CDCLatencySource`/`CDCLatencyTarget`
   > 30 s on the DMS task → SNS topic the operator actually watches during cutover.
+- **Mandatory replication-stall alarm alongside the positive-lag threshold:** for
+  RDS MySQL/MariaDB native replicas, alarm on **`ReplicaLag < 0`**. A `-1` is a real
+  datapoint (replication inactive or lag unavailable), not healthy zero and not missing
+  data, so `treatMissingData: BREACHING` alone cannot detect it. Use `AWS/RDS`, the
+  actual replica's `DBInstanceIdentifier`, `Minimum`, a 60-second period,
+  `LessThanThreshold`, threshold `0`, and **1 of 1** breaching datapoints → the same
+  SNS topic. Keep missing-data treatment `BREACHING` too.
+  For an Aurora MySQL **incoming binlog channel**, use **`AuroraBinlogReplicaLag < 0`**
+  on its writer instance and a corresponding positive-lag alarm in **seconds**;
+  `AuroraReplicaLag` is the intra-cluster reader metric in **milliseconds**, not a
+  substitute for source→target binlog monitoring. Keep the existing reader alarm.
+  Verify emitted metric/dimensions for the chosen topology, and record a check that
+  `0, 0, -1, 0` breaches the stall rule (do not average away or clamp negative values).
+  DMS paths retain their CDC-latency and task/error-state monitoring separately.
 - **Log exports** to CloudWatch (error/slowquery/audit as the engine provides).
 
 First-24-hours watchlist after cutover: [validation-patterns.md](validation-patterns.md)

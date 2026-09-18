@@ -216,6 +216,51 @@ WHERE TABLE_SCHEMA = 'your_db' GROUP BY TABLE_NAME ORDER BY TABLE_NAME;
 
 ---
 
+### 2.6 Application Accounts, Grants, and Authentication (required Phase 7 / GATE 3)
+
+For **every application/service/job account**, verify that it exists on the target and
+has equivalent **effective application privileges** before GATE 3. Start with discovery
+#9, source sessions, and the source account/grant inventory; do not wait for Phase 7.5.
+An admin login, successful data import, or matching row counts does not satisfy this
+check. If Phase 7.5 discovers another account, validate it and re-present the affected
+GATE 3 evidence before cutover readiness.
+
+1. Compare source → target account identities, host restrictions, authentication
+   method, lock/expiry state, role memberships/default roles, and effective grants on
+   the required databases, tables, sequences, and routines. Compare application needs,
+   not a blind copy of administrative privileges that managed RDS/Aurora disallows.
+   Record any intentional privilege mapping and its acceptance; do not grant admin
+   access merely to make a test pass.
+2. **MySQL:** inspect each exact `'user'@'host'` identity and `SHOW GRANTS FOR
+   'app_user'@'host'` on both sides; expand role-derived privileges where used. The
+   example below is MySQL 8.x; choose supported catalog/role syntax on older engines.
+   ```sql
+   -- Source and target, with the approved assessment account:
+   SELECT user, host, plugin, account_locked, password_expired
+   FROM mysql.user WHERE user = 'app_user';
+   SHOW GRANTS FOR 'app_user'@'%'; -- substitute the real host match, not always '%'
+   -- In the target session authenticated AS THE APPLICATION account:
+   SELECT CURRENT_USER(), CURRENT_ROLE(), DATABASE();
+   ```
+   For PostgreSQL compare LOGIN roles, memberships, CONNECT/schema USAGE, object and
+   sequence privileges, and default privileges. For Oracle compare account status,
+   roles/default roles and system/object grants; for SQL Server also verify login SID
+   → database-user mapping (see §SQL Server Validation). Do not export password hashes.
+3. Authenticate with the application's actual driver/version, credential retrieval
+   path, and TLS settings against its **intended target endpoint** (including RDS Proxy
+   if selected). Run representative read-only queries as that account; record the
+   resolved identity, effective database/roles, and results. Use an isolated client
+   harness/clone; do not repoint a production client for this test. In Mode 2, required
+   application-host checks are performed/reported by the customer under
+   [engagement-safety.md](engagement-safety.md) §IAM guardrails.
+4. Record per-account evidence: source identity → target identity, privilege comparison,
+   authentication/read result, endpoint/driver, and unresolved differences. Missing
+   accounts, required grants, or authentication evidence **block GATE 3**. Create/fix
+   target accounts within the approved scope and rerun; source mutations still require
+   their own A2. Read-only login success does **not** prove workload writes: exercise
+   write privileges/behavior on an isolated clone and state any untested paths in the
+   GATE 3 presentation.
+
 ## 3. Post-Cutover Validation
 
 ### Application Smoke Tests
@@ -278,6 +323,7 @@ GROUP BY DATE(created_at);
 | Sample record comparison | Pre-cutover | Medium | Semi-auto |
 | Referential integrity | Post-full-load, pre-cutover | High | ✅ Scriptable |
 | Schema object count | After schema migration | Medium | ✅ Scriptable |
+| Application accounts, effective grants, authentication | **Phase 7, before GATE 3**; repeat for newly discovered accounts | **Critical — required** | Catalog comparison + real-driver read-only login |
 | Application smoke tests | Post-cutover | Critical | ✅ CI/CD |
 | Performance comparison | Post-cutover (24h) | Medium | ✅ CloudWatch |
 

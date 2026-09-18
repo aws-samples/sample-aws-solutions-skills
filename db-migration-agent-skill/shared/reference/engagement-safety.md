@@ -50,6 +50,48 @@ If the customer asks for any of these inside a Mode-2 engagement, the answer is:
 the cutover, which is Mode 3 — I can prepare everything and hand it over, or we can change
 mode with a new authorization." Say it plainly and record the exchange.
 
+### Mode 2 → Mode 3 mid-engagement transition checklist
+
+A request to change mode starts this checklist; it does not itself authorize cutover.
+Keep Mode 2's execution boundary and IAM guardrails until the applicable steps below
+are confirmed. Preserve prior blocks as history; append revised blocks rather than
+backdating or overwriting their scope.
+
+1. **Scope and warnings:** verify the assessment (Phases 1–3 or a prior report) exists.
+   State §Mode 3 warnings, the exact new execution scope, and what remains outstanding.
+   Draft a mode-change block plus the warnings acceptance in `authorizations.md`; only
+   after the approver's explicit chat acceptance of each exact block **in full** may
+   the agent fill its `**Confirmed:**` date. No names/roles or customer file editing.
+2. **Revisit parameters and RPO waivers:** recheck version-direction/rollback
+   feasibility under [method-selection.md](method-selection.md)'s front-gates. Present
+   the real post-cutover loss window and ask whether the existing RPO acknowledgment
+   still applies when the agent executes. Reconfirm or replace it explicitly; Mode 2
+   acceptance is not automatic Mode 3 risk acceptance. Revisit rehearsal, soak, and
+   validation deviations affected by the change, and use §Waiver protocol for revisions.
+   Re-present GATE 2 if method, cost, architecture, or rollback terms change.
+3. **Refresh cutover readiness:** reconcile validation/GATE 3, customer tests, soak
+   evidence + soak-exit or applicable waiver, client inventory/access, staged
+   repoint/revert changes, measured/estimated timings, and the rehearsed rollback.
+   Mode 2 depth (b) does not become cutover-ready just by relabeling the engagement.
+   Clear outstanding blockers; re-present affected evidence/acceptances.
+4. **Authorize execution:** present the current runbook version, window, rollback,
+   abort criteria, and go/no-go groups for GATE 4/**A4**; obtain full explicit chat
+   acceptance and record its date. Prior **A4b** transfers ownership to the customer
+   and cannot authorize agent execution. Confirm approver availability for the window
+   and applicable A5 rollback criteria. Still confirm presence when the window opens.
+5. **Reissue and verify IAM:** replace the Mode 2 session with the scoped Mode 3 policy
+   after the mode change and A4 are confirmed, immediately before execution; a session
+   carrying the old explicit Deny will not gain rights from an added Allow. Verify
+   that only approved app hosts/secrets/DNS can be changed. Retain source-protection
+   and destructive-action denies, including any existing `NotResource`-scoped reboot
+   Deny that exempts only the intended target. Record the policy/simulation evidence;
+   broader permissions are not a substitute for the new authorization.
+6. **Record and resume:** update the plan header, discovery #16, `authorizations.md` §1
+   reference, and dashboard with the confirmed mode and remaining requirements. At
+   the window, recheck freshness, reachable approver, and preconditions before the
+   first freeze. A pending checklist item keeps execution blocked; mode change never
+   resets prior findings or marks readiness by itself.
+
 ## Mode 2 handover contract
 
 Before handover, ask the customer **how deep the preparation should go** — both are valid,
@@ -65,7 +107,8 @@ the difference is who operates the replication and how the runbook's timings are
 Record the choice in the plan. The handover package the customer receives:
 
 1. **`cutover-runbook.md`** — step-by-step with an owner, expected duration, verification,
-   and abort action per step; timings marked *measured* (a) or *estimated* (b).
+   and abort action per step; **each timing** marked *measured* with its evidence or
+   *estimated* with its basis, including mixed component-test/rehearsal coverage.
 2. **`rollback-runbook.md`** — the exact failback procedure, with the reverse-replication
    path armed-but-not-started (a) or the snapshot/PITR path documented (b).
 3. **The client repoint list** — every client discovered in Phase 7.5 with the *exact*
@@ -139,6 +182,34 @@ approved compressed window, record the waiver and use manual reports with explic
 start/end timestamps, contiguous intervals, and one verdict per interval; missing,
 unknown, or RED intervals break the streak. Do not use the scripts' daily completion
 state as hourly evidence.
+
+### Reassessing the tier during soak
+
+When accumulated observations contradict the discovery-derived tier, apply hard
+constraint 13 immediately, then:
+
+1. Record the original tier/signal and the contrary evidence with UTC coverage,
+   sources, and blind spots: write counters/binlog activity, observed clients, retained
+   logs/alarms, and scheduled-job windows. Several quiet hours or a disappearing client
+   do not alone prove the workload is non-production; check telemetry continuity and
+   whether writers/batch jobs are temporarily absent. Retain downtime and RPO signals
+   when judging the tier, even if live writes were overreported.
+2. Reassess against the existing tier table and **present** the proposed revised tier
+   (or why it remains unchanged), its default duration, already credited green coverage,
+   and the resulting **remaining soak length and proposed end time**. Explain what
+   the evidence does and does not establish; do not retrospectively turn unknown/RED
+   intervals green or count silence as successful write validation.
+3. Ask for explicit chat reconfirmation of the revised #16c parameter and reasoning
+   before applying a shorter window. Until it arrives, keep the currently approved
+   requirement; if new evidence shows higher risk, flag readiness as blocked pending
+   resolution rather than silently accepting the lower tier. A duration below the
+   revised tier default, including hour-level compression, still needs its own fully
+   accepted waiver block under §Waiver protocol.
+4. Preserve the prior decision and record the revision, reply/date, evidence and
+   remaining duration in discovery #16c and the plan; mirror the dashboard. Keep daily
+   automation at UTC-day granularity, or use the existing manual compressed-window
+   protocol and [dashboard.md](dashboard.md)'s optional `soak.compressed_window` record.
+   Completion still requires the applicable evidence and separate soak-exit acceptance.
 
 ### Static-validation window (offline/full-load-only alternative)
 
@@ -358,6 +429,17 @@ plan:
   `route53:ChangeResourceRecordSets` on the app's zone, and `ssm:SendCommand`/
   `StartSession` on the **application hosts** (source-DB host access stays, for read-only
   checks). The agent therefore *cannot* repoint clients even by mistake.
+  **Phase 7.5 host inspection is customer-executed in Mode 2**, including process args,
+  environment, systemd/config files, and hardcoded-host checks. Give the customer the
+  exact read-only inspection commands, ask for redacted results (no secrets), effective
+  override/deployment locations, and confirmation of writable repoint/revert access.
+  The agent can inspect permitted control-plane metadata and source DB sessions, but
+  IaC/UserData does not establish the live host configuration. Keep the Deny; do not
+  route around it with SSH, another role, or another executor. If source DB and app
+  share a host, the application-host Deny wins: have the customer run host checks or
+  use a separately permitted database-only access path. Missing evidence blocks the
+  inventory gate. Pool tuning/ORM changes on production clients are also prepared by
+  the agent and performed/reported by the customer.
 - **Mode 3**: the full operator set, still with the source-protection denies below.
 
 Both Mode 2 and Mode 3 keep explicit denies that outlast any agent mistake until the

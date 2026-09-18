@@ -108,6 +108,13 @@ const productionParams = new rds.ParameterGroup(this, 'ProductionParams', { engi
     require_secure_transport: constants.ENFORCE_TLS ? 'ON' : 'OFF',
     time_zone: constants.SOURCE_TIME_ZONE,         // match source — Phase 1 adjustment
   }});
+// Materialize BOTH groups now and retain them when the association swaps in Phase 7.
+// new ParameterGroup alone is lazy — see the pitfall below.
+migrationParams.bindToCluster({});
+const productionParamsConfig = productionParams.bindToCluster({});
+new CfnOutput(this, 'ProductionParameterGroupName', {
+  value: productionParamsConfig.parameterGroupName,
+});
 
 const cluster = new rds.DatabaseCluster(this, 'Cluster', {
   // Generate the secret HERE, not in security-stack — see pitfall below.
@@ -136,6 +143,31 @@ data the moment CDC starts. XtraBackup path uses `restore-db-cluster-from-s3` (n
 — run it from `scripts/03-execute-migration.sh`, then adopt monitoring around it; don't
 fight CDK into importing it mid-migration. RDS (non-Aurora) targets: `rds.DatabaseInstance`
 with `multiAz: true` — same parameter-group pair pattern.
+
+**Pitfall — an unbound `rds.ParameterGroup` can disappear from synth:** the L2 represents
+either `AWS::RDS::DBClusterParameterGroup` or `AWS::RDS::DBParameterGroup`; it creates
+the concrete resource when bound to that kind of DB. In this pattern only
+`migrationParams` is associated at provisioning time. Merely constructing
+`productionParams` can leave it absent even though both `cdk synth` and `cdk deploy`
+succeed — Phase 7 then fails when applying a group that never existed.
+
+The explicit `productionParams.bindToCluster({})` above materializes the cluster group
+and supplies its generated name for an output **without switching the running cluster
+to it**. Binding `migrationParams` explicitly also keeps it present after the Phase 7
+association swap. For an RDS `DatabaseInstance`, use `bindToInstance({})` instead. Do not bind the
+same group as both kinds. On CDK versions providing standalone factories,
+`ParameterGroup.forCluster()` / `forInstance()` are alternatives; an explicit
+`CfnDBClusterParameterGroup` / `CfnDBParameterGroup` with the verified engine family is
+also suitable. `fromParameterGroupName()` alone imports a reference; it creates nothing.
+
+**Verify existence at Phase 5:** inspect the synthesized database-stack template for
+**both** groups of the correct resource type, then describe both by their deployed
+names (`describe-db-cluster-parameter-groups` for Aurora, `describe-db-parameter-groups`
+for an instance) and record name/family in the plan. A successful stack deployment alone
+is insufficient. At Phase 7, change the CDK association to `productionParams`, deploy,
+complete any required reboot/session recycling, and verify effective production values
+before validation/soak. Keep the established logical IDs; do not create a replacement
+group merely to change which one is associated.
 
 **Pitfall — cyclic cross-stack dependency (confirmed live, not theoretical):** never create
 the Secret in security-stack and hand it to database-stack via

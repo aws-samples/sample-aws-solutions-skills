@@ -48,6 +48,15 @@ aws ec2 describe-network-interfaces --filters Name=group-id,Values=<client-sg> \
 
 ### Step 2 — Inspect each client's connection config (config can live in MANY places)
 
+**Mode 2:** the customer performs the host-side checks below and reports redacted
+results; the agent provides one focused read-only command block and reconciles the
+findings with permitted control-plane metadata and DB sessions. Request exact effective
+host overrides, config deployment origin, and writable repoint/revert access. Keep the
+application-host SSM Deny and do not bypass it via SSH/another executor; see
+[engagement-safety.md](engagement-safety.md) §IAM guardrails. IaC/UserData alone cannot
+close the live-config evidence gap. Missing customer evidence keeps the inventory
+incomplete. Production pool/ORM preparation below is likewise customer-executed.
+
 Check all of these in **override order** — a later source overrides an earlier one:
 
 | Priority (highest wins) — Location | How to check |

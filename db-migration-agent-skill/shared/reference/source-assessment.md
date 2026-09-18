@@ -253,6 +253,17 @@ The source DB is almost always in a **private subnet**, and your execution envir
 | **SSM Port Forwarding** | DB host (or a host in-VPC) is an SSM-managed instance; you have a local client | `aws ssm start-session --target <instance-id> --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"host":["<db-endpoint>"],"portNumber":["3306"],"localPortNumber":["13306"]}'` then connect to `127.0.0.1:13306` |
 | **SSM Send-Command** | **No local client / cross-VPC** — run the query *on the DB host itself* (or another in-VPC SSM-managed host that has a client) | `aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript --parameters 'commands=["mysql -h 127.0.0.1 -e \"…\""]'` |
 
+**Long transfers are bounded by the SSM document's `executionTimeout`.** Inspect the
+actual document/version and set an explicit generous execution timeout covering export,
+transfer, import, and verification with margin (e.g. `executionTimeout=["14400"]` in
+`AWS-RunShellScript`'s `--parameters`, if four hours covers the measured estimate).
+The CLI's `--timeout-seconds` delivery setting is not a substitute. A killed stream can
+leave a truncated `INSERT` and surface as MySQL `ERROR 1064`, disguising the timeout as
+bad SQL: inspect invocation/plugin status and producer/consumer exits before retrying.
+If the work must outlive the command, use a durable detached job with the bounded
+supervisor from `SKILL.md` §Dashboard cadence within a phase, implemented before launch,
+with progress publication and completion verification; a bare `&` is insufficient.
+
 **On-premises / other-cloud sources** — the same table applies with these substitutions:
 
 | Option | On-prem equivalent |

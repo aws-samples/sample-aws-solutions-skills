@@ -521,9 +521,68 @@ These are snapshot facts, not binding approvals. The plan and authorization reco
 authoritative. Examples above illustrate field shapes at different moments, not a seed
 snapshot to copy into an engagement.
 
+### Optional compressed soak window and manual evidence
+
+Add **`compressed_window` inside the existing `soak` object** only when an approved
+waiver compresses the window below a UTC day. Keep `soak.waived` and `soak.waived_reason`
+with their existing meanings; compression waives the original duration, not the agreed
+manual evidence or soak-exit acceptance. Preserve any existing daily fields/history.
+This optional fragment is additive, not a replacement `soak` shape:
+
+```json
+{
+  "soak": {
+    "waived": true,
+    "waived_reason": "Original 3-day duration compressed to 6 hours; manual evidence and soak-exit acceptance still required.",
+    "compressed_window": {
+      "tracking": "manual",
+      "original_required_days": 3,
+      "required_hours": 6,
+      "started_at": "2026-09-18T08:00:00Z",
+      "planned_end_at": "2026-09-18T14:00:00Z",
+      "last_reviewed_at": "2026-09-18T10:05:00Z",
+      "state": "active",
+      "waiver_ref": "authorizations.md §Waiver — compressed soak",
+      "intervals": [
+        {
+          "started_at": "2026-09-18T08:00:00Z",
+          "ended_at": "2026-09-18T10:00:00Z",
+          "overall": "green",
+          "evidence": ["reports/soak-manual-0800-1000.md"],
+          "limitations": ["No natural application writes observed; this interval does not prove workload write behavior."]
+        }
+      ]
+    }
+  }
+}
+```
+
+- Timestamps are explicit UTC instants. `required_hours` is a positive duration;
+  `planned_end_at` is a plan, not proof of elapsed green coverage. `tracking` is
+  `manual`; `state` is `active|blocked|complete`, recorded by the agent.
+- `intervals[]` records ordered, non-overlapping contiguous coverage, one verdict
+  (`green|red|unknown`) and report references per interval. Reports contain the actual
+  validation and full-period monitoring evidence, plus limitations. Missing, unknown,
+  or RED intervals break the streak; do not sum disconnected green hours. Missing
+  fields mean unrecorded, never pass.
+- Only record `state:"complete"` after the approved duration's contiguous evidence
+  passes **and** the separate soak-exit block is fully accepted in chat. Then add
+  `completed_at` (UTC) and `soak_exit_ref` (the block reference). The waiver alone
+  does not satisfy its own remaining conditions. Keep `cutover_gates`/`cutover_ready`
+  explicit under their existing rules; this object never computes or grants readiness.
+- Both soak scripts remain daily-only. Never encode hours as `n_total`, fabricate
+  daily `days[]` entries, change the schedule to hourly, or use daily completion as
+  manual-hour evidence. During concurrent automation, preserve this optional object
+  and the scheduler's daily history using the existing S3 read/modify/write rules.
+- The existing page still displays the waiver reason; this schema addition does not
+  add a new renderer. Mirror the compressed duration, current manual coverage, missing
+  evidence and pending soak-exit acceptance into `waived_reason`, the existing phase/
+  gate detail and `customer_actions` so they remain visible. Keep the scheduled daily
+  cadence, 36-hour-overdue behavior, and active-work supervisor rules unchanged.
+
 ## Soak trends and rendering behavior
 
-**No new soak fields or writer changes are needed.** Both scripts already return:
+**Daily trends need no new fields or writer changes.** Both scripts already return:
 
 - `soak.days[].detail.replication_lag_seconds`: numeric seconds or `null`.
 - `soak.days[].detail.replication_lag_mechanism`: `dms`, `mysql_replica_status`,

@@ -13,7 +13,8 @@
 > earlier. This file picks up from **#3**.
 >
 > {Agent: generate this file after #1/#2 land in chat, tailored to that branch — e.g. drop
-> the OS-access-dependent framing in #7/#9 if the source is a managed DB product. Fill
+> the source-OS-access-dependent framing in #7 if the source is a managed DB product;
+> retain #9's application-host/runtime access checks regardless of source hosting. Fill
 > every {bracketed} value with the real, engagement-specific default before writing this
 > file — never ship a literal placeholder to the customer.}
 
@@ -125,8 +126,17 @@ cutover) a hardcoded IP? This is what makes the difference, at cutover, between 
 one secret" and "we have to find and edit a script on a server with no deployment
 pipeline."
 
-**Answer:** {list what you know now — the agent will also independently verify this
-during Phase 7.5's client discovery, so a partial answer here is fine}
+**If any part is unknown, confirm access now:** for each known client, does a writable
+path exist to change and revert its effective DB-host setting (SSM/SSH or the deployment
+pipeline/control plane), and who will operate it? For SSM, confirm the host is managed,
+connected, and has the required instance profile/permissions; having no SSH key is fine
+only when another working path exists. Also identify where the config is deployed from.
+In Mode 2 your team performs/reports host inspection; the agent supplies the checks and
+reviews the evidence. Missing access becomes a tracked cutover blocker now, not a
+surprise deferred to Phase 7.5. No client setting is changed by this check.
+
+**Answer:** {known clients + host-resolution/config origin + writable access/operator;
+unknown parts and who will resolve them before Phase 7.5}
 
 ---
 
