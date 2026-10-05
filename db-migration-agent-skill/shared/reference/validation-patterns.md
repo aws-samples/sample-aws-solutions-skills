@@ -408,9 +408,11 @@ SELECT name, COUNT(*) c FROM products GROUP BY name HAVING c > 1;
 ```
 
 **2. Auth-plugin compatibility (the app's real connector, not the `mysql` CLI).** 8.0 default became
-`caching_sha2_password`; **8.4 ships `mysql_native_password` OFF at startup.** Old connectors
-(Connector/J 5.1, libmysqlclient < 8.0, legacy PHP/Node drivers) then **fail to authenticate** even
-though the import succeeded.
+`caching_sha2_password` upstream (RDS for MySQL 8.0.34+ keeps `mysql_native_password`); on **RDS
+for MySQL 8.4** new users default to `caching_sha2_password` while `mysql_native_password` still works
+(deprecated); upstream community 8.4 ships it OFF at startup. Old connectors (Connector/J 5.1,
+libmysqlclient < 8.0, legacy PHP/Node drivers) **fail to authenticate** as `caching_sha2_password`
+users even though the import succeeded.
 ```sql
 -- TARGET: which plugin did each account land on after import?
 SELECT user, host, plugin FROM mysql.user;
@@ -419,9 +421,10 @@ SELECT user, host, plugin FROM mysql.user;
 # Authenticate from a host running the APP's actual connector version (the newer mysql CLI hides this)
 mysql -h "$TARGET" -u appuser -p -e "SELECT CURRENT_USER(), CONNECTION_ID();"
 ```
-Fix: upgrade the connector, **or** recreate the user on the legacy plugin
-(`ALTER USER 'appuser'@'%' IDENTIFIED WITH mysql_native_password BY '…'`; on 8.4 first set
-`mysql_native_password=ON` in the target parameter group — see version-upgrades.md MySQL 8.0→8.4).
+Fix: upgrade the connector (preferred), **or**, as a dated stop-gap, put that account on the legacy
+plugin (`ALTER USER 'appuser'@'%' IDENTIFIED WITH mysql_native_password BY '…'` — works on RDS 8.4;
+self-managed upstream 8.4 would also need the plugin enabled). Re-run the login test either way —
+see version-upgrades.md MySQL 8.0→8.4.
 
 **3. `sql_mode` strictness — catch queries that worked before but fail now.** A newer major defaults
 to a stricter `sql_mode` (8.0 enables `ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, `NO_ZERO_DATE`,

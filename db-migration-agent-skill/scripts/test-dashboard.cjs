@@ -213,6 +213,54 @@ async function main() {
   await page.update(gap);
   assert(page.get('soak').innerHTML.includes('Recorded waiver'));
   assert(!page.get('soak').innerHTML.includes('<svg'));
+  // Optional soak.compressed_window: absent = byte-identical output; present = rendered,
+  // escaped, every field individually omittable, also shown alongside active daily soak.
+  const waivedOnly = page.get('soak').innerHTML;
+  assert(!waivedOnly.includes('soak-compressed'), 'Compressed window rendered when absent');
+  const cwExample = examples.find(x => x.soak && x.soak.compressed_window).soak;
+  const cwStatus = structuredClone(gap);
+  Object.assign(cwStatus.soak, structuredClone(cwExample));
+  await page.update(cwStatus);
+  page.healthy();
+  let cwHTML = page.get('soak').innerHTML;
+  assert(cwHTML.includes(escapeHTML(cwExample.waived_reason)), 'Waiver reason lost');
+  assert(cwHTML.includes('6 h required (originally 3 day(s))'), 'Compressed duration missing');
+  assert(cwHTML.includes(escapeHTML(cwExample.compressed_window.waiver_ref)), 'Waiver ref missing');
+  assert(cwHTML.includes(escapeHTML(cwExample.compressed_window.intervals[0].limitations[0])), 'Interval limitation missing');
+  assert(cwHTML.includes('reports/soak-manual-0800-1000.md'), 'Interval evidence missing');
+  assert(cwHTML.includes('GREEN'), 'Interval verdict missing');
+  delete cwStatus.soak.compressed_window;
+  await page.update(cwStatus);
+  assert.equal(page.get('soak').innerHTML.replace(escapeHTML(cwExample.waived_reason), escapeHTML('Recorded waiver')),
+    waivedOnly, 'Absent compressed window changed waived rendering');
+  for (const keys of optionalPaths(cwExample.compressed_window)) {
+    const variant = structuredClone(gap);
+    variant.soak.compressed_window = structuredClone(cwExample.compressed_window);
+    let parent = variant.soak.compressed_window;
+    for (const key of keys.slice(0, -1)) parent = parent[key];
+    if (Array.isArray(parent)) parent.splice(Number(keys.at(-1)), 1);
+    else delete parent[keys.at(-1)];
+    await mount(variant, smallLog);
+    omissions++;
+  }
+  const cwHostile = structuredClone(gap);
+  cwHostile.soak.compressed_window = { ...structuredClone(cwExample.compressed_window),
+    waiver_ref: '<script>x</script>', state: '<b>', intervals: [{ overall: '<i>', limitations: ['<img src=x>'] }, null, 'bad'] };
+  await page.update(cwHostile);
+  page.healthy();
+  cwHTML = page.get('soak').innerHTML;
+  assert(!/<script|<img|<b>|<i>/.test(cwHTML) && cwHTML.includes('&lt;script&gt;'), 'Compressed window not escaped');
+  const cwActive = structuredClone(soakStatus);
+  cwActive.soak.compressed_window = structuredClone(cwExample.compressed_window);
+  await page.update(cwActive);
+  page.healthy();
+  assert(page.get('soak').innerHTML.includes('soak-compressed') && page.get('soak').innerHTML.includes('class="trend-line"'),
+    'Compressed window not shown alongside daily soak');
+  cwActive.lang = 'ko';
+  await page.update(cwActive);
+  page.healthy();
+  assert(page.get('soak').innerHTML.includes('필요 6시간'), 'Korean compressed label missing');
+  await page.update(gap);
   const hostile = structuredClone(enriched);
   hostile.phases[2].summary = '<img src=x onerror="alert(1)">';
   await page.update(hostile);
@@ -272,6 +320,6 @@ async function main() {
   assert(page.get('actions').innerHTML.includes('Customer actions have not been recorded'));
   const empty = await mount({ phases: [], cutover_gates: [] }, '');
   assert.equal(empty.document.documentElement.lang, 'en');
-  console.log(`PASS ${omissions} optional-field omissions; spec examples; en/ko parity; readiness; four-state soak; gaps; escaping; fetch recovery; legacy logs; disclosure/focus preservation; zero/range costs`);
+  console.log(`PASS ${omissions} optional-field omissions; spec examples; en/ko parity; readiness; four-state soak; gaps; compressed soak window; escaping; fetch recovery; legacy logs; disclosure/focus preservation; zero/range costs`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

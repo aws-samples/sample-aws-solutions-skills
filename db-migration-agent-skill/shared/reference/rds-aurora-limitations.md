@@ -195,10 +195,10 @@
 
 | Aspect | Detail |
 |--------|--------|
-| **What breaks** | RDS MySQL 8.0.34+ forces `mysql_native_password` as default (you cannot change it). RDS MySQL 8.4+ uses `caching_sha2_password` by default. Client applications using older MySQL connectors that don't support `caching_sha2_password` will fail to connect to 8.4 instances. |
+| **What breaks** | RDS for MySQL 8.0.34+ uses `mysql_native_password` and `default_authentication_plugin` can't be changed. **RDS for MySQL 8.4+ uses `caching_sha2_password` as the default for new users; `mysql_native_password` still works on RDS 8.4** (deprecated — support ends with the 8.4 series). What breaks: older connectors/clients (including some MariaDB clients) that don't support `caching_sha2_password`, when they log in as `caching_sha2_password` users. (Upstream community 8.4 — e.g. self-managed on EC2 — ships `mysql_native_password` OFF at startup; that is upstream behavior, not the RDS one.) |
 | **Affected service** | RDS MySQL |
 | **Severity** | 🟡 **Requires adjustment** — update client libraries |
-| **Workaround** | Update MySQL client connectors/drivers to versions supporting `caching_sha2_password`, or change the `authentication_policy` parameter for MySQL 8.4. Ensure TLS is configured (required for `caching_sha2_password` RSA key exchange). |
+| **Workaround** | Verify on the actual target instead of prescribing a parameter change: `SELECT user, host, plugin FROM mysql.user;` and a real login with each app's own driver. Upgrade connectors that lack `caching_sha2_password`; migrate app accounts to `caching_sha2_password` (`ALTER USER ... IDENTIFIED WITH caching_sha2_password BY ...`) as planned hygiene before the old plugin's end. The default plugin for new users is set by the `authentication_policy` parameter. Ensure TLS is configured (or RSA key exchange allowed) for `caching_sha2_password`. Detail: `version-upgrades.md` §"MySQL 8.0 → 8.4". Source: [RDS for MySQL known issues and limitations](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.KnownIssuesAndLimitations.html). |
 
 ### 3.5 PostgreSQL pg_hba.conf — NO DIRECT ACCESS
 

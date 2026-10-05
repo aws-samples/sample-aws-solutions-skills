@@ -693,13 +693,15 @@ From the DMS Step-by-Step Guide, AWS documents three approaches:
 - Must stop replication and reset with `mysql.rds_reset_external_master` after cutover
 - Network stability between source and target is critical during replication
 - Replication lag monitoring is essential before cutover
-- **MySQL 8.4+ target: these procedure names are renamed.** Confirmed live against a real
-  RDS MySQL 8.4.11 target: `rds_set_external_master` errors, telling you to call
-  `mysql.rds_set_external_source` instead; `rds_reset_external_master` →
-  `rds_reset_external_source` likewise (`rds_start_replication`/`rds_stop_replication` are
-  unchanged). Same "master"→"source" rename as `SHOW REPLICA STATUS`'s `Seconds_Behind_Source`
-  (`version-upgrades.md`'s MySQL 8.0→8.4 section) — the column layout itself is identical
-  across the hop, only the names changed.
+- **MySQL 8.4+ target: use the renamed procedures.** AWS documents
+  `mysql.rds_set_external_source` / `rds_reset_external_source` (and the other `*_source*`
+  variants) for RDS for MySQL **8.4 and higher**, and the `*_master*` names for **8.0 and lower**
+  ([RDS replication procedures](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/mysql-stored-proc-replicating.html)).
+  `rds_start_replication`/`rds_stop_replication` are unchanged. A live check on RDS for MySQL
+  8.4.11 found the old `*_master` procedures **still present** (an earlier note here claiming they
+  error was wrong) — but they are undocumented for 8.4, so write runbooks with the `*_source`
+  names only. Read replica-status columns by name (`Seconds_Behind_Source`, not positionally) —
+  see `version-upgrades.md` §"8.0 → 8.4 migration-execution specifics".
 
 **Documentation**: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.Procedural.Importing.NonRDSRepl.html
 

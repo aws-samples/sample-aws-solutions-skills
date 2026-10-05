@@ -60,6 +60,7 @@ Before choosing a migration method or target, assess whether the source workload
 | **Charset** | `lower_case_table_names` set to 2 | Not supported on Linux-based RDS/Aurora | Must be 0 (case-sensitive) or 1 (lowercase) |
 | **Timezone** | Non-UTC timezone_data differences | Can corrupt TIMESTAMP columns during migration | Set `time_zone` parameter explicitly on target |
 | **Versions** | MySQL 5.6 or earlier | Cannot migrate directly to Aurora MySQL 3.x (8.0) | Upgrade to 5.7 first, then migrate |
+| **Versions** | MySQL 8.0 source → 8.4 target (RDS for MySQL 8.4 or Aurora MySQL 8.4; Aurora 3.x is 8.0) | Major-version crossing: physical methods disqualified; new users default to `caching_sha2_password` (RDS 8.4: `mysql_native_password` still works, deprecated; upstream: OFF at startup); old replication verbs and `SET_USER_ID` removed on 8.4; RDS procedures renamed `*_source`; RDS 8.4 disallows `ALLOW_NONEXISTENT_DEFINER`; native 8.4 → external-8.0 reverse replication not supported; some clients (a MariaDB 10.5 client in a dry run) fail `caching_sha2_password` | Load `version-upgrades.md` §"MySQL 8.0 → 8.4" + its "migration-execution specifics" at Phase 2–3; logical method (+ CDC); rollback gate (DMS reverse or RPO acceptance); pre-create definers; prove a TLS + `caching_sha2_password` login from the bastion client |
 | **OS** | Cron jobs / shell scripts on DB host | No OS access on managed | Move to EventBridge Scheduler, Lambda, or ECS tasks |
 
 ### 1.3 Assessment Queries

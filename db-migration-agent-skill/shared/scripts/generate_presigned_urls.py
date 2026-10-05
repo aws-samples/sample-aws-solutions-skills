@@ -4,7 +4,7 @@ execution-runbooks.md §Soak automation / dashboard.md §Presigned-URL viewing.
 
 Run this at soak start, and renew before expiry, after dashboard/index.html + assets/ + the initial
 status.json/activity-log.jsonl have been uploaded to the dashboard S3 bucket (see
-cdk-stacks.md §Soak automation infra for the bucket + upload step). It does two things:
+cdk-stacks.md §soak-stack.ts for the bucket + upload step). It does two things:
 
 1. Presigns a GET URL for every file the page needs (index.html, both assets, status.json,
    activity-log.jsonl), each valid for the same duration. Use 129600s (1.5 days) or
@@ -38,7 +38,13 @@ access key. For any 3- or 7-day soak tier:
      sub-resource URLs but the script's own final `put_object` call for `index.html` will
      fail with AccessDenied. This is a real, minimum-necessary requirement, not scope
      creep — don't narrow it back to `GetObject`-only to look more least-privilege; that
-     just breaks the script.
+     just breaks the script. If the bucket is encrypted with a customer-managed KMS key
+     (SSE-KMS with a CMK, not SSE-S3/aws-managed), the same user ALSO needs
+     `kms:Decrypt` (every customer GET is authorized as the signer, so this is checked on
+     every page load) and `kms:GenerateDataKey` (the script's own put_object) on that key
+     ARN — without them S3 answers AccessDenied/KMS.AccessDeniedException even though the
+     S3 policy looks right. Optionally grant `s3:ListBucket` (lets `head_bucket` return
+     200 instead of 403 — the region is resolved either way, see `resolve_bucket_region`).
   2. Run this script authenticated AS that user — boto3 (and this script) reads
      credentials from the environment via the standard chain, e.g.
      `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...`, or
@@ -55,7 +61,23 @@ their session genuinely outlives 24h — check `aws sts get-caller-identity` /
 regardless of tier.
 
 Usage:
-    python3 generate_presigned_urls.py --bucket my-dashboard-bucket --expires-seconds 604800
+    python3 generate_presigned_urls.py --bucket my-dashboard-bucket --region ap-northeast-2 \
+        --expires-seconds 604800
+
+REGION (real failure, ap-northeast-2 engagement): a SigV4 presigned URL embeds the region
+in its credential scope. A client built without region_name signs for the caller's default
+region (often us-east-1), and a bucket elsewhere then rejects every customer GET with
+`AuthorizationQueryParametersError ... the region 'us-east-1' is wrong; expecting
+'ap-northeast-2'` — while this script's own put_object still SUCCEEDS (boto3 follows the
+region redirect for API calls, not for URLs it hands out), so the run looked green. This
+script therefore (1) resolves the bucket's real region from S3 itself (head_bucket's
+x-amz-bucket-region header, falling back to get_bucket_location), (2) signs with a client
+pinned to that region on the regional virtual-hosted endpoint, (3) treats `--region` only
+as an assertion that must match the detected region, and (4) GETs every URL it generated
+and refuses to print the customer link unless each one returns HTTP 200 — on failure it
+prints a redacted S3 error summary (Code/Message/Region only — never signing material) and exits
+non-zero. Run it only after every object (index.html,
+assets/, status.json, activity-log.jsonl) is already in the bucket.
 
 By default the TEMPLATE is this repo's own clean `shared/templates/dashboard.html` — never
 the bucket's current `index.html`. That default is deliberate, not just convenient: once
@@ -71,11 +93,15 @@ Prints the customer-facing index.html URL last, on its own line, prefixed
 "CUSTOMER LINK: " — that line is the deliverable to hand over.
 """
 import argparse
+import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 ASSET_KEYS = ["assets/dashboard.css", "assets/dashboard.js"]
 DATA_KEYS = ["status.json", "activity-log.jsonl"]
@@ -83,6 +109,89 @@ DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "dashb
 # Presence of this string means a file is an already-materialized output of this script,
 # not the clean template — used to fail loudly instead of silently double-injecting.
 _MATERIALIZED_MARKER = "DASHBOARD_STATUS_URL"
+
+
+def resolve_bucket_region(bucket, probe_client=None, hint_region=None):
+    """Return the bucket's real region, asked of S3 itself — never the caller's default.
+
+    head_bucket carries `x-amz-bucket-region` on 200, 301 AND 403 responses, so a signer
+    scoped to Get/PutObject only (no s3:ListBucket) still learns the region from the error
+    response. Fallback: get_bucket_location (LocationConstraint None/"" means us-east-1;
+    legacy "EU" means eu-west-1)."""
+    s3 = probe_client or boto3.client("s3", region_name=hint_region,
+                                      config=Config(signature_version="s3v4"))
+    try:
+        resp = s3.head_bucket(Bucket=bucket)
+        headers = resp.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+    except ClientError as e:
+        headers = e.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchBucket"):
+            raise SystemExit(f"Bucket {bucket!r} does not exist (head_bucket 404).")
+    region = headers.get("x-amz-bucket-region")
+    if region:
+        return region
+    try:
+        loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+    except ClientError as e:
+        raise SystemExit(
+            f"Could not determine the region of bucket {bucket!r}: head_bucket returned no "
+            f"x-amz-bucket-region header and get_bucket_location failed "
+            f"({e.response.get('Error', {}).get('Code')}: {e}). Grant s3:ListBucket or "
+            "s3:GetBucketLocation on the bucket to the signer, then re-run."
+        )
+    if not loc:
+        return "us-east-1"
+    return {"EU": "eu-west-1"}.get(loc, loc)
+
+
+def make_signing_client(region, bucket):
+    """S3 client pinned to the bucket's region, SigV4, virtual-hosted addressing (path-style
+    only when the bucket name contains dots, which break virtual-host TLS). botocore
+    resolves the regional endpoint itself (incl. non-aws partitions); us-east-1 is forced
+    onto its regional endpoint instead of the legacy global one."""
+    addressing = "path" if "." in bucket else "virtual"
+    return boto3.client(
+        "s3",
+        region_name=region,
+        config=Config(signature_version="s3v4",
+                      s3={"addressing_style": addressing, "us_east_1_regional_endpoint": "regional"}),
+    )
+
+
+# Never echo signing material: S3 error bodies (SignatureDoesNotMatch etc.) can carry the
+# StringToSign / CanonicalRequest / credential scope / security token.
+_SAFE_ERROR_FIELDS = ("Code", "Message", "Region", "BucketRegion", "Endpoint")
+_REDACT = re.compile(
+    r"(X-Amz-(?:Credential|Security-Token|Signature)=)[^&\s<\"']+|"
+    r"\b(?:AKIA|ASIA)[A-Z0-9]{12,}\b", re.IGNORECASE)
+
+
+def summarize_s3_error(status, body):
+    """HTTP status + whitelisted, redacted fields from an S3 XML error body."""
+    parts = [f"HTTP {status}"]
+    for field in _SAFE_ERROR_FIELDS:
+        m = re.search(rf"<{field}>(.*?)</{field}>", body or "", re.S)
+        if m:
+            val = _REDACT.sub(lambda mm: (mm.group(1) or "") + "<redacted>", m.group(1).strip())
+            parts.append(f"{field}={val[:300]}")
+    if len(parts) == 1 and body:
+        parts.append("(non-XML error body suppressed)")
+    return " ".join(parts)
+
+
+def verify_url(url, timeout=20):
+    """GET the presigned URL exactly as the customer's browser would. Returns
+    (ok, status, body_excerpt)."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read(1)
+            return r.status == 200, r.status, ""
+    except urllib.error.HTTPError as e:
+        body = e.read(4000).decode("utf-8", "replace")
+        return False, e.code, summarize_s3_error(e.code, body)
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return False, None, f"{type(e).__name__}: {getattr(e, 'reason', '')}"
 
 
 def presign(s3, bucket, key, expires_seconds):
@@ -131,6 +240,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bucket", required=True)
     ap.add_argument("--prefix", default="", help='key prefix inside the bucket, e.g. "" or "myeng/"')
+    ap.add_argument("--region", default=None,
+                     help="the dashboard bucket's region (e.g. ap-northeast-2). Optional — the "
+                          "script always detects the bucket's real region from S3; if given, "
+                          "it must MATCH the detected one or the script stops.")
     ap.add_argument("--expires-seconds", type=int, default=604800,
                      help="max 604800 (7 days) — the SigV4 ceiling; see credential-longevity caveat above")
     ap.add_argument("--local-template", default=str(DEFAULT_TEMPLATE),
@@ -149,7 +262,16 @@ def main():
     # every other region defaults to SigV4 already. SigV2 is a deprecated signing scheme;
     # forcing 's3v4' here is what makes the query-string-is-fully-signed behavior this
     # script (and dashboard.js's cache-buster removal) relies on actually hold.
-    s3 = boto3.client("s3", config=Config(signature_version="s3v4"))
+    #
+    # Pin the region too: SigV4 signs a region into every URL, so a client left on the
+    # caller's default region produces URLs a bucket in another region rejects (see the
+    # REGION note in the module docstring).
+    region = resolve_bucket_region(args.bucket, hint_region=args.region)
+    if args.region and args.region != region:
+        sys.exit(f"--region {args.region} does not match the bucket's actual region {region} "
+                 f"(reported by S3 for {args.bucket!r}). Fix the argument/config — URLs "
+                 "signed for the wrong region are rejected by S3.")
+    s3 = make_signing_client(region, args.bucket)
     all_keys = ["index.html"] + ASSET_KEYS + DATA_KEYS
     presigned = {k: presign(s3, args.bucket, f"{args.prefix}{k}", args.expires_seconds) for k in all_keys}
 
@@ -160,7 +282,23 @@ def main():
     s3.put_object(Bucket=args.bucket, Key=f"{args.prefix}index.html",
                   Body=materialized.encode("utf-8"), ContentType="text/html")
 
-    print(f"Presigned {len(all_keys)} objects, expiring in {args.expires_seconds}s "
+    # Self-verify: a successful put_object proves nothing about the URLs (boto3 follows
+    # region redirects for its own calls). GET each URL like the customer's browser will.
+    failures = []
+    for k in all_keys:
+        ok, status, body = verify_url(presigned[k])
+        print(f"verify GET {args.prefix}{k}: {'200 OK' if ok else f'FAILED (HTTP {status})'}")
+        if not ok:
+            failures.append((k, status, body))
+    if failures:
+        for k, status, body in failures:
+            print(f"--- S3 error for {args.prefix}{k}: {body}", file=sys.stderr)
+        sys.exit(f"{len(failures)} of {len(all_keys)} presigned URLs did not return HTTP 200 — "
+                 "NOT handing out a link. Common causes: object not uploaded yet (404 NoSuchKey), "
+                 "signer lacks s3:GetObject or kms:Decrypt on a CMK bucket (403 AccessDenied), "
+                 "region mismatch (400 AuthorizationQueryParametersError).")
+
+    print(f"Bucket region: {region}. Presigned {len(all_keys)} objects (all verified HTTP 200), expiring in {args.expires_seconds}s "
           f"({args.expires_seconds / 86400:.1f} days).")
     print("Re-uploaded index.html with absolute presigned references (css/js/status/log).")
     print("Keep the signing credentials' underlying session alive for the full duration above")

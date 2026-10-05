@@ -105,6 +105,14 @@
       historyLatest: 'Latest recorded event', phasePrefix: 'Phase',
       soakMissingTime: 'Soak is active but its last check / start time is missing or invalid.',
       soakLastCheck: 'Last soak check', trendTitle: 'Sample history',
+      cwTitle: 'Compressed soak window (manual tracking)',
+      cwRequired: (h, d) => `${h} h required${d != null ? ` (originally ${d} day(s))` : ''}`,
+      cwState: { active: 'Active', blocked: 'Blocked', complete: 'Complete' },
+      cwStarted: 'Started', cwPlannedEnd: 'Planned end (a plan, not coverage)', cwLastReviewed: 'Last reviewed',
+      cwCompleted: 'Completed', cwWaiver: 'Waiver', cwSoakExit: 'Soak-exit acceptance',
+      cwIntervals: 'Recorded intervals', cwNoIntervals: 'No intervals recorded yet.',
+      cwVerdict: { green: 'GREEN', red: 'RED', unknown: 'UNKNOWN' }, cwLimitations: 'Limitations',
+      cwHelp: 'Hours are recorded by hand. Missing, unknown or RED intervals break the streak; disconnected green hours are not summed. This page does not compute readiness.',
       trendHelp: 'Lag: DMS maximum over the preceding 15 minutes, or a native MySQL sample. Headroom: preceding 30-minute average free storage %. These are not daily extrema. Gaps and mechanism changes break the line.',
       lagMetric: 'Replication lag (seconds)', headroomMetric: 'Storage headroom (%)',
       latestSample: 'Latest recorded day', delta: 'Change from previous day',
@@ -194,6 +202,14 @@
       historyLatest: '최근 기록된 활동', phasePrefix: '단계',
       soakMissingTime: '병행 가동 중이지만 마지막 점검 / 시작 시각이 없거나 올바르지 않습니다.',
       soakLastCheck: '마지막 병행 가동 점검', trendTitle: '표본 측정 추이',
+      cwTitle: '단축된 병행 가동 기간 (수동 추적)',
+      cwRequired: (h, d) => `필요 ${h}시간${d != null ? ` (원래 ${d}일)` : ''}`,
+      cwState: { active: '진행 중', blocked: '차단됨', complete: '완료' },
+      cwStarted: '시작', cwPlannedEnd: '종료 예정 (계획이며 커버리지가 아님)', cwLastReviewed: '마지막 검토',
+      cwCompleted: '완료 시각', cwWaiver: '면제 기록', cwSoakExit: '병행 가동 종료 승인',
+      cwIntervals: '기록된 구간', cwNoIntervals: '아직 기록된 구간이 없습니다.',
+      cwVerdict: { green: 'GREEN', red: 'RED', unknown: '미확인' }, cwLimitations: '제한 사항',
+      cwHelp: '시간은 수동으로 기록됩니다. 누락·미확인·RED 구간은 연속 기록을 끊으며, 끊어진 green 시간은 합산하지 않습니다. 이 페이지는 준비 상태를 계산하지 않습니다.',
       trendHelp: '복제 지연: 직전 15분의 DMS 최댓값 또는 네이티브 MySQL 표본. 여유 용량: 직전 30분의 평균 여유 스토리지 %. 일일 최댓값·최솟값이 아닙니다. 누락일과 복제 방식 변경 시 선이 끊깁니다.',
       lagMetric: '복제 지연 (초)', headroomMetric: '스토리지 여유 용량 (%)',
       latestSample: '마지막 기록일', delta: '전일 대비 변화',
@@ -535,12 +551,34 @@
         <tbody>${rows}</tbody></table></div>`)}</article>`;
   }
 
+  // Optional soak.compressed_window (dashboard.md): manual, waiver-approved sub-day window.
+  // Display only — recorded facts are shown as-is; nothing is summed, inferred or gated.
+  function renderCompressedWindow(cw) {
+    if (!cw || typeof cw !== 'object' || Array.isArray(cw)) return '';
+    const l = L();
+    const when = (iso) => iso ? String(iso).replace('T', ' ') : l.notRecorded;
+    const rows = list(cw.intervals).filter(iv => iv && typeof iv === 'object').map((iv, i) => disclosure(
+      `soak-cw-${i}-${iv.started_at || ''}`,
+      `${when(iv.started_at)} → ${when(iv.ended_at)} · ${l.cwVerdict[iv.overall] || l.dayUnknown}`,
+      references(iv.evidence) + (list(iv.limitations).length ? `<h4>${esc(l.cwLimitations)}</h4>${bullets(iv.limitations)}` : '')
+        || `<p class="empty">${esc(l.notRecorded)}</p>`)).join('');
+    return `<div class="soak-compressed"><h3>${esc(l.cwTitle)}</h3>
+      <p>${badge(cw.state, l.cwState)} ${numeric(cw.required_hours)
+        ? esc(l.cwRequired(cw.required_hours, numeric(cw.original_required_days) ? cw.original_required_days : null))
+        : esc(l.notRecorded)}</p>
+      ${paragraph(l.cwStarted, cw.started_at)}${paragraph(l.cwPlannedEnd, cw.planned_end_at)}
+      ${paragraph(l.cwLastReviewed, cw.last_reviewed_at)}${paragraph(l.cwCompleted, cw.completed_at)}
+      ${paragraph(l.cwWaiver, cw.waiver_ref)}${paragraph(l.cwSoakExit, cw.soak_exit_ref)}
+      <p class="section-note">${esc(l.cwHelp)}</p>
+      <h4>${esc(l.cwIntervals)}</h4>${rows || `<p class="empty">${esc(l.cwNoIntervals)}</p>`}</div>`;
+  }
+
   function renderSoak(s) {
     const l = L();
     const soak = s.soak;
     if (!soak || soak.waived) {
       setHTML('#soak', soak && soak.waived
-        ? `<div class="soak-waived">${esc(l.soakWaived(soak.waived_reason))}</div>`
+        ? `<div class="soak-waived">${esc(l.soakWaived(soak.waived_reason))}</div>${renderCompressedWindow(soak.compressed_window)}`
         : `<div id="soak-empty">${esc(l.soakEmpty)}</div>`);
       return;
     }
@@ -576,7 +614,8 @@
         <div class="trends">${renderTrend(days, 'replication_lag_seconds', l.lagMetric, l.seconds, 'replication_lag')}
         ${renderTrend(days, 'headroom_pct', l.headroomMetric, '%', 'headroom')}</div>` : ''}
       <div class="soak-days">${dayCells}</div>
-      ${nTotal > days.length ? `<p class="section-note">${esc(l.pendingDays(nTotal - days.length))}</p>` : ''}`);
+      ${nTotal > days.length ? `<p class="section-note">${esc(l.pendingDays(nTotal - days.length))}</p>` : ''}
+      ${renderCompressedWindow(soak.compressed_window)}`);
   }
 
   function logRows(lines) {

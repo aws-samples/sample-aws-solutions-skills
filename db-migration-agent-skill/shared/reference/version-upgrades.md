@@ -72,12 +72,23 @@ below for the source→target gap before choosing the target version, and add an
 ### MySQL 8.0 → 8.4 (latest LTS)
 Target of choice for new migrations — 8.0 reaches RDS end of standard support **2026-07-31**, so
 land on **8.4 LTS** (RDS GA 2024-11-21; community EOL 2029-04-30, RDS standard support to 2029-07-31).
+Aurora MySQL 8.4 is also GA (2026-05-21); Aurora MySQL 3.x is the **8.0** line. Migration-execution
+specifics (replication, procedures, client, dump flags, DEFINER) are in the sub-section below.
 
-- **`mysql_native_password` disabled by default** — the plugin still ships but is **OFF at startup**.
-  Accounts created with it (and old PHP/JDBC/legacy connectors) **fail to authenticate** until you
-  set `mysql_native_password=ON` in the 8.4 parameter group, or recreate users on
-  `caching_sha2_password`. *Highest-impact app breakage of this hop.* Plugin is deprecated and slated
-  for removal.
+- **Authentication plugin — upstream vs RDS differ; don't conflate them.**
+  - *Upstream community MySQL 8.4:* `mysql_native_password` ships but is **OFF at startup**
+    (`--mysql-native-password=ON` re-enables it) — relevant to self-managed 8.4 (e.g. EC2).
+  - *RDS for MySQL 8.4:* the default plugin for **new** users is `caching_sha2_password`, but
+    **`mysql_native_password` still works** (deprecated; support ends with the 8.4 series). Change
+    the default for new users via the `authentication_policy` parameter
+    ([RDS MySQL known issues](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.KnownIssuesAndLimitations.html)).
+    RDS for MySQL 8.0.34+ uses `mysql_native_password` and `default_authentication_plugin` can't be changed.
+  - What actually breaks on RDS 8.4: **clients/drivers without `caching_sha2_password` support**
+    connecting as `caching_sha2_password` users (all new users by default). Don't prescribe a
+    parameter change; **verify on the actual target**: `SELECT user, host, plugin FROM mysql.user;`
+    plus a real login with the app's own driver/connector for each app account. Migrating app
+    accounts to `caching_sha2_password` is planned hygiene (the old plugin's end is scheduled), not
+    an emergency fix.
 - **`default_authentication_plugin` removed** → replaced by `authentication_policy`. A custom 8.0
   parameter group that still references it will block startup — strip it before upgrading.
 - **InnoDB defaults re-tuned for modern hardware**, can shift I/O / memory footprint — benchmark:
@@ -112,12 +123,105 @@ land on **8.4 LTS** (RDS GA 2024-11-21; community EOL 2029-04-30, RDS standard s
   recommended low-downtime path. On 8.4.4+, **drop spatial indexes before upgrade** and recreate
   after.
 
+#### 8.0 → 8.4 migration-execution specifics (load at Phase 2–3, again at Phases 6–8)
+These bite during *migration* (replication setup, dump/import, tooling), not just app behavior.
+
+- **Target engine choice.** Both **RDS for MySQL 8.4** and **Aurora MySQL 8.4** are GA (Aurora
+  MySQL 8.4 GA 2026-05-21, compatible with community 8.4.7; Aurora now numbers versions like
+  community — "8.4.x", not "4.x"). Aurora MySQL **version 3.x is 8.0-compatible** — a 3.x target is
+  *not* an 8.4 target. Confirm the exact target engine + minor with
+  `aws rds describe-db-engine-versions --engine aurora-mysql|mysql` in the target Region before
+  committing the plan (*verify live*: per-Region availability, and Aurora 8.4 feature gaps — e.g.
+  Fast insert is not available).
+- **Replication direction is asymmetric.** Older source → newer replica is supported (8.0 source →
+  8.4 replica = the forward path). Upstream, **newer source → older replica (8.4 → 8.0) is "generally
+  not supported"** ([replication compatibility](https://dev.mysql.com/doc/refman/8.4/en/replication-compatibility.html)).
+  - *Documented service-specific exception (RDS-to-RDS only):* AWS's RDS for MySQL 8.0 → 8.4
+    Blue/Green upgrade guide sets up reverse replication from the new 8.4 instance to the old 8.0
+    (`-old1`) instance after switchover, starting from the binlog position recorded at switchover,
+    natively (both RDS) or via DMS
+    ([AWS Database Blog: upgrading RDS for MySQL 8.0 to 8.4 — prechecks, Blue/Green, rollback](https://aws.amazon.com/blogs/database/best-practices-for-upgrading-amazon-rds-for-mysql-8-0-to-8-4-with-prechecks-blue-green-and-rollback/)).
+    That covers an RDS 8.0 → RDS 8.4 upgrade, nothing else.
+  - *External/on-prem/EC2 8.0 source → RDS/Aurora 8.4 target:* native reverse replication back to
+    the source is **not a supported path**. The rollback-direction gate applies (method-selection.md):
+    DMS reverse CDC (3.5.4+ supports MySQL 8.4 as a source; rehearse it) or write-log replay / explicit
+    RPO acceptance. Record why native was rejected; tell the approver *before* GATE 2.
+- **Syntax splits per side — write runbook commands per server.** On the 8.0 source both old and new
+  verbs work; on the 8.4 target the old verbs are **removed** (`SHOW MASTER STATUS`,
+  `SHOW SLAVE STATUS`, `CHANGE MASTER TO`, `START/STOP SLAVE`, `RESET MASTER` → ERROR 1064). And
+  **`SHOW BINARY LOG STATUS` does not exist on 8.0** (also ERROR 1064). Use `SHOW MASTER STATUS` (or
+  `SHOW BINARY LOG STATUS` only if the source is ≥ 8.2) on the source and `SHOW BINARY LOG STATUS`
+  on the target. `SHOW REPLICA STATUS` works on both (8.0.22+). Don't confuse the target's own
+  `SHOW BINARY LOG STATUS` coordinates (its binlog — the reverse-DMS start point) with the source's.
+- **RDS replication procedures renamed on 8.4.** AWS documents `mysql.rds_set_external_source`,
+  `rds_reset_external_source`, `rds_set_external_source_with_auto_position`,
+  `rds_set_external_source_with_delay`, `rds_next_source_log`, `rds_set_source_auto_position`,
+  `rds_set_source_delay` for **8.4 and higher**, and the `*_master*` names for **8.0 and lower**.
+  `rds_start_replication` / `rds_stop_replication` / `rds_skip_repl_error` are unchanged. A live
+  check on RDS for MySQL 8.4.11 found the old `*_master` procedures **still present** in the `mysql`
+  schema — but AWS no longer documents them for 8.4, so **always use the `*_source` names** on an
+  8.4 target and don't rely on the old ones. With a `caching_sha2_password` replication user
+  (8.4 default), these procedures require TLS (`SOURCE_SSL=1` / `ssl_encryption => 1`).
+- **Replica-status columns: read by name, never by position.** `SHOW REPLICA STATUS` returns
+  `Seconds_Behind_Source`, `Source_Host`, `Source_Log_File`, `Read_Source_Log_Pos`,
+  `Exec_Source_Log_Pos`, `Relay_Source_Log_File`, `Source_SSL_*` …; the deprecated
+  `SHOW SLAVE STATUS` (8.0 only) returns `Seconds_Behind_Master`, `Master_Host`, … Scripts must
+  look the column up via the cursor description and accept either name (the bundled
+  `soak_check*.py` do).
+- **Client on the bastion/migration host: prove it, don't assume it.** Requirement: a demonstrated
+  **TLS + `caching_sha2_password` login to the actual target** with the client you'll use, and
+  dump/load tooling whose syntax the 8.4 server accepts (e.g. the exact `mysqldump` flags in the
+  runbook). Recommended, tested toolchain: the Oracle MySQL 8.4 LTS client. Evidence: in a live
+  dry run a **MariaDB 10.5 `mysql` client failed `caching_sha2_password` authentication** against
+  RDS for MySQL 8.4 — so a MariaDB client must pass the same login test before it is used. Check
+  `mysql --version` / `mysqldump --version` at Phase 0. Same rule for app drivers (see the
+  authentication-plugin bullet above).
+- **`mysqldump --source-data` (not `--master-data`).** `--source-data` exists from mysqldump
+  8.0.26; `--master-data` is a deprecated alias. From 8.0.23 the dump writes
+  `CHANGE REPLICATION SOURCE TO` (older clients write `CHANGE MASTER TO`, which an 8.4 server
+  rejects). On RDS/Aurora you can't run that statement anyway — use **`--source-data=2`** (written
+  as a comment), read the coordinates from the dump header, and pass them to
+  `mysql.rds_set_external_source`. Likewise `--dump-replica` replaces `--dump-slave`. `mysqlpump`
+  is gone in 8.4 — use `mysqldump` or MySQL Shell dump utilities.
+- **DEFINER on import: privilege names changed — and RDS ≠ Aurora.** Upstream 8.4 **removed
+  `SET_USER_ID`** (a `GRANT` naming it is a syntax error; rewrite 8.0 grant scripts). Creating a
+  view/routine/trigger/event with someone else's `DEFINER` needs **`SET_ANY_DEFINER`**; with a
+  definer account that doesn't exist it also needs **`ALLOW_NONEXISTENT_DEFINER`**
+  ([MySQL privileges](https://dev.mysql.com/doc/refman/8.4/en/privileges-provided.html)).
+  - *RDS for MySQL 8.4 (8.4.3+):* `SET_ANY_DEFINER` = Allowed, **`ALLOW_NONEXISTENT_DEFINER` =
+    Disallowed**, `SET_USER_ID` = Not available
+    ([RDS dynamic privileges](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.MySQL.CommonDBATasks.dynamic-privileges.html)).
+    So objects whose definer doesn't exist **cannot** be imported: **pre-create every definer
+    account on the target before loading objects** (source-assessment.md §1.2 DEFINER row), or
+    deliberately remap `DEFINER` (e.g. `sed` on the dump) **with the customer's approval** recorded
+    in the plan. Never promise orphan-definer import on RDS.
+  - *Aurora MySQL 8.4:* the master user gets both `SET_ANY_DEFINER` and `ALLOW_NONEXISTENT_DEFINER`
+    (plus `rds_superuser_role`) per
+    [Aurora master user privileges](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.MasterAccounts.html).
+    Pre-creating definers is still the default — an orphan definer is a broken object at runtime.
+    *Verify live* with `SHOW GRANTS` on the actual target either way.
+
+Sources: [MySQL 8.4 What's New](https://dev.mysql.com/doc/refman/8.4/en/mysql-nutshell.html) ·
+[Replication compatibility](https://dev.mysql.com/doc/refman/8.4/en/replication-compatibility.html) ·
+[SHOW REPLICA STATUS](https://dev.mysql.com/doc/refman/8.4/en/show-replica-status.html) ·
+[mysqldump 8.0](https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html) ·
+[Privileges (SET_ANY_DEFINER)](https://dev.mysql.com/doc/refman/8.4/en/privileges-provided.html) ·
+[RDS dynamic privileges](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.MySQL.CommonDBATasks.dynamic-privileges.html) ·
+[RDS MySQL known issues (auth plugin)](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.KnownIssuesAndLimitations.html) ·
+[RDS 8.0→8.4 Blue/Green + rollback](https://aws.amazon.com/blogs/database/best-practices-for-upgrading-amazon-rds-for-mysql-8-0-to-8-4-with-prechecks-blue-green-and-rollback/) ·
+[RDS replication procedures](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/mysql-stored-proc-replicating.html) ·
+[Aurora MySQL 8.4 GA](https://aws.amazon.com/about-aws/whats-new/2026/05/amazon-aurora-mysql/8-4/) ·
+[DMS sources](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Introduction.Sources.html) ·
+[Master user privileges](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.MasterAccounts.html).
+
 ### MySQL 5.7 end-of-life note
 - **Community support ended 2023-10-31**; **RDS end of standard support 2024-02-29.** Still-running
   5.7 instances are auto-enrolled into **RDS Extended Support** (no downtime, frozen on the
   `5.7.44-RDS.<date>` line with AWS-backported critical/high CVE fixes).
 - **Extended Support is paid and time-boxed:** billing started 2024-03-01; years 1–2 ran to
-  2026-02-28, year-3 pricing from 2026-03-01, and **RDS Extended Support ends 2027-02-28** — after
+  2026-02-28, year-3 pricing from 2026-03-01, and **RDS Extended Support now ends 2029-06-30**
+  (extended from 2027-02-28 on 2026-06-17 — [announcement](https://aws.amazon.com/about-aws/whats-new/2026/06/rds-mysql-es-extension/);
+  *verify live* the year-4+ pricing) — after
   which RDS will **force-upgrade the major version** for you. Pricing is per-vCPU-hour and roughly
   *doubles* in year 3 (e.g. us-east-2 ~$0.10 → ~$0.20 /vCPU-hour; varies by region — check the RDS
   MySQL pricing page).

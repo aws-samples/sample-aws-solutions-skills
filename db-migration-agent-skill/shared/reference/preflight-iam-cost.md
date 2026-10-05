@@ -25,7 +25,9 @@ python3 -c "import boto3" 2>&1
 # Optional — only affects which source-access path is available; Send-Command
 # (running the client that already exists ON the source/target host via SSM) always
 # works without these, so their absence is never a blocker, just a narrower menu
-mysql --version 2>&1
+mysql --version 2>&1   # 8.4 target: the client must PROVE a TLS + caching_sha2_password login to
+                       # the real target (Oracle MySQL 8.4 client = tested toolchain; a MariaDB 10.5
+                       # client failed this in a dry run) — version-upgrades.md MySQL 8.0 → 8.4
 psql --version 2>&1
 ```
 
@@ -49,6 +51,46 @@ the normal A3 infrastructure-deploy rule, not this courtesy check.**
 
 Windows: point at the official installer/MSI for whichever is missing rather than trying
 to script it — package-manager conventions differ too much to guess safely.
+
+### 0b. Soak automation (only once the customer has accepted the Phase 7.7 soak Lambda)
+
+Each of these broke a real soak-stack deploy or its first invocation; check them **before**
+the first `cdk deploy`, not after ([../patterns/cdk-stacks.md](../patterns/cdk-stacks.md)
+§soak-stack.ts):
+
+```bash
+# 1. Bundling path. 'docker' needs a running daemon + public.ecr.aws; 'prebuilt' (default)
+#    needs only PyPI from THIS machine. Pick the one that passes.
+docker info >/dev/null 2>&1 && echo "docker: running" || echo "docker: NOT running -> use bundling:'prebuilt'"
+curl -sS -o /dev/null -w "public.ecr.aws %{http_code}\n" https://public.ecr.aws/v2/ || echo "public.ecr.aws unreachable"
+curl -sS -o /dev/null -w "pypi %{http_code}\n" https://pypi.org/simple/pymysql/ || echo "PyPI unreachable -> need a mirror (PIP_INDEX_URL) or pre-downloaded wheels"
+
+# 2. The Lambda's subnets (the bastion's private subnets) must reach AWS APIs:
+#    a 0.0.0.0/0 route to a NAT gateway, OR VPC endpoints for every service the handler calls.
+REGION=<region>; VPC=<bastion-vpc-id>; SUBNETS="<subnet-a> <subnet-b>"
+for s in $SUBNETS; do
+  rt=$(aws ec2 describe-route-tables --region $REGION --filters Name=association.subnet-id,Values=$s \
+        --query 'RouteTables[0].RouteTableId' --output text)
+  [ "$rt" = "None" ] && rt=$(aws ec2 describe-route-tables --region $REGION \
+        --filters Name=vpc-id,Values=$VPC Name=association.main,Values=true --query 'RouteTables[0].RouteTableId' --output text)
+  echo "$s -> $rt default route: $(aws ec2 describe-route-tables --region $REGION --route-table-ids $rt \
+        --query "RouteTables[0].Routes[?DestinationCidrBlock=='0.0.0.0/0'].[NatGatewayId,GatewayId,TransitGatewayId]" --output text)"
+done
+aws ec2 describe-vpc-endpoints --region $REGION --filters Name=vpc-id,Values=$VPC \
+  --query 'VpcEndpoints[].[ServiceName,VpcEndpointType,PrivateDnsEnabled,State]' --output table
+```
+
+Pass when: the bundling path you chose works; and **each** Lambda subnet has a `nat-…`
+default route, **or** the VPC has interface endpoints (private DNS on, SG allowing 443 from
+the bastion SG) for `secretsmanager`, `monitoring`, `rds`, `dms` (only if a DMS task is
+configured) **and** an S3 **gateway** endpoint associated with those subnets' route tables.
+`logs` is not required (Lambda delivers its own logs outside the VPC). An `igw-…` default
+route is not enough — Lambda ENIs get no public IP. A gap here shows up as a **timeout**,
+not AccessDenied; it is not an IAM problem. New endpoints are new networking (VPC-wide DNS
+change + per-AZ cost) — propose them, don't create them silently. After deploy, the
+Lambda's `{"mode":"preflight"}` invocation is the authoritative end-to-end check: the
+schedule deploys **DISABLED**, and is enabled (`cdk deploy -c soakScheduleEnabled=true`) only
+after the read-only DB users exist, the dashboard files are uploaded, and preflight passes.
 
 **Credentials configured is a separate question from the CLI being installed.** If
 `aws sts get-caller-identity` (§1 below) fails with a credentials/token error specifically

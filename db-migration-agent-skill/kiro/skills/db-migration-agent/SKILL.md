@@ -347,7 +347,7 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 | `shared/reference/dms-best-practices.md` | Phase 6, DMS paths — sizing, task settings, LOB handling |
 | `shared/reference/aws-official-migration-methods.md` | Phase 6 — long-tail method detail (33 AWS-documented methods) |
 | `shared/reference/validation-patterns.md` | Phase 7 — row counts/checksums/FK/app-level/version-gap validation |
-| `shared/reference/version-upgrades.md` | Phase 7 when source→target crosses a major version |
+| `shared/reference/version-upgrades.md` | Phase 2–3 as soon as source and target major versions differ (e.g. MySQL 8.0 → 8.4: §"MySQL 8.0 → 8.4"); again at Phases 6–8 |
 | `shared/reference/customer-test-integration.md` | Phase 6.5/7.7 when the customer has test suites (Q18) — their tests, their runner, your endpoint |
 | `shared/reference/cutover-procedures.md` | Phases 7.5–8 — client discovery, freeze, write-pause minimization, reverse replication, rollback |
 | `shared/templates/{migration-plan,authorizations,discovery-questions,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
@@ -368,7 +368,12 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
    lightweight courtesy check-in (hard constraint 11), not one of GATES 1–4 — don't ask it
    like a real gate, just get a clear "yes" before running anything.
    (Translate this into the user's conversation language — see the Language rule; the quote above is the English form of the template, not a literal string.)
-2. **Before creating or updating any engagement record**, check for an existing plan,
+2. **Install integrity — before using any `shared/` file:** in the directory this SKILL.md was
+   loaded from, test that `shared/reference/version-upgrades.md`, `shared/templates/migration-plan.md`,
+   `shared/assets/dashboard.js` and `shared/scripts/soak_check.py` exist (`test -r`, don't read them).
+   Any missing → STOP: the install is incomplete; show the README `install_skill` command. Never
+   substitute web search for a missing reference file.
+   **Before creating or updating any engagement record**, check for an existing plan,
    authorizations, and dashboard. Ask fresh / resume at phase N / failed midway and
    needs triage. Preserve every existing record; never reseed approval/progress evidence.
    On resume, use the recorded mode unless the user explicitly confirms a change.
@@ -487,11 +492,16 @@ engine, sizing, binlog/WAL state, and the **throughput estimate vs the transfer 
 if DataSync can't close the gap either, not a method to improvise around). Capture the
 **performance baseline** (top-20 statements + plans). Korean-enterprise check runs here.
 Any blocker → present resolution options, get approval, verify the fix before proceeding.
+**Source and target majors differ (e.g. MySQL 8.0 → 8.4)?** Load
+`shared/reference/version-upgrades.md` now (§"MySQL 8.0 → 8.4": auth plugin, an 8.4-capable
+client on the bastion, renamed replication commands/RDS procedures, replication direction).
 
 ### Phase 3: Select the method
 
 Per `shared/reference/method-selection.md`: apply the **version and rollback front-gates**
-before walking the matrix top-down to the first eligible matching row; apply the
+before walking the matrix top-down to the first eligible matching row (MySQL 8.0 → 8.4:
+native 8.4 → 8.0 reverse replication is unsupported upstream; AWS documents it only RDS-to-RDS
+for Blue/Green rollback — `shared/reference/version-upgrades.md` §"MySQL 8.0 → 8.4"); apply the
 **binlog state gate** ("zero-downtime" with `log_bin=OFF` is
 a contradiction — surface it). Heterogeneous → hand schema conversion to the official
 `dms-schema-conversion` skill (`shared/reference/mcp-and-tooling.md` §Chaining), then
@@ -611,7 +621,10 @@ counts, not the agent recording that the periods came up green — write the dat
 that reply lands. Shortening or skipping is a waiver
 (engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
 concurrently with this soak, not after it** — they test different things and don't depend
-on each other; don't serialize two independent waits.
+on each other; don't serialize two independent waits. Soak Lambda accepted? Run
+`shared/reference/preflight-iam-cost.md` §0b before the first deploy, deploy once, invoke
+its `{"mode":"preflight"}` with the schedule still DISABLED, fix every gap in one change, then
+enable the schedule (`shared/patterns/cdk-stacks.md` §soak-stack.ts) — never redeploy on a guess.
 
 ### Phase 8: Cutover — handover (Mode 2) or execution (Mode 3)
 

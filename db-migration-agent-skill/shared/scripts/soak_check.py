@@ -128,7 +128,8 @@ def _mysql_ssl_args(ssl_ca, ssl_insecure):
             else [f"--ssl-ca={bundle}", "--ssl-mode=VERIFY_IDENTITY"])
 
 
-def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False, port=None):
+def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False, port=None,
+                    headers=False):
     """Executes every statement in `sqls` in ONE mysql client session (one subprocess
     call/one connection) — required so a consistent-snapshot transaction started as the
     first statement actually covers every statement after it; separate subprocess calls
@@ -162,13 +163,16 @@ def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insec
       store lacks the current RDS root (see `_mysql_ssl_args`'s docstring).
     Flag *names* for these three tiers come from `_mysql_ssl_args`, which picks the
     MySQL-client or MariaDB-client spelling — confirmed live that a MariaDB client
-    rejects `--ssl-mode` outright (see `_mysql_client_is_mariadb`'s docstring)."""
+    rejects `--ssl-mode` outright (see `_mysql_client_is_mariadb`'s docstring).
+    `headers=True` keeps the column-name line (no `-N`) as the first line of each chunk —
+    used only for SHOW REPLICA STATUS, whose columns are read BY NAME (see
+    LAG_COLUMN_NAMES)."""
     script = "; ".join(f"{sql}; SELECT '{_SPLIT}'" for sql in sqls)
     cmd = ["mysql", "-h", host, "-u", user]
     if port:
         cmd += ["-P", str(port)]
     cmd += _mysql_ssl_args(ssl_ca, ssl_insecure)
-    cmd += ["-N", "-B", database, "-e", script]
+    cmd += (["-B"] if headers else ["-N", "-B"]) + [database, "-e", script]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
                           env={**os.environ, "MYSQL_PWD": password})
     if proc.returncode != 0:
@@ -232,7 +236,7 @@ def run_psql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecu
     return chunks
 
 
-def run_batch(family, conn, sqls):
+def run_batch(family, conn, sqls, headers=False):
     # conn (cfg["source"]/cfg["target"]) also carries "engine" for the dispatch decision
     # above — strip it here so it isn't passed through as a stray keyword arg.
     conn_args = {k: v for k, v in conn.items()
@@ -258,16 +262,81 @@ def run_batch(family, conn, sqls):
     if "port" in conn:
         conn_args["port"] = conn["port"]
     if family == "mysql":
-        return run_mysql_batch(sqls=sqls, **conn_args)
+        return run_mysql_batch(sqls=sqls, headers=headers, **conn_args)
     return run_psql_batch(sqls=sqls, **conn_args)
 
 
-def run_one(family, conn, sql):
-    chunks = run_batch(family, conn, [sql])
+def run_one(family, conn, sql, headers=False):
+    chunks = run_batch(family, conn, [sql], headers=headers)
     return chunks[0] if chunks else []
 
 
-def cloudwatch_alarms(alarm_names, region):
+# Same lookup as soak_check_lambda.py: SHOW REPLICA STATUS (8.0.22+, the only form on 8.4)
+# names it Seconds_Behind_Source; SHOW SLAVE STATUS (<8.0.22, MariaDB) Seconds_Behind_Master.
+# Read BY NAME — the old positional read (field 32) was verified only on an 8.0 replica.
+LAG_COLUMN_NAMES = ("Seconds_Behind_Source", "Seconds_Behind_Master")
+
+
+def lag_from_replica_status(cols, row):
+    """Returns (seconds_or_None, column_name_or_None). None seconds with a found column
+    means NULL (SQL/applier thread not running) — needs review, not zero lag."""
+    for name in LAG_COLUMN_NAMES:
+        if name in cols:
+            idx = cols.index(name)
+            val = row[idx] if idx < len(row) else None
+            if val is None or str(val).upper() == "NULL" or str(val) == "":
+                return None, name
+            return float(val), name
+    return None, None
+
+
+def aws_region(cfg):
+    """The region for every `aws` CLI call. Never a hardcoded default — a silent
+    us-east-1 fallback is exactly what broke an ap-northeast-2 engagement. Order:
+    cfg["region"]; else parsed from an RDS endpoint (`*.<region>.rds.amazonaws.com`) on
+    the target, then the source. No match -> ValueError (clean exit in main())."""
+    if cfg.get("region"):
+        return cfg["region"]
+    for side in ("target", "source"):
+        m = re.search(r"\.([a-z]{2}(?:-gov)?-[a-z]+-\d)\.rds\.amazonaws\.com$", str((cfg.get(side) or {}).get("host", "")))
+        if m:
+            return m.group(1)
+    raise ValueError(
+        'soak-config.json has no "region" and it cannot be derived from an RDS endpoint '
+        '(hosts are tunnels/IPs) — add "region": "<the target\'s region, e.g. ap-northeast-2>".'
+    )
+
+
+def _needs_aws(cfg):
+    return bool(cfg.get("alarm_names") or cfg.get("target_db_instance_id") or cfg.get("dms_task_arn")
+                or (cfg.get("dms_task_id") and cfg.get("dms_replication_instance_id")))
+
+
+def _aws_cli(cmd, check, iam_action, resource, aws_errors):
+    """Run an `aws` CLI call; on failure record {check, iam_action, resource, result,
+    message} in aws_errors (same shape as soak_check_lambda.py's detail.aws_errors[]) and
+    return "" so the caller's existing None/needs-review path applies — never a pass."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        proc, err, timed_out = None, "aws CLI call timed out after 30s", True
+    except (FileNotFoundError, OSError) as e:
+        proc, err, timed_out = None, f"could not run the aws CLI: {type(e).__name__}: {e}", False
+    else:
+        if proc.returncode == 0:
+            return proc.stdout
+        err, timed_out = (proc.stderr or "").strip(), False
+    denied = any(c in err for c in ("AccessDenied", "UnauthorizedOperation", "AuthorizationError", "is not authorized"))
+    network = timed_out or any(c in err for c in ("Could not connect to the endpoint", "Connect timeout", "Read timeout"))
+    entry = {"check": check, "iam_action": iam_action, "resource": resource,
+             "result": "AccessDenied" if denied else "Error",
+             "message": (err + (" — network: endpoint unreachable (NAT/VPC endpoint), not IAM" if network else ""))[:1000]}
+    print("SOAK_CHECK_AWS_ERROR " + json.dumps(entry, ensure_ascii=False), file=sys.stderr)
+    aws_errors.append(entry)
+    return ""
+
+
+def cloudwatch_alarms(alarm_names, region, aws_errors=None):
     """Returns (firing, unknown, check) — check is True/False/None/"not_applicable",
     same 3-state model as soak_check_lambda.py. INSUFFICIENT_DATA or a missing alarm is
     `unknown`, never silently folded into "pass"."""
@@ -275,7 +344,8 @@ def cloudwatch_alarms(alarm_names, region):
         return [], [], "not_applicable"
     cmd = ["aws", "cloudwatch", "describe-alarms", "--alarm-names", *alarm_names,
            "--region", region, "--query", "MetricAlarms[].[AlarmName,StateValue]", "--output", "json"]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    out = _aws_cli(cmd, "alarms", "cloudwatch:DescribeAlarms", ",".join(alarm_names),
+                   aws_errors if aws_errors is not None else [])
     states = {name: state for name, state in (json.loads(out) if out.strip() else [])}
     firing = [n for n, s in states.items() if s == "ALARM"]
     unknown = [n for n in alarm_names if states.get(n) in (None, "INSUFFICIENT_DATA")]
@@ -286,7 +356,7 @@ def cloudwatch_alarms(alarm_names, region):
     return firing, unknown, True
 
 
-def db_headroom_pct(db_instance_id, region):
+def db_headroom_pct(db_instance_id, region, aws_errors=None):
     """FreeStorageSpace as % of AllocatedStorage. Returns "not_applicable" for an
     Aurora-family instance — confirmed live against a real Aurora PostgreSQL writer that
     Aurora instances report a placeholder AllocatedStorage (observed: 1) and publish NO
@@ -298,7 +368,8 @@ def db_headroom_pct(db_instance_id, region):
     "not configured" vs "needs review" for that case."""
     cmd = ["aws", "rds", "describe-db-instances", "--db-instance-identifier", db_instance_id,
            "--region", region, "--query", "DBInstances[0].[AllocatedStorage,Engine]", "--output", "json"]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
+    aws_errors = aws_errors if aws_errors is not None else []
+    out = _aws_cli(cmd, "headroom", "rds:DescribeDBInstances", f"db:{db_instance_id}", aws_errors).strip()
     if not out:
         return None
     try:
@@ -315,22 +386,24 @@ def db_headroom_pct(db_instance_id, region):
            "--end-time", datetime.datetime.utcnow().isoformat() + "Z",
            "--period", "1800", "--statistics", "Average", "--region", region,
            "--query", "Datapoints[0].Average", "--output", "text"]
-    free_bytes = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
+    free_bytes = _aws_cli(cmd, "headroom", "cloudwatch:GetMetricStatistics",
+                          "* (AWS/RDS FreeStorageSpace)", aws_errors).strip()
     if not free_bytes or free_bytes == "None":
         return None
     free_gb = float(free_bytes) / (1024 ** 3)
     return round(100 * free_gb / float(allocated_gb), 1)
 
 
-def measure_replication_lag(cfg, family, source_conn, target_conn):
+def measure_replication_lag(cfg, family, source_conn, target_conn, aws_errors=None):
     """Returns (lag_seconds_or_None, mechanism_or_None) — DMS CloudWatch metrics if a DMS
     task is configured, else SHOW REPLICA STATUS (MySQL-family); native PostgreSQL
     logical replication requires manual review, not physical replay age. (None, None) means
     genuinely nothing is configured (the caller treats that as "not_applicable")."""
-    region = cfg.get("region", "us-east-1")
+    aws_errors = aws_errors if aws_errors is not None else []
     dms_task_id = cfg.get("dms_task_id")
     dms_instance_id = cfg.get("dms_replication_instance_id")
     if dms_task_id and dms_instance_id:
+        region = aws_region(cfg)
         best = None
         now = datetime.datetime.utcnow()
         for metric in ("CDCLatencyTarget", "CDCLatencySource"):
@@ -341,7 +414,8 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
                    "--start-time", (now - datetime.timedelta(minutes=15)).isoformat() + "Z",
                    "--end-time", now.isoformat() + "Z", "--period", "300", "--statistics", "Maximum",
                    "--region", region, "--query", "Datapoints[].Maximum", "--output", "json"]
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+            out = _aws_cli(cmd, "replication_lag", "cloudwatch:GetMetricStatistics",
+                           f"* (AWS/DMS {metric})", aws_errors)
             vals = json.loads(out) if out.strip() else []
             if not vals:
                 return None, "dms"
@@ -354,24 +428,19 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
     if family == "mysql" and replica_side:
         conn = cfg["target"] if replica_side == "target" else cfg["source"]
         try:
-            lines = run_one(family, conn, "SHOW REPLICA STATUS")
+            lines = run_one(family, conn, "SHOW REPLICA STATUS", headers=True)
         except RuntimeError:
             lines = []
         if not lines:
-            lines = run_one(family, conn, "SHOW SLAVE STATUS")
-        if not lines or not lines[0]:
+            try:
+                lines = run_one(family, conn, "SHOW SLAVE STATUS", headers=True)  # pre-8.0.22 / MariaDB
+            except RuntimeError:
+                lines = []
+        # headers=True: lines[0] is the column-name row, lines[1] the (single) status row.
+        if len(lines) < 2 or not lines[1]:
             return None, "mysql_replica_status"
-        fields = lines[0].split("\t")
-        # Seconds_Behind_Source/Master is the 33rd column (1-indexed) of SHOW REPLICA
-        # STATUS/SHOW SLAVE STATUS output, i.e. index 32 in a 0-indexed split — confirmed
-        # live against a real RDS MySQL 8.0 replica (60 tab-separated fields; index 31
-        # lands on the empty Source_SSL_Key column instead, one column earlier, which
-        # made this check permanently report `null`/needs-review even with a healthy,
-        # zero-lag replication pipe). MariaDB's SHOW SLAVE STATUS column set/order can
-        # legitimately differ from this — this fix targets the standard MySQL/RDS MySQL/
-        # Aurora MySQL layout this skill otherwise assumes for the mysql family.
-        val = fields[32] if len(fields) > 32 else None
-        return (float(val), "mysql_replica_status") if val and val != "NULL" else (None, "mysql_replica_status")
+        val, _col = lag_from_replica_status(lines[0].split("\t"), lines[1].split("\t"))
+        return val, "mysql_replica_status"
 
     pg_side = cfg.get("pg_replication_lag_side")
     if family == "postgres" and pg_side:
@@ -380,18 +449,19 @@ def measure_replication_lag(cfg, family, source_conn, target_conn):
     return None, None
 
 
-def replication_errors(cfg):
+def replication_errors(cfg, aws_errors=None):
     """DMS task stats (TablesErrored/Status/LastFailureMessage) when a DMS task ARN is
     configured; "not_applicable" when nothing is configured for this engagement."""
     dms_task_arn = cfg.get("dms_task_arn")
     if not dms_task_arn:
         return "not_applicable", {}
-    region = cfg.get("region", "us-east-1")
+    region = aws_region(cfg)
     cmd = ["aws", "dms", "describe-replication-tasks", "--filters",
            f"Name=replication-task-arn,Values={dms_task_arn}", "--region", region,
            "--query", "ReplicationTasks[0].{Status:Status,Stats:ReplicationTaskStats,"
                        "LastFailureMessage:LastFailureMessage}", "--output", "json"]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    out = _aws_cli(cmd, "replication_errors", "dms:DescribeReplicationTasks", dms_task_arn,
+                   aws_errors if aws_errors is not None else [])
     task = json.loads(out) if out.strip() and out.strip() != "null" else None
     if not task:
         return None, {"error": "DMS task not found for configured ARN"}
@@ -496,6 +566,10 @@ def run_day(cfg):
     if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
         raise ValueError("tables must be a nonempty list of table identifiers")
     checksum_tables = cfg.get("checksum_tables") or tables[:2]
+    # Resolve the region up front (before touching either database) when any AWS-side
+    # check is configured — a missing region is a config error, not a us-east-1 default.
+    region = aws_region(cfg) if _needs_aws(cfg) else None
+    aws_errors = []
 
     def _side_sqls(conn_engine_family):
         snapshot_start = ("START TRANSACTION WITH CONSISTENT SNAPSHOT" if conn_engine_family == "mysql"
@@ -563,21 +637,21 @@ def run_day(cfg):
                 "mismatched_attributes": {k: {"source": sc[k], "target": tc[k]} for k in mismatched},
             }
 
-    lag_seconds, lag_mechanism = measure_replication_lag(cfg, family, cfg["source"], cfg["target"])
-    firing_alarms, unknown_alarms, alarms_check = cloudwatch_alarms(cfg.get("alarm_names", []), cfg.get("region", "us-east-1"))
+    lag_seconds, lag_mechanism = measure_replication_lag(cfg, family, cfg["source"], cfg["target"], aws_errors)
+    firing_alarms, unknown_alarms, alarms_check = cloudwatch_alarms(cfg.get("alarm_names", []), region, aws_errors)
 
     target_db_instance_id = cfg.get("target_db_instance_id")
     if not target_db_instance_id:
         headroom_check, headroom = "not_applicable", None
     else:
-        headroom = db_headroom_pct(target_db_instance_id, cfg.get("region", "us-east-1"))
+        headroom = db_headroom_pct(target_db_instance_id, region, aws_errors)
         if headroom == "not_applicable":
             headroom_check, headroom = "not_applicable", None
         else:
             headroom_check = None if headroom is None else (headroom > HEADROOM_THRESHOLD_PCT)
 
     lag_check = "not_applicable" if lag_mechanism is None else (None if lag_seconds is None else (lag_seconds <= LAG_THRESHOLD_S))
-    repl_errors_check, repl_errors_detail = replication_errors(cfg)
+    repl_errors_check, repl_errors_detail = replication_errors(cfg, aws_errors)
     customer_test_suite_check = None if cfg.get("customer_test_suite_provided") else "not_applicable"
 
     checks = {
@@ -595,14 +669,17 @@ def run_day(cfg):
     overall_green = bool(measured) and all(value is True for value in measured)
     needs_review = (not overall_green) or any(v is None for v in checks.values())
 
+    detail = {"row_count": row_check["detail"], "checksum": checksum_check["detail"],
+              "schema_drift": drift_check["detail"], "firing_alarms": firing_alarms,
+              "unknown_alarms": unknown_alarms, "headroom_pct": headroom,
+              "replication_lag_seconds": lag_seconds, "replication_lag_mechanism": lag_mechanism,
+              "replication_errors": repl_errors_detail}
+    if aws_errors:
+        detail["aws_errors"] = aws_errors  # additive; same shape as soak_check_lambda.py
     return {
         "date": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         "checks": checks,
-        "detail": {"row_count": row_check["detail"], "checksum": checksum_check["detail"],
-                    "schema_drift": drift_check["detail"], "firing_alarms": firing_alarms,
-                    "unknown_alarms": unknown_alarms, "headroom_pct": headroom,
-                    "replication_lag_seconds": lag_seconds, "replication_lag_mechanism": lag_mechanism,
-                    "replication_errors": repl_errors_detail},
+        "detail": detail,
         "overall": "green" if overall_green else "red",
         "needs_agent_review": needs_review,
     }

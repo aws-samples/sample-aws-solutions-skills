@@ -210,6 +210,8 @@ db-migration-agent-skill/
 │   │   └── regulatory-compliance.md        Korean regulatory mandates (PIPA, network separation, ISMS-P)
 │   ├── patterns/
 │   │   └── cdk-stacks.md                   The CDK project the skill generates
+│   ├── scripts/                            soak_check(.py|_lambda.py), generate_presigned_urls.py
+│   ├── assets/                             dashboard.css/.js, rds-global-bundle.pem
 │   └── templates/
 │       ├── migration-plan.md               Working artifact (source of truth per engagement)
 │       ├── discovery-questions.md          Bulk Phase 1 Q&A, filled out by the customer
@@ -225,24 +227,45 @@ db-migration-agent-skill/
 
 ## Install
 
-`shared/` must be installed alongside `SKILL.md` so relative references resolve.
+`shared/` (reference, patterns, templates, scripts, assets) **must** be installed next to
+`SKILL.md` — every `shared/...` path in SKILL.md resolves relative to the installed skill
+directory, and the skill stops at Phase 0 if `shared/reference/` is unreadable. Copying
+only `SKILL.md` is the classic incomplete install (the agent then has no reference
+material and falls back to web search). Run from the repo root:
 
 ```bash
-# Claude Code
-mkdir -p ~/.claude/skills/db-migration-agent
-cp claude-code/skills/db-migration-agent/SKILL.md ~/.claude/skills/db-migration-agent/
-cp -r shared evals ~/.claude/skills/db-migration-agent/
-
-# Kiro
-mkdir -p ~/.kiro/skills/db-migration-agent
-cp kiro/skills/db-migration-agent/SKILL.md ~/.kiro/skills/db-migration-agent/
-cp -r shared evals ~/.kiro/skills/db-migration-agent/
-
-# Codex
-mkdir -p ~/.agents/skills/db-migration-agent
-cp codex/skills/db-migration-agent/SKILL.md ~/.agents/skills/db-migration-agent/
-cp -r shared evals ~/.agents/skills/db-migration-agent/
+install_skill() {  # $1 = variant dir (claude-code | kiro | codex), $2 = destination skill dir
+  local src="$1/skills/db-migration-agent/SKILL.md" dest="$2" parent stage f
+  [ -n "$dest" ] && [ -f "$src" ] && [ -d shared ] && [ -d evals ] ||
+    { echo "install_skill: run from the repo root with a valid variant and destination" >&2; return 1; }
+  parent=$(dirname "$dest"); mkdir -p "$parent" || return 1
+  stage=$(mktemp -d "$parent/.db-migration-agent.XXXXXX") || return 1   # same filesystem as dest
+  chmod 755 "$stage"
+  if ! { cp "$src" "$stage/" && cp -r shared evals "$stage/"; }; then
+    rm -rf "$stage"; echo "INSTALL FAILED: copy into staging" >&2; return 1
+  fi
+  for f in SKILL.md shared/reference/version-upgrades.md shared/templates/migration-plan.md \
+           shared/assets/dashboard.js shared/scripts/soak_check.py shared/scripts/soak_check_lambda.py; do
+    [ -r "$stage/$f" ] || { rm -rf "$stage"; echo "INSTALL INCOMPLETE: $f missing" >&2; return 1; }
+  done
+  # Swap the verified copy into place (replaces the whole skill dir — no stale files survive).
+  rm -rf "$dest.old"
+  if [ -e "$dest" ] && ! mv "$dest" "$dest.old"; then
+    rm -rf "$stage"; echo "INSTALL FAILED: cannot move old $dest aside" >&2; return 1
+  fi
+  if ! mv "$stage" "$dest"; then
+    [ -e "$dest.old" ] && mv "$dest.old" "$dest"; rm -rf "$stage"
+    echo "INSTALL FAILED: swap into $dest (previous install restored)" >&2; return 1
+  fi
+  rm -rf "$dest.old"; echo "installed: $dest"
+}
+install_skill claude-code ~/.claude/skills/db-migration-agent   # Claude Code
+install_skill kiro        ~/.kiro/skills/db-migration-agent     # Kiro
+install_skill codex       ~/.agents/skills/db-migration-agent   # Codex
 ```
+
+Re-run the same command after every `git pull` — SKILL.md and `shared/` must come from the
+same commit.
 
 ## MCP requirements (optional — CLI fallback always works)
 

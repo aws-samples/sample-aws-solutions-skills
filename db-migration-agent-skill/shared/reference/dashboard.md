@@ -51,8 +51,9 @@ only *where* they live changes, never their shape.
 
 ## Presigned-URL viewing (soak window only)
 
-`shared/scripts/generate_presigned_urls.py` (run at soak start; renew per the runbook) presigns GET URLs
-for `index.html`, both files under `assets/`, `status.json`, and `activity-log.jsonl`, all
+`shared/scripts/generate_presigned_urls.py --bucket <bucket> --region <bucket-region>`
+(run at soak start; renew per the runbook) presigns GET URLs — signed for the bucket's
+**actual** region, detected from S3, never the caller's default — for `index.html`, both files under `assets/`, `status.json`, and `activity-log.jsonl`, all
 expiring together for the requested coverage, then rewrites `index.html` so its CSS
 `href`, JS `src`, and the two data-fetch targets are those absolute presigned URLs instead
 of the relative paths used for local viewing. `dashboard.js` picks this up automatically:
@@ -60,7 +61,10 @@ it reads `window.DASHBOARD_STATUS_URL`/`window.DASHBOARD_LOG_URL` if the page de
 (the rewritten `index.html` does, via a small inline `<script>` block the generator
 injects just before the `dashboard.js` `<script>` tag) and falls back to the plain
 `status.json`/`activity-log.jsonl` relative fetches otherwise — the same file works
-unmodified for local dev and for the presigned/S3 case.
+unmodified for local dev and for the presigned/S3 case. Before printing the
+`CUSTOMER LINK:` line, the script GETs every presigned URL and requires HTTP 200; any
+failure (wrong region → `AuthorizationQueryParametersError`, missing object, missing
+`kms:Decrypt` on a CMK bucket) prints S3's error body and exits non-zero, with no link.
 
 Two mechanics worth understanding before relying on this, both confirmed against a real
 browser while building it, not just reasoned about:
@@ -574,8 +578,10 @@ This optional fragment is additive, not a replacement `soak` shape:
   daily `days[]` entries, change the schedule to hourly, or use daily completion as
   manual-hour evidence. During concurrent automation, preserve this optional object
   and the scheduler's daily history using the existing S3 read/modify/write rules.
-- The existing page still displays the waiver reason; this schema addition does not
-  add a new renderer. Mirror the compressed duration, current manual coverage, missing
+- The page displays the waiver reason and, when `compressed_window` is present, a
+  read-only summary of it (state, required hours, recorded times, refs, intervals with
+  verdict/evidence/limitations) — display only: it sums nothing and grants nothing, and
+  the page is unchanged when the field is absent. Still mirror the compressed duration, current manual coverage, missing
   evidence and pending soak-exit acceptance into `waived_reason`, the existing phase/
   gate detail and `customer_actions` so they remain visible. Keep the scheduled daily
   cadence, 36-hour-overdue behavior, and active-work supervisor rules unchanged.

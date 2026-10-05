@@ -249,9 +249,19 @@ the scheduler's newer results; the dashboard reference describes coordination.
   "dms_task_arn": "arn:aws:dms:...:task:...",
   "mysql_replica_status_side": null, "pg_replication_lag_side": null,
   "customer_test_suite_provided": false,
-  "region": "us-east-1", "n_total": 3
+  "region": "ap-northeast-2", "n_total": 3
 }
 ```
+
+`region` is the AWS region of the target/DMS/alarms (the `aws` CLI calls use it). It has
+**no default**: if omitted, `soak_check.py` derives it from an RDS endpoint
+(`*.<region>.rds.amazonaws.com`) on the target or source, and otherwise exits with a clear
+error — it never falls back to `us-east-1` (that silent default once pointed every check
+of an `ap-northeast-2` engagement at the wrong region). Failed `aws` calls are recorded in
+the day's `detail.aws_errors[]` (`check`, `iam_action`, `resource`, `result`, `message`)
+and the check becomes `null` (needs review) — never a pass. Replica lag is read from
+`SHOW REPLICA STATUS` **by column name** (`Seconds_Behind_Source`, or
+`Seconds_Behind_Master` on older/MariaDB), not by position.
 
 `source.engine`/`target.engine` are independent (they can legitimately differ across a
 version gap; both must still normalize to the same MySQL-family-or-Postgres-family —
@@ -451,7 +461,7 @@ re-polling" viewing model possible (`dashboard.md` §Presigned-URL viewing):
    back into the engagement working directory, so `migration-plan.md` and everything else
    stay consistent with it afterward — a plain sync, same as the old bastion-copy-back step:
    ```bash
-   aws s3 sync s3://<dashboard-bucket-name>/ dashboard/ --exclude "index.html"
+   aws s3 sync s3://<dashboard-bucket-name>/ dashboard/ --region <region> --exclude "index.html"
    # index.html excluded deliberately: the bucket's copy is the presigned-URL-materialized
    # one (generate_presigned_urls.py) — keep the clean shared/templates/dashboard.html
    # copy locally instead of pulling back one full of soon-to-expire presigned URLs.
@@ -469,8 +479,17 @@ object seeded) are uploaded to the bucket:
 
 ```bash
 python3 shared/scripts/generate_presigned_urls.py \
-  --bucket <dashboard-bucket-name> --expires-seconds 604800
+  --bucket <DashboardBucketName output> --region <DashboardBucketRegion output> \
+  --expires-seconds 604800
 ```
+
+The script resolves the bucket's real region from S3 and signs with a client pinned to it
+(`--region` is an assertion — a mismatch stops the script), then **GETs every URL it
+generated** and prints the customer link only if all return HTTP 200; otherwise it prints
+S3's error body (e.g. `AuthorizationQueryParametersError`, `NoSuchKey`, `AccessDenied`)
+and exits non-zero. Do not hand over any link from a failed run. A URL signed for the
+caller's default region (the old behavior) is rejected by a bucket in another region even
+though the script's own upload succeeded.
 
 Sign for **more than nominal** where S3 allows: `129600` seconds (1.5 days) for the 1-day
 tier, `302400` (3.5 days) for the 3-day tier. A 7-day tier needs **648000 seconds (7.5

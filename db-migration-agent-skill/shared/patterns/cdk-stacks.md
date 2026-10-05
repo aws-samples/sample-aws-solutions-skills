@@ -229,299 +229,471 @@ Generated when the customer approves automating the Phase 7.7 checklist (see
 [../reference/execution-runbooks.md](../reference/execution-runbooks.md) §Soak automation —
 get approval before creating this, it's infrastructure like everything else here). Pieces:
 an S3 bucket that becomes the soak window's single source of truth for the dashboard, a
-VPC-attached Lambda that ports `shared/scripts/soak_check_lambda.py`'s logic, an
-EventBridge Scheduler rule that invokes it daily, and CloudWatch alarms (on Lambda errors,
-on a missed/exhausted invocation, and on `needs_agent_review`) feeding the monitoring
-SNS topic this skill already uses elsewhere. `shared/scripts/soak_check.py` stays the
-reference implementation for running the same checks by hand from any machine that can
-reach the databases directly — this stack is the unattended production path.
+VPC-attached Lambda running `shared/scripts/soak_check_lambda.py`, an EventBridge Scheduler
+rule that invokes it daily, and CloudWatch alarms (Lambda errors, missed/exhausted
+invocation, `needs_agent_review`) feeding the monitoring SNS topic this skill already uses.
+`shared/scripts/soak_check.py` stays the reference implementation for running the same
+checks by hand — this stack is the unattended production path.
 
-🔴 **Verify VPC/NAT reachability before deploying, not after the first missed run.** The
-Lambda has no reachability of its own beyond what it inherits from the imported bastion
-subnets/SG — run `scripts/01-precondition-check.sh`'s connectivity checks (or a one-off
-`aws lambda invoke` against a throwaway test function in the same subnets) against BOTH
-the source and target endpoints before wiring the real schedule; a VPC/NAT/SG mistake here
-fails silently as a Lambda timeout, indistinguishable at a glance from a slow query.
+🔴 **Run the soak preflight checks before the first `cdk deploy`** —
+[../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §0 "Soak
+automation" (Docker or the no-Docker bundling path, PyPI/public.ecr.aws reachability, NAT
+or VPC endpoints in the Lambda's subnets). Real engagements lost several redeploys to each
+of these; none of them is visible until deploy or first invoke.
 
 ### Dedicated read-only DB credentials — never the admin/master secret
 
-Create a SELECT-only user on **both** source and target for this Lambda specifically (see
+Create a SELECT-only user on **both** source and target for this Lambda (exact `GRANT`s:
 [../reference/execution-runbooks.md](../reference/execution-runbooks.md) §Dedicated
-read-only credential for the exact `GRANT` statements) — `cluster.secret!` is the
-cluster's generated **admin** secret and must never be handed to this function. Run the
-`CREATE USER`/`GRANT` once (via the bastion, same as any other one-off SQL setup step in
-this skill — not a CDK resource, CDK cannot run SQL), then store each credential in its
-own secret:
+read-only credential; add `REPLICATION CLIENT` on the side named by
+`mysqlReplicaStatusSide`). The cluster's generated **admin** secret must never be handed to
+this function. Two options per side:
 
-```typescript
-const sourceReadOnlySecret = new sm.Secret(this, 'SourceSoakReadOnlySecret', {
-  secretName: `${constants.PREFIX}/soak/source-readonly`,
-  generateSecretString: { secretStringTemplate: JSON.stringify({ username: 'soak_ro' }),
-                           generateStringKey: 'password', excludePunctuation: true },
-});
-const targetReadOnlySecret = new sm.Secret(this, 'TargetSoakReadOnlySecret', {
-  secretName: `${constants.PREFIX}/soak/target-readonly`,
-  generateSecretString: { secretStringTemplate: JSON.stringify({ username: 'soak_ro' }),
-                           generateStringKey: 'password', excludePunctuation: true },
-});
-// After deploy: read each generated password back out and run the CREATE USER/GRANT
-// above with it, from the bastion — the secret exists first so the password is never
-// typed by a human, but CDK itself never touches the database.
-```
+- **New secret (default):** the stack creates it with a generated password and a
+  **generated name** (no `secretName`). After deploy, read the password back and run the
+  `CREATE USER`/`GRANT` from the bastion — CDK never touches the database.
+- **Reuse an existing read-only secret** (e.g. the credential already used for Phase 2
+  assessment): pass `existingSecretArn` (the *complete* ARN incl. the 6-character suffix).
+  The stack then adds an explicit `secretsmanager:GetSecretValue` grant on exactly that ARN —
+  an imported secret gets **no** permission unless you grant it. If that secret is encrypted
+  with a customer-managed KMS key, also pass `secretKmsKeyArn`: imported secrets carry no
+  key information, so CDK cannot add `kms:Decrypt` on its own, and the failure surfaces
+  only at runtime as `AccessDeniedException: Access to KMS is not allowed`.
 
-```typescript
-// ── S3 bucket: single source of truth for dashboard/ during the soak window ──
-const dashboardBucket = new s3.Bucket(this, 'DashboardBucket', {
-  bucketName: `${constants.PREFIX}-soak-dashboard`,
-  encryption: s3.BucketEncryption.S3_MANAGED,           // SSE-S3; use KMS if the plan needs a CMK
-  enforceSSL: true,                                     // reject any non-TLS S3 API call outright
-  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,    // no bucket policy public-read, ever —
-  publicReadAccess: false,                              // presigned URLs are the ONLY access path
-  versioned: true,
-  serverAccessLogsBucket: accessLogsBucket,             // this account's existing centralized
-  serverAccessLogsPrefix: `${constants.PREFIX}-soak-dashboard/`,  // access-log bucket — every
-                                                         // GET against a presigned URL is logged
-  removalPolicy: RemovalPolicy.RETAIN, autoDeleteObjects: false,
-  cors: [{
-    allowedMethods: [s3.HttpMethods.GET],
-    allowedOrigins: ['*'],       // the page's own origin IS the bucket's origin (same-origin
-    allowedHeaders: ['*'],       // fetches to sibling keys) in the common case; kept permissive
-    maxAge: 3000,                // (GET-only, no credentials) so a differently-hosted dashboard
-  }],                            // shell or a future CDN in front doesn't need a stack change.
-});
-```
-
-Scaffold the asset directory once, before first synth — the bundling command below
-depends on `requirements.txt` actually being present next to the handler, which is the
-gap that used to make this bundling command reference a file that didn't exist anywhere
-in the generated project:
+### Lambda asset — two bundling paths (pick in preflight)
 
 ```bash
 mkdir -p lambda/soak-check
 cp <skill>/shared/scripts/soak_check_lambda.py lambda/soak-check/
 cp <skill>/shared/scripts/requirements.txt     lambda/soak-check/
-# Tier-1 (no *_SSL_CA_PATH set) default trust anchor — confirmed live that the platform
-# default trust store does NOT contain the current Amazon RDS root CA, so this file must
-# ship every time, not just when "strict CA pinning" is wanted (see the pitfalls note
-# below `_tls_context` treats it as the default, not an opt-in).
+# Tier-1 TLS default trust anchor — mandatory, not optional pinning: the platform
+# trust store does NOT contain the current Amazon RDS root CA (confirmed live).
 cp <skill>/shared/assets/rds-global-bundle.pem lambda/soak-check/
+# bundling: 'prebuilt' (default — no Docker): install the pure-Python deps in place.
+# Needs only PyPI reachability from this machine; pymysql/pg8000 have no compiled parts,
+# so a host-arch-independent install is correct for the arm64 Lambda.
+python3 -m pip install -r lambda/soak-check/requirements.txt -t lambda/soak-check/
 ```
 
-🔴 **Fail at `cdk synth`, not at the first scheduled invocation.** `SOURCE_ENGINE`/
-`TARGET_ENGINE` below are plain strings — CloudFormation has no way to reject a mismatched
-pair, and without this check `cdk deploy` would succeed cleanly (bucket, secrets, schedule,
-alarms — real cost, running on a schedule) for a stack that is guaranteed to fail its very
-first invocation. `soak_check_lambda.py`'s own guard (fixed to check this before touching
-Secrets Manager or either database — see its `handler()`) still catches it, but only once
-the schedule fires. Mirror the same family check at synth time, before any of that gets
-created:
+`bundling: 'docker'` instead runs that pip install inside
+`public.ecr.aws/sam/build-python3.12` at synth — needs a running Docker daemon **and**
+network to `public.ecr.aws` + PyPI, and fails `cdk synth` (not deploy) without them.
+
+### The stack — `lib/stacks/soak-stack.ts` (self-contained; synthesizes as-is)
+
+Every external dependency is an explicit prop; no fixed physical names anywhere (bucket,
+secrets, log group, topic are all CloudFormation-generated), so a rolled-back first deploy
+can never block the retry with "already exists" / "scheduled for deletion"; every optional
+environment variable is `?? ''` (the handler treats empty as "not configured", so a
+binlog-replication engagement with no DMS props deploys cleanly); the function gets an
+explicit `logs.LogGroup` instead of the `LogRetention` custom resource (which collided with
+a leftover `/aws/lambda/<name>` group on retry).
 
 ```typescript
-// Same normalization as soak_check_lambda.py's _engine_family() — keep the two lists in
-// sync with that script's MYSQL_FAMILY/POSTGRES_FAMILY if either changes.
-function engineFamily(engine: string): 'mysql' | 'postgres' {
+// lib/stacks/soak-stack.ts — Phase 7.7 automated soak checks. Self-contained: every
+// external dependency arrives as an explicit prop (no free variables), no fixed physical
+// names (a rolled-back first deploy never blocks the retry), optional env always `?? ''`.
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
+import * as sm from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import { Construct } from 'constructs';
+
+export interface SoakDbSide {
+  engine: string;                 // 'mysql' | 'mariadb' | 'aurora-mysql' | 'postgres' | ...
+  host: string;                   // target: e.g. databaseStack.cluster.clusterEndpoint.hostname
+  port: number;
+  dbName: string;
+  /** Reuse an EXISTING read-only secret (complete ARN, with the 6-char suffix) instead of
+   *  creating a new one. It gets an explicit GetSecretValue grant (below). */
+  existingSecretArn?: string;
+  /** Customer-managed KMS key encrypting that secret. REQUIRED when the secret is not on
+   *  the AWS-managed aws/secretsmanager key — imported secrets carry no key info, so CDK
+   *  cannot add kms:Decrypt by itself. */
+  secretKmsKeyArn?: string;
+  sslCaPath?: string;             // see TLS tiers in soak_check_lambda.py _tls_context
+  tlsSkipVerify?: boolean;
+}
+
+export interface SoakStackProps extends StackProps {
+  prefix: string;                 // constants.PREFIX — used for metric namespace/descriptions only, never physical names
+  vpcId: string;                  // the migration bastion's VPC (imported, never created)
+  availabilityZones: string[];    // AZs of the subnets below (fromVpcAttributes needs them; no lookup)
+  privateSubnetIds: string[];     // the bastion's private subnets — Lambda ENIs go here
+  securityGroupId: string;        // the bastion's SG, imported mutable:false
+  source: SoakDbSide;
+  target: SoakDbSide;
+  targetDbInstanceId?: string;    // RDS instance id for headroom; omit/'' for Aurora or n/a
+  tables: string[];
+  checksumTables?: string[];
+  alarmNames?: string[];
+  dms?: { taskId?: string; replicationInstanceId?: string; taskArn?: string };
+  mysqlReplicaStatusSide?: 'source' | 'target';
+  pgReplicationLagSide?: 'source' | 'target';
+  customerTestSuiteProvided: boolean;   // Q18
+  nTotal: number;                       // soak days (engagement-safety.md tier)
+  alertTopicArn?: string;               // monitoring-stack's topic; omitted -> a new topic
+  accessLogsBucketName?: string;        // existing centralized access-log bucket (optional)
+  dashboardKmsKeyArn?: string;          // CMK for the dashboard bucket (omit -> SSE-S3)
+  existingDashboardBucketName?: string; // reuse a bucket instead of creating one
+  /** 'prebuilt' (default): deps pip-installed into lambda/soak-check/ beforehand, no Docker.
+   *  'docker': CDK bundles in public.ecr.aws/sam/build-python3.12 (needs Docker + network). */
+  bundling?: 'prebuilt' | 'docker';
+  assetPath?: string;                   // default 'lambda/soak-check'
+  /** Default false: the schedule deploys DISABLED (a rate() schedule with no StartDate
+   *  fires immediately — before DB users, dashboard files, or a passing preflight exist).
+   *  Flip to true only after preflight is ok, then redeploy (template stays the truth). */
+  scheduleEnabled?: boolean;
+}
+
+// Same normalization as soak_check_lambda.py's _engine_family() — keep in sync.
+export function engineFamily(engine: string): 'mysql' | 'postgres' {
   const e = engine.trim().toLowerCase();
   if (['mysql', 'mariadb', 'aurora-mysql'].includes(e)) return 'mysql';
   if (['postgres', 'postgresql', 'aurora-postgresql'].includes(e)) return 'postgres';
-  throw new Error(`SoakStack: unsupported engine '${engine}' in constants.SOURCE_ENGINE/TARGET_ENGINE.`);
+  throw new Error(`SoakStack: unsupported engine '${engine}'.`);
 }
-if (engineFamily(constants.SOURCE_ENGINE) !== engineFamily(constants.TARGET_ENGINE)) {
-  throw new Error(
-    `SoakStack: SOURCE_ENGINE=${constants.SOURCE_ENGINE} and TARGET_ENGINE=${constants.TARGET_ENGINE} ` +
-    `normalize to different SQL families — heterogeneous soak-checking is not yet supported. ` +
-    `See execution-runbooks.md §Soak automation for the manual/agent-reviewed alternative.`
-  );
+
+export class SoakStack extends Stack {
+  constructor(scope: Construct, id: string, props: SoakStackProps) {
+    super(scope, id, props);
+    const { prefix, source, target, dms = {} } = props;
+
+    // Fail at synth, not at the first scheduled invocation.
+    if (engineFamily(source.engine) !== engineFamily(target.engine)) {
+      throw new Error(`SoakStack: ${source.engine} and ${target.engine} normalize to different SQL ` +
+        'families — heterogeneous soak-checking is not supported (execution-runbooks.md §Soak automation).');
+    }
+    if (!props.env?.region || !props.env?.account) {
+      throw new Error('SoakStack: pass env: { account, region } explicitly — the region is baked into ' +
+        'every ARN/endpoint this stack and the presigned dashboard links use.');
+    }
+
+    // ── Network: import only ──
+    const vpc = ec2.Vpc.fromVpcAttributes(this, 'BastionVpc', {
+      vpcId: props.vpcId, availabilityZones: props.availabilityZones,
+    });
+    const subnets = props.privateSubnetIds.map((sid, i) => {
+      const sub = ec2.Subnet.fromSubnetId(this, `BastionSubnet${i}`, sid);
+      Annotations.of(sub).acknowledgeWarning('@aws-cdk/aws-ec2:noSubnetRouteTableId', 'route table not needed for Lambda ENIs');
+      return sub;
+    });
+    const sg = ec2.SecurityGroup.fromSecurityGroupId(this, 'ImportedBastionSg', props.securityGroupId, { mutable: false });
+
+    // ── Read-only DB secrets: generated names (no secretName) so a rolled-back deploy's
+    // "scheduled for deletion" secret can never block the retry. ──
+    const secretFor = (side: SoakDbSide, label: string): sm.ISecret =>
+      side.existingSecretArn
+        ? sm.Secret.fromSecretCompleteArn(this, `${label}ReadOnlySecret`, side.existingSecretArn)
+        : new sm.Secret(this, `${label}SoakReadOnlySecret`, {
+            description: `${prefix} soak read-only credential (${label.toLowerCase()})`,
+            generateSecretString: { secretStringTemplate: JSON.stringify({ username: 'soak_ro' }),
+                                    generateStringKey: 'password', excludePunctuation: true },
+          });
+    const sourceSecret = secretFor(source, 'Source');
+    const targetSecret = secretFor(target, 'Target');
+
+    // ── Dashboard bucket: generated name. RETAIN keeps soak evidence; a rolled-back first
+    // deploy leaves an orphaned EMPTY bucket with a random name — it never collides with
+    // the retry (delete it afterwards, see "Retry after a failed deploy"). ──
+    // Imported CMK: CDK cannot edit its key policy — the key policy must allow this account's
+    // IAM policies (the default key policy does) or name the Lambda role explicitly.
+    const dashboardKey = props.dashboardKmsKeyArn;
+    const dashboardBucket: s3.IBucket = props.existingDashboardBucketName
+      ? s3.Bucket.fromBucketName(this, 'DashboardBucket', props.existingDashboardBucketName)
+      : new s3.Bucket(this, 'DashboardBucket', {
+          encryption: dashboardKey ? s3.BucketEncryption.KMS : s3.BucketEncryption.S3_MANAGED,
+          encryptionKey: dashboardKey ? kms.Key.fromKeyArn(this, 'DashboardKey', dashboardKey) : undefined,
+          bucketKeyEnabled: !!dashboardKey,
+          enforceSSL: true,
+          blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,   // presigned URLs are the ONLY access path
+          publicReadAccess: false,
+          versioned: true,
+          serverAccessLogsBucket: props.accessLogsBucketName
+            ? s3.Bucket.fromBucketName(this, 'AccessLogsBucket', props.accessLogsBucketName) : undefined,
+          serverAccessLogsPrefix: props.accessLogsBucketName ? `${prefix}-soak-dashboard/` : undefined,
+          removalPolicy: RemovalPolicy.RETAIN, autoDeleteObjects: false,
+          cors: [{ allowedMethods: [s3.HttpMethods.GET], allowedOrigins: ['*'],
+                   allowedHeaders: ['*'], maxAge: 3000 }],
+        });
+
+    // ── Explicit log group (generated name) instead of the LogRetention custom resource,
+    // which collides with a leftover /aws/lambda/<fn> group on retry. ──
+    const logGroup = new logs.LogGroup(this, 'SoakFnLogs', {
+      retention: logs.RetentionDays.ONE_MONTH, removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    const assetPath = props.assetPath ?? 'lambda/soak-check';
+    const code = (props.bundling ?? 'prebuilt') === 'docker'
+      ? lambda.Code.fromAsset(assetPath, { bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: ['bash', '-c', 'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
+        } })
+      : lambda.Code.fromAsset(assetPath);   // deps already pip-installed into assetPath (no Docker)
+
+    const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
+      runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
+      handler: 'soak_check_lambda.handler', code,
+      // 300s: a normal run scans every table on both sides sequentially (each query bounded by
+      // a 25s read timeout); preflight budgets itself against the remaining time anyway.
+      timeout: Duration.seconds(300), memorySize: 256,
+      logGroup,
+      vpc, vpcSubnets: { subnets }, securityGroups: [sg],
+      environment: {
+        SOURCE_ENGINE: source.engine, TARGET_ENGINE: target.engine,
+        SOURCE_HOST: source.host, SOURCE_PORT: `${source.port}`, SOURCE_DB: source.dbName,
+        SOURCE_SECRET_ARN: sourceSecret.secretArn,
+        TARGET_HOST: target.host, TARGET_PORT: `${target.port}`, TARGET_DB: target.dbName,
+        TARGET_SECRET_ARN: targetSecret.secretArn,
+        TABLES: JSON.stringify(props.tables),
+        CHECKSUM_TABLES: props.checksumTables ? JSON.stringify(props.checksumTables) : '',
+        ALARM_NAMES: JSON.stringify(props.alarmNames ?? []),
+        // Optional: empty string == not configured (the handler treats '' as unset).
+        TARGET_DB_INSTANCE_ID: props.targetDbInstanceId ?? '',
+        DMS_TASK_ID: dms.taskId ?? '',
+        DMS_REPLICATION_INSTANCE_ID: dms.replicationInstanceId ?? '',
+        DMS_TASK_ARN: dms.taskArn ?? '',
+        MYSQL_REPLICA_STATUS_SIDE: props.mysqlReplicaStatusSide ?? '',
+        PG_REPLICATION_LAG_SIDE: props.pgReplicationLagSide ?? '',
+        CUSTOMER_TEST_SUITE_PROVIDED: `${props.customerTestSuiteProvided}`,
+        SOURCE_SSL_CA_PATH: source.sslCaPath ?? '', TARGET_SSL_CA_PATH: target.sslCaPath ?? '',
+        SOURCE_TLS_SKIP_VERIFY: `${source.tlsSkipVerify ?? false}`,
+        TARGET_TLS_SKIP_VERIFY: `${target.tlsSkipVerify ?? false}`,
+        N_TOTAL: `${props.nTotal}`,
+        DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
+      },
+    });
+
+    // ── IAM: explicit statements, exactly the calls soak_check_lambda.py makes (no grant*()
+    // helpers — on a KMS bucket those add unconditional kms:Encrypt/ReEncrypt*/GenerateDataKey*/
+    // Decrypt, which would make the conditional KMS statements below meaningless). ──
+    const allow = (actions: string[], resources: string[], conditions?: Record<string, unknown>) =>
+      soakFn.addToRolePolicy(new iam.PolicyStatement({ actions, resources, conditions }));
+    allow(['s3:GetObject', 's3:PutObject'], [dashboardBucket.arnForObjects('*')]);
+    allow(['s3:ListBucket'], [dashboardBucket.bucketArn]);   // missing key -> NoSuchKey, not AccessDenied
+    allow(['secretsmanager:GetSecretValue'], [sourceSecret.secretArn, targetSecret.secretArn]);
+    const viaService = (service: string) => ({ StringEquals: { 'kms:ViaService': `${service}.${this.region}.amazonaws.com` } });
+    const secretKeys = [source.secretKmsKeyArn, target.secretKmsKeyArn].filter((k): k is string => !!k);
+    if (secretKeys.length) allow(['kms:Decrypt'], [...new Set(secretKeys)], viaService('secretsmanager'));
+    if (dashboardKey) allow(['kms:Decrypt', 'kms:GenerateDataKey'], [dashboardKey], viaService('s3'));
+    allow(['cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricStatistics',
+           'rds:DescribeDBInstances', 'dms:DescribeReplicationTasks'],
+          ['*']);   // read-only describes; '*' deliberately (a mis-scoped ARN is the classic redeploy loop)
+
+    // ── Daily schedule + DLQ ──
+    const schedulerRole = new iam.Role(this, 'SoakSchedulerRole', {
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+    });
+    soakFn.grantInvoke(schedulerRole);
+    const soakDlq = new sqs.Queue(this, 'SoakScheduleDlq', { retentionPeriod: Duration.days(14), enforceSSL: true });
+    soakDlq.grantSendMessages(schedulerRole);
+    const schedule = new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
+      state: props.scheduleEnabled ? 'ENABLED' : 'DISABLED',
+      flexibleTimeWindow: { mode: 'OFF' },
+      scheduleExpression: 'rate(1 day)',   // Phase 7.7 cadence is daily
+      target: {
+        arn: soakFn.functionArn, roleArn: schedulerRole.roleArn,
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 3600 },
+        deadLetterConfig: { arn: soakDlq.queueArn },
+      },
+    });
+
+    // ── Alerting ──
+    const alertTopic: sns.ITopic = props.alertTopicArn
+      ? sns.Topic.fromTopicArn(this, 'AlertTopic', props.alertTopicArn)
+      : new sns.Topic(this, 'SoakAlertTopic', { enforceSSL: true });
+    const alarm = (alarmId: string, a: cloudwatch.AlarmProps) =>
+      new cloudwatch.Alarm(this, alarmId, a).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+    alarm('SoakFnErrorsAlarm', {
+      metric: soakFn.metricErrors({ period: Duration.days(1) }),
+      threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    alarm('SoakScheduleDlqAlarm', {
+      metric: soakDlq.metricApproximateNumberOfMessagesVisible(), threshold: 1, evaluationPeriods: 1,
+    });
+    alarm('SoakMissingInvocationAlarm', {
+      metric: soakFn.metricInvocations({ statistic: 'Sum', period: Duration.days(1) }),
+      threshold: 1, evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      actionsEnabled: !!props.scheduleEnabled,   // a DISABLED schedule must not page anyone
+    });
+    const needsReviewFilter = new logs.MetricFilter(this, 'SoakNeedsReviewFilter', {
+      logGroup, metricNamespace: `${prefix}/Soak`, metricName: 'NeedsAgentReview', metricValue: '1',
+      filterPattern: logs.FilterPattern.literal('"needs_agent_review=true"'),
+    });
+    alarm('SoakNeedsReviewAlarm', {
+      metric: needsReviewFilter.metric({ statistic: 'Sum', period: Duration.days(1) }),
+      threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new CfnOutput(this, 'SoakFunctionName', { value: soakFn.functionName, description: 'Soak Lambda (invoke {"mode":"preflight"} first)' });
+    new CfnOutput(this, 'DashboardBucketName', { value: dashboardBucket.bucketName, description: 'Soak dashboard bucket' });
+    new CfnOutput(this, 'DashboardBucketRegion', { value: this.region, description: 'Pass to generate_presigned_urls.py --region' });
+    new CfnOutput(this, 'SoakScheduleName', { value: schedule.ref, description: `Daily schedule (state: ${props.scheduleEnabled ? 'ENABLED' : 'DISABLED'})` });
+    new CfnOutput(this, 'SoakLogGroupName', { value: logGroup.logGroupName, description: 'Soak Lambda log group' });
+  }
 }
 ```
 
-```typescript
-// ── Lambda: VPC-attached into the SAME private subnets + SG the migration bastion already
-// uses — identical reachability to the source over the existing VPN/DX path, no new
-// networking, no new NAT (reuses the subnets' existing NAT gateway for AWS API calls). ──
-const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
-  runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
-  handler: 'soak_check_lambda.handler',
-  code: lambda.Code.fromAsset('lambda/soak-check', {   // shared/scripts/soak_check_lambda.py +
-    bundling: {                                         // shared/scripts/requirements.txt copied
-      image: lambda.Runtime.PYTHON_3_12.bundlingImage,  // in here (pins pymysql + pg8000)
-      command: ['bash', '-c',
-        'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
-    },
-  }),
-  timeout: Duration.seconds(90), memorySize: 256,
-  vpc: bastionVpc,                                       // ec2.Vpc.fromLookup — the migration
-  vpcSubnets: { subnets: bastionPrivateSubnets },         // bastion's own target VPC, not a new one
-  securityGroups: [ec2.SecurityGroup.fromSecurityGroupId(   // import the bastion's SG read-only
-    this, 'ImportedBastionSg', constants.BASTION_SG_ID, { mutable: false })],  // (mutable:false —
-  environment: {                                          // never add ingress from here; the
-    // Engine, port, and db name are INDEPENDENT per side — never point both SOURCE_* and
-    // TARGET_* at one shared constant (the confirmed bug: reusing constants.DB_PORT/
-    // DB_NAME/SOURCE_ENGINE for both sides silently breaks a cross-version or
-    // differently-named-database engagement). Both engines must still normalize to the
-    // same MySQL-family-or-Postgres-family — heterogeneous soak-checking across families
-    // is not yet supported. Already asserted at synth time above (`engineFamily` check) —
-    // this comment is the runtime backstop's location, not the first line of defense.
-    SOURCE_ENGINE: constants.SOURCE_ENGINE, TARGET_ENGINE: constants.TARGET_ENGINE,
-    SOURCE_HOST: constants.SOURCE_HOST, SOURCE_PORT: `${constants.SOURCE_DB_PORT}`,
-    SOURCE_DB: constants.SOURCE_DB_NAME, SOURCE_SECRET_ARN: sourceReadOnlySecret.secretArn,
-    TARGET_HOST: cluster.clusterEndpoint.hostname, TARGET_PORT: `${constants.TARGET_DB_PORT}`,
-    TARGET_DB: constants.TARGET_DB_NAME, TARGET_SECRET_ARN: targetReadOnlySecret.secretArn,
-    TABLES: JSON.stringify(constants.SOAK_TABLES),
-    CHECKSUM_TABLES: JSON.stringify(constants.SOAK_CHECKSUM_TABLES),  // explicit, not left to
-                                                                        // the tables[:2] default
-    ALARM_NAMES: JSON.stringify(constants.SOAK_ALARM_NAMES),
-    TARGET_DB_INSTANCE_ID: constants.TARGET_DB_INSTANCE_ID,
-    // Set the ones that apply to THIS engagement's replication mechanism, leave the rest
-    // unset — see execution-runbooks.md §Soak automation for the full soak-config.json/
-    // env-var schema and the "not_applicable" semantics of leaving all of them unset.
-    DMS_TASK_ID: constants.SOAK_DMS_TASK_ID, DMS_REPLICATION_INSTANCE_ID: constants.SOAK_DMS_REPLICATION_INSTANCE_ID,
-    DMS_TASK_ARN: constants.SOAK_DMS_TASK_ARN,
-    MYSQL_REPLICA_STATUS_SIDE: constants.SOAK_MYSQL_REPLICA_STATUS_SIDE ?? '',
-    PG_REPLICATION_LAG_SIDE: constants.SOAK_PG_REPLICATION_LAG_SIDE ?? '',
-    CUSTOMER_TEST_SUITE_PROVIDED: `${constants.CUSTOMER_TEST_SUITE_PROVIDED}`,  // Q18 answer
-    // Independent per side — an on-prem/legacy source and an RDS/Aurora target almost
-    // always have DIFFERENT trust anchors. Leaving either *_SSL_CA_PATH unset now falls
-    // back to the bundled AWS RDS/Aurora CA bundle for that side (still full TLS,
-    // chain-verified — see _tls_context/_DEFAULT_CA_BUNDLE), NOT the platform default
-    // trust store — confirmed live that the OS store lacks the current RDS root CA, so
-    // that used to fail outright for the common case this comment used to call "just not
-    // CA-pinned". *_TLS_SKIP_VERIFY is a THIRD, explicit-opt-in-only tier (encrypts but
-    // skips verification) for a self-signed source cert whose actual CA file can't be
-    // retrieved at all — see execution-runbooks.md §Soak automation for when this is
-    // actually the right call vs. just being lazy about CA pinning.
-    // TARGET_SSL_CA_PATH: leave unset for a real RDS/Aurora target — the bundled default
-    // above already covers it; only set this to something else for a target signed by a
-    // public WebPKI CA instead (not an RDS/Aurora endpoint).
-    // SOURCE_SSL_CA_PATH: only if the source needs a pinned self-signed/private-CA cert
-    // AND that cert (not just any certificate the peer presents) is actually available.
-    // SOURCE_TLS_SKIP_VERIFY: 'true' — only if it genuinely isn't.
-    N_TOTAL: `${constants.SOAK_N_TOTAL}`,          // the risk-tiered default from engagement-safety.md
-    DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
-  },
-});
-dashboardBucket.grantRead(soakFn);
-dashboardBucket.grantPut(soakFn);   // explicit GetObject+PutObject — NOT grantReadWrite(), which
-                                     // also hands out DeleteObject/multipart-abort this function
-                                     // never needs (least-privilege, not "works either way").
-sourceReadOnlySecret.grantRead(soakFn);
-targetReadOnlySecret.grantRead(soakFn);
-soakFn.addToRolePolicy(new iam.PolicyStatement({
-  actions: ['cloudwatch:DescribeAlarms', 'cloudwatch:GetMetricStatistics', 'rds:DescribeDBInstances',
-            'dms:DescribeReplicationTasks'],
-  resources: ['*'],   // these four are describe/read-only and don't support resource-level scoping
-}));
-```
-
-Pitfalls: `lambda.Function`'s default execution role does **not** include ENI
-create/describe/delete permissions — attaching `vpc`/`vpcSubnets` without also having
-`AWSLambdaVPCAccessExecutionRole` on the role (CDK adds this automatically the moment you
-pass `vpc`, but confirm it if you construct the role yourself) means the function creates
-but every invocation fails at ENI attach. Import the bastion's security group **by ID**
-(`ec2.SecurityGroup.fromSecurityGroupId(this, 'ImportedBastionSg', bastionSgId, { mutable:
-false })`) — never create a new SG and add it as an extra ingress rule on the
-source/target DB security groups; that's new networking, which the whole point of this
-design is to avoid. `pymysql`/`pg8000` are both pure-Python (no compiled extension), so the
-Docker bundling step above works unmodified across host architectures — no manylinux wheel
-concerns. 🔴 **The `rds-global-bundle.pem` copy in the scaffolding step above is not
-optional strict-pinning nicety — confirmed live against a real RDS PostgreSQL instance and
-a real Aurora PostgreSQL cluster that the platform default trust store does NOT contain the
-current Amazon RDS root CA** (only the unrelated generic "Amazon Root CA 1-4" and legacy
-Starfield roots), so a deployment missing that file and relying on tier 1 (no
-`*_SSL_CA_PATH` set) fails chain validation on its very first invocation, against the
-overwhelmingly common RDS/Aurora case this skill exists for. If the TARGET (or SOURCE) is
-instead signed by a public WebPKI CA — not an RDS/Aurora endpoint — point that side's
-`*_SSL_CA_PATH` at whatever CA actually covers it instead of relying on the bundled
-default. If the SOURCE is an on-prem/legacy host with a self-signed certificate, bundle
-THAT certificate instead and point `SOURCE_SSL_CA_PATH` at it — `soak_check_lambda.py`'s
-`_tls_context` treats a configured CA path as a pinned trust anchor (still fully encrypted
-and verified against it) and skips hostname verification in that case specifically, since
-on-prem certs frequently carry no SAN matching the IP/hostname actually used to reach them.
+Wire it in `bin/app.ts` with an explicit `env` — the region is baked into every ARN,
+endpoint, and presigned dashboard link (the constructor throws without it). Values come
+from `constants.ts` and the other stacks' outputs:
 
 ```typescript
-// ── EventBridge Scheduler: daily invocation, pure AWS-managed, nothing to keep alive.
-// A DLQ on the target means an invocation that exhausts BOTH retries is still visible
-// (an alarm on the DLQ's depth below), not just silently dropped. ──
-const schedulerRole = new iam.Role(this, 'SoakSchedulerRole', {
-  assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
-});
-soakFn.grantInvoke(schedulerRole);
-
-const soakDlq = new sqs.Queue(this, 'SoakScheduleDlq', {
-  retentionPeriod: Duration.days(14), enforceSSL: true,
-});
-soakDlq.grantSendMessages(schedulerRole);
-
-new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
-  flexibleTimeWindow: { mode: 'OFF' },
-  scheduleExpression: 'rate(1 day)',   // or a cron() at a fixed off-peak hour; match the
-  target: {                            // soak cadence chosen at GATE 1 (engagement-safety.md)
-    arn: soakFn.functionArn,
-    roleArn: schedulerRole.roleArn,
-    retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 3600 },
-    deadLetterConfig: { arn: soakDlq.queueArn },
-  },
+new SoakStack(app, `${constants.PREFIX}-SoakStack`, {
+  env: { account: constants.ACCOUNT, region: constants.REGION },      // e.g. ap-northeast-2
+  prefix: constants.PREFIX,
+  vpcId: constants.BASTION_VPC_ID, availabilityZones: constants.BASTION_AZS,
+  privateSubnetIds: constants.BASTION_PRIVATE_SUBNET_IDS, securityGroupId: constants.BASTION_SG_ID,
+  source: { engine: constants.SOURCE_ENGINE, host: constants.SOURCE_HOST,
+            port: constants.SOURCE_DB_PORT, dbName: constants.SOURCE_DB_NAME },
+  target: { engine: constants.TARGET_ENGINE, host: databaseStack.cluster.clusterEndpoint.hostname,
+            port: constants.TARGET_DB_PORT, dbName: constants.TARGET_DB_NAME },
+  targetDbInstanceId: constants.TARGET_DB_INSTANCE_ID,                  // '' / omit for Aurora
+  tables: constants.SOAK_TABLES, checksumTables: constants.SOAK_CHECKSUM_TABLES,
+  alarmNames: constants.SOAK_ALARM_NAMES,
+  dms: constants.SOAK_DMS,                       // omit entirely for binlog/native replication
+  mysqlReplicaStatusSide: constants.SOAK_MYSQL_REPLICA_STATUS_SIDE,      // omit if n/a
+  customerTestSuiteProvided: constants.CUSTOMER_TEST_SUITE_PROVIDED,   // Q18
+  nTotal: constants.SOAK_N_TOTAL,
+  alertTopicArn: monitoringStack.alertTopic.topicArn,   // same topic as the migration alarms
+  accessLogsBucketName: constants.ACCESS_LOGS_BUCKET,   // optional; must already accept S3 server access logs
+  scheduleEnabled: app.node.tryGetContext('soakScheduleEnabled') === 'true',  // false until preflight is ok
 });
 ```
 
-### Alerting — real, not just a dashboard banner nobody may be looking at
+Engine, port, and DB name are **independent per side** — never point both sides at one
+shared constant (that silently breaks cross-version or differently-named-database
+engagements). TLS: leave `sslCaPath` unset for an RDS/Aurora side (bundled RDS CA,
+verify-full); set it to the actual CA file for an on-prem self-signed/private-CA source;
+`tlsSkipVerify: true` only when that CA file genuinely can't be retrieved (see
+execution-runbooks.md §Soak automation). Import the bastion's SG by ID with
+`mutable: false` — never add ingress rules on the DB SGs from here.
 
-Four alarms, all feeding the **same SNS topic this skill's monitoring baseline already
-uses** ([../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4) — not
-a second, disconnected channel:
+### Network — the Lambda reaches AWS APIs only through its subnets
 
-```typescript
-// 1. The Lambda itself erroring (bad config, connection refused, an unhandled exception —
-//    NOT a normal RED/needs-review day, which is logged at WARNING and returned
-//    normally specifically so it does NOT trip this metric).
-new cloudwatch.Alarm(this, 'SoakFnErrorsAlarm', {
-  metric: soakFn.metricErrors({ period: Duration.days(1) }),
-  threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+VPC-attached Lambdas get **no public IP**. Every AWS call the handler makes (Secrets
+Manager, S3, CloudWatch, RDS, DMS) needs, in the Lambda's subnets, either a `0.0.0.0/0`
+route to a **NAT gateway** or VPC endpoints: interface endpoints for `secretsmanager`,
+`monitoring` (CloudWatch metrics/alarms), `rds`, `dms` (only if DMS is configured), and an
+**S3 gateway endpoint** on the subnets' route tables. (`logs` is not needed by the handler —
+the Lambda service delivers function logs outside your VPC; add it only if you extend the
+handler to call CloudWatch Logs APIs.) Without either, calls
+**time out** — and a timeout looks like a hung Lambda, which agents misread as IAM. The
+handler now fails fast (5 s connect timeout) and labels these `network: ... NOT an IAM
+problem`. Interface endpoints with private DNS change name resolution for the **whole VPC**
+and cost per AZ-hour — they are new networking: propose them in the plan and get approval,
+don't add them silently (this stack deliberately creates none).
 
-// 2. Exhausted delivery retries reach the DLQ; a disabled schedule does not.
-new cloudwatch.Alarm(this, 'SoakScheduleDlqAlarm', {
-  metric: soakDlq.metricApproximateNumberOfMessagesVisible(),
-  threshold: 1, evaluationPeriods: 1,
-}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+### Deploy-once workflow (preflight mode) — never redeploy on a guess
 
-new cloudwatch.Alarm(this, 'SoakMissingInvocationAlarm', {
-  metric: soakFn.metricInvocations({ statistic: 'Sum', period: Duration.days(1) }),
-  threshold: 1, evaluationPeriods: 1,
-  comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-  treatMissingData: cloudwatch.TreatMissingData.BREACHING,
-}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
+The schedule deploys **DISABLED** (`scheduleEnabled` defaults to false): a `rate(1 day)`
+schedule with no start date fires right after creation — before the read-only DB users
+exist, the dashboard files are uploaded, or preflight has passed.
 
-// 3. A day the Lambda ran but flagged needs_agent_review=true (any RED, or a check that
-//    came back null) — a metric filter on the literal log line, not a re-parse of S3.
-const needsReviewFilter = new logs.MetricFilter(this, 'SoakNeedsReviewFilter', {
-  logGroup: soakFn.logGroup, metricNamespace: `${constants.PREFIX}/Soak`,
-  metricName: 'NeedsAgentReview', metricValue: '1',
-  filterPattern: logs.FilterPattern.literal('"needs_agent_review=true"'),
-});
-new cloudwatch.Alarm(this, 'SoakNeedsReviewAlarm', {
-  metric: needsReviewFilter.metric({ statistic: 'Sum', period: Duration.days(1) }),
-  threshold: 1, evaluationPeriods: 1, treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-}).addAlarmAction(new cw_actions.SnsAction(alertTopic));
-```
+1. `cdk synth` → `cdk deploy` **once** (schedule DISABLED).
+2. Create the read-only DB users (§Dedicated read-only DB credentials) and upload the initial
+   `dashboard/` files (index.html, assets/, seeded `status.json`, empty `activity-log.jsonl`).
+3. Invoke preflight. It runs the same probes as a normal run — every configured table on
+   both sides (SELECT, catalog, checksum-shaped query), replica status, all alarms, both DMS
+   metrics, RDS describe, every S3 key — and **writes nothing** (S3 writes are proven with a
+   wrong-ETag conditional PUT: 412 = allowed). Rows stream to the log as
+   `SOAK_PREFLIGHT_ROW {json}`; probes near the function timeout come back `SKIPPED`:
+   ```bash
+   aws lambda invoke --region <REGION> --function-name <SoakFunctionName output> \
+     --cli-binary-format raw-in-base64-out --payload '{"mode":"preflight"}' /tmp/preflight.json
+   python3 -c "import json;[print(r['result'].ljust(13),r['check'].ljust(36),r['iam_action'],r['resource'],'' if r['result']=='PASS' else '-> '+r['message'],r.get('kms_key','')) for r in json.load(open('/tmp/preflight.json'))['checks']]"
+   ```
+4. Every non-`PASS` row names the exact action and resource (KMS denials name the KMS
+   action and, separately, `kms_key`), or says `network: ...` / a DB error. Fix **all** of
+   them in one change, redeploy at most once, re-run preflight.
+5. When `ok: true` — or the only non-PASS rows are `UNVERIFIED` for an SSE-KMS bucket's
+   `kms:GenerateDataKey` (a non-mutating probe can't exercise it; watch the first run) —
+   enable the schedule: `cdk deploy -c soakScheduleEnabled=true` (template-only change; the
+   template stays the source of truth — don't flip it with `aws scheduler update-schedule`,
+   a later deploy would silently revert it). Record the enable time in `migration-plan.md`
+   and the activity log.
+6. If a normal run later fails, its log has one `SOAK_CHECK_ERROR {json}` line with the same
+   fields; non-fatal AWS failures appear in that day's `detail.aws_errors[]` and the check is
+   `null` (needs review), never a pass.
 
-`alertTopic` is the same `sns.ITopic` monitoring-stack.ts already creates for the
-migration-window alarm set — pass it into `SoakStack`'s constructor rather than creating a
-second topic; an engagement that deploys soak-stack without a monitoring-stack (unusual,
-but not impossible for a very light Mode-1-adjacent check) creates its own topic instead,
-with a subscription confirmed at the same time the customer's monitoring contacts are set up.
+### Soak IAM — API call → IAM action → granted by
+
+Matches `soak_check_lambda.py` and the synthesized policy exactly (asserted in a scratch app:
+no `grant*()` helpers, so no unconditional `kms:Encrypt`/`ReEncrypt*`/`GenerateDataKey*`):
+
+| API call in the handler | IAM action | Resource | Statement in the stack |
+|---|---|---|---|
+| `secretsmanager.get_secret_value` (source, target; normal + preflight) | `secretsmanager:GetSecretValue` | the two secret ARNs (created or `existingSecretArn`) | `allow(['secretsmanager:GetSecretValue'], …)` |
+| — same call, secret on a customer-managed key | `kms:Decrypt`, condition `kms:ViaService = secretsmanager.<region>.amazonaws.com` | each `secretKmsKeyArn` | `secretKeys` statement (**required** for imported/CMK secrets) |
+| `s3.get_object` (status.json, activity-log.jsonl) | `s3:GetObject` | bucket `/*` | `allow(['s3:GetObject','s3:PutObject'], [arnForObjects('*')])` |
+| `s3.put_object` (status.json/activity-log.jsonl with `IfMatch`/`IfNoneMatch`, `reports/*.md`; preflight's wrong-ETag probes) | `s3:PutObject` | bucket `/*` | same statement |
+| — `NoSuchKey` vs `AccessDenied` for a not-yet-existing key | `s3:ListBucket` | bucket ARN | `allow(['s3:ListBucket'], [bucketArn])` |
+| — S3 calls on a CMK bucket | `kms:Decrypt`, `kms:GenerateDataKey`, condition `kms:ViaService = s3.<region>.amazonaws.com` | `dashboardKmsKeyArn` | `dashboardKey` statement |
+| `cloudwatch.describe_alarms` (if `alarmNames`) | `cloudwatch:DescribeAlarms` | `*` | shared describe statement |
+| `cloudwatch.get_metric_statistics` (RDS `FreeStorageSpace`; DMS `CDCLatencyTarget` + `CDCLatencySource`) | `cloudwatch:GetMetricStatistics` | `*` (no resource-level support) | shared describe statement |
+| `rds.describe_db_instances` (if `targetDbInstanceId`) | `rds:DescribeDBInstances` | `*` | shared describe statement |
+| `dms.describe_replication_tasks` (if `dms.taskArn`) | `dms:DescribeReplicationTasks` | `*` | shared describe statement |
+| ENI create/describe/delete | `ec2:CreateNetworkInterface` etc. | — | `AWSLambdaVPCAccessExecutionRole` (CDK adds it when `vpc` is set) |
+| CloudWatch Logs | `logs:CreateLogStream`, `logs:PutLogEvents` | the log group | `AWSLambdaBasicExecutionRole` |
+
+The four describe actions stay on `*` deliberately: they are read-only, and a mis-scoped
+ARN (wrong account/region/identifier format) is exactly the AccessDenied → guess →
+redeploy loop this table exists to stop. An imported CMK's **key policy** must also allow
+the role (the default key policy delegates to IAM; a custom one may not) — preflight shows
+that as `AccessDenied` with the KMS action and `kms_key` even when the IAM statement is
+present. No `Create*`/`Modify*`/`Delete*` anywhere.
+
+### Retry after a failed first deploy
+
+With generated names there is nothing to rename. A rollback leaves behind only the
+**retained, empty dashboard bucket** (random name — it does not block the retry; delete it
+once the retry succeeds: `aws s3 rb s3://<orphan> --region <REGION>`) and, if the stack
+created them, the two secrets **scheduled for deletion** under their generated names
+(harmless; `aws secretsmanager delete-secret --secret-id <arn> --force-delete-without-recovery`
+only if you want them gone now). If you ever *must* pin a physical name (a customer naming
+policy), the retry needs that exact bucket emptied + deleted (or imported via
+`existingDashboardBucketName`) and the secret restored with
+`aws secretsmanager restore-secret` — which is why the default is generated names. Read the
+first failure's `ResourceStatusReason` (`aws cloudformation describe-stack-events`) before
+changing anything.
+
+### Alerting
+
+The four alarms in the stack above (Lambda `Errors`, DLQ depth, missing daily invocation —
+whose actions stay off while the schedule is DISABLED —
+`needs_agent_review=true` metric filter on the explicit log group) all feed **the same SNS
+topic the migration-window alarms use** ([../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md)
+§4) — pass `alertTopicArn`. Without it the stack creates its own topic; confirm its
+subscription at the same time the customer's monitoring contacts are set up. A normal
+RED/needs-review day is logged at WARNING and returned normally, so it trips only the
+needs-review alarm, not `Errors`; a fatal AWS failure (secret/S3) raises, so it trips
+`Errors` with the `SOAK_CHECK_ERROR` line naming the fix.
 
 **Presigned URLs — initial issuance plus planned renewal, not part of this stack.** Run
-`shared/scripts/generate_presigned_urls.py` once, right after this stack deploys and the
-initial `dashboard/` contents are uploaded to `dashboardBucket` (index.html, assets/, empty
-status.json + activity-log.jsonl) — it presigns every file the page needs for the full soak
-duration and rewrites `index.html` so its CSS/JS/data references are absolute presigned
-URLs rather than relative paths (see that script's own docstring for exactly why the naive
-relative-path version silently 403s). It is deliberately not a CDK resource or a
-Lambda-invoked-at-deploy custom resource — read that script's credential-longevity caveat
-before running it: for a 3- or 7-day soak, sign with a throwaway IAM user's long-term
-access key, not the deploying operator's own temporary/SSO session, or the URLs stop
-working when that session expires, long before the `Expires` value they carry claims. Sign
-for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
+`shared/scripts/generate_presigned_urls.py --bucket <DashboardBucketName> --region
+<DashboardBucketRegion>` (both are stack outputs) right after this stack deploys and the
+initial `dashboard/` contents are uploaded (index.html, assets/, status.json +
+activity-log.jsonl) — it presigns every file the page needs and rewrites `index.html` so its
+CSS/JS/data references are absolute presigned URLs (see that script's docstring for why
+relative paths silently 403). It signs for the bucket's **actual** region (detected from
+S3; `--region` must match it), then GETs every URL and refuses to print the customer link
+unless all return HTTP 200 — a URL signed for the wrong region fails with
+`AuthorizationQueryParametersError` while the script's own upload still succeeds, which is
+how this bug shipped once. Read its credential-longevity caveat first: for a 3- or 7-day
+soak, sign with a throwaway IAM user's long-term access key (with `kms:Decrypt` +
+`kms:GenerateDataKey` on the key if the bucket uses a CMK), not a temporary/SSO session.
+Sign for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
 tier and `302400` (3.5 days) for the 3-day tier. Plan **648000 seconds (7.5 days) of
 coverage** for the 7-day tier, but never request a single S3 signature that long: SigV4
 rejects expiries over `604800` seconds. Issue with `--expires-seconds 604800`, renew by
@@ -537,20 +709,11 @@ back into the engagement working directory so `migration-plan.md` and the rest o
 engagement stay consistent with what actually happened:
 
 ```bash
-aws s3 sync s3://<dashboard-bucket-name>/ dashboard/ --exclude "index.html"
+aws s3 sync s3://<dashboard-bucket-name>/ dashboard/ --region <REGION> --exclude "index.html"
 # index.html excluded deliberately — the bucket's copy is the presigned-URL-materialized
 # one (see generate_presigned_urls.py); keep the clean shared/templates/dashboard.html
 # copy locally instead of pulling back a copy full of soon-to-expire presigned URLs.
 ```
-
-**IAM summary for this stack:** `soakFn`'s role = `secretsmanager:GetSecretValue` on
-exactly the two dedicated read-only secrets (never the admin/master secret, never `*`),
-`cloudwatch:DescribeAlarms`/`GetMetricStatistics` + `rds:DescribeDBInstances` +
-`dms:DescribeReplicationTasks` (read-only, no resource-level scoping available),
-`s3:GetObject`/`PutObject` (explicitly, not `grantReadWrite`) scoped to `dashboardBucket`
-only, plus the VPC ENI permissions from `AWSLambdaVPCAccessExecutionRole`. No
-`Create*`/`Modify*`/`Delete*` anywhere — this function only ever reads the databases and
-writes to one bucket.
 
 **Fallback — bastion cron, for someone who really doesn't want to stand up Lambda.** Simpler
 to set up, but weaker: the bastion has to stay running and reachable for the entire soak

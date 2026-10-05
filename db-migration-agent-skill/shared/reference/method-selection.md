@@ -46,7 +46,11 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 
 Use the exact source and target versions from discovery, verified during assessment.
 Compare **engine compatibility majors**, not Aurora product-version labels or just the
-first numeric component: MySQL **8.0 → 8.4 is a major-version crossing**.
+first numeric component: MySQL **8.0 → 8.4 is a major-version crossing**. For any MySQL 8.0 → 8.4
+engagement, load `version-upgrades.md` §"MySQL 8.0 → 8.4 (latest LTS)" and its
+"8.0 → 8.4 migration-execution specifics" sub-section **now** — they change method details
+(renamed RDS procedures, per-side replication syntax, no native reverse replication to an
+external 8.0 source — DMS reverse or RPO acceptance, client login proof).
 
 1. **Physical-method gate:** if target major > source major, disqualify XtraBackup,
    native backup/restore, snapshot, and transportable tablespaces from this skill's
