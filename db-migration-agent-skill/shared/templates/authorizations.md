@@ -64,10 +64,29 @@ Tags in use, appended as they arise:
 - **A4** — Cutover execution (**Mode 3 only** — window, runbook version).
 - **A4b** — Handover acceptance (**Mode 2 only** — package received, cutover ownership
   transferred).
-- **A5** — Rollback execution (pre-authorized on stated abort criteria, or ad hoc).
+- **A5** — Rollback execution (pre-authorized on stated abort criteria, or ad hoc). A live
+  rollback or re-cutover always gets its own A5 block presented and accepted in full — a
+  chat request ("go with B") is the trigger to present it, not the acceptance.
 - **A6** — Decommission (exact resource list).
 - **Approver present at cutover** (**Mode 3 only**) — confirmed present for the window,
   no name — just the confirmation + date.
+
+### After-the-fact record (an action executed WITHOUT its required block)
+
+Never record these as Confirmed. Use exactly this form, tell the customer in the same turn
+(hard constraint 13), and list it under **violations** in the final report:
+
+```
+### {tag} — NOT pre-approved — recorded after execution
+
+{What was executed, when (UTC), why it happened without the block, what it changed, and
+what was done to contain/revert it}
+
+**Status:** NOT pre-approved — recorded after execution ({date}). Customer informed: {date}.
+```
+
+A later acceptance of the outcome is recorded as its own normal block; it never converts
+this one into a confirmation.
 
 ## 4. Waivers (recommended parameters skipped)
 

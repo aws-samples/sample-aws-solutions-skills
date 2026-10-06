@@ -66,6 +66,7 @@ import random
 import re
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import boto3
@@ -284,8 +285,23 @@ def _connect(family, host, port, creds, database, ssl_ca_path=None, ssl_insecure
                                 cursorclass=pymysql.cursors.Cursor, ssl=tls)
     if pg8000 is None:
         raise RuntimeError("engine=postgres but pg8000 is not bundled in this deployment")
-    return pg8000.Connection(host=host, port=int(port), user=user, password=password,
+    # pg8000 applies ONE socket timeout (its `timeout`) to the TCP connect, the TLS handshake,
+    # authentication and every later read. Connect with the SHORT timeout so a stalled
+    # TLS/auth exchange fails in connect_timeout seconds, then raise the established socket's
+    # timeout to read_timeout for queries (a 100M-row scan needs minutes). pg8000 1.31 keeps
+    # the socket as `_usock` (plain or SSL socket) — settimeout() on it governs later reads.
+    conn = pg8000.Connection(host=host, port=int(port), user=user, password=password,
                              database=database, timeout=connect_timeout, ssl_context=tls)
+    sock = getattr(conn, "_usock", None)
+    if sock is None or not hasattr(sock, "settimeout"):
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise RuntimeError("pg8000 connection exposes no socket to apply the query timeout to — "
+                           "pin pg8000 to a tested version (requirements.txt)")
+    sock.settimeout(read_timeout)
+    return conn
 
 
 def _query(family, conn, sql, params=None):
@@ -451,16 +467,303 @@ def checksum(family, conn, table):
     return rows[0][0] if rows and rows[0][0] is not None else None
 
 
-def columns(family, conn, table):
+def columns(family, conn, table, query=None):
     """Column fingerprint keyed by name -> {type, nullable, default} — strengthened from
     a name-only comparison (the confirmed gap: two tables with identically-named columns
     of different types/nullability/defaults used to report no drift at all)."""
-    rows = _query(family, conn, _columns_sql(family, table))
+    rows = (query or _query)(family, conn, _columns_sql(family, table))
     return {
         str(r[0]).strip(): {"type": str(r[1]), "nullable": str(r[2]),
                              "default": (str(r[3]) if r[3] is not None else None)}
         for r in rows if r[0]
     }
+
+
+# ── Watermark-bounded comparison (soak under LIVE writes) ──────────────────────────────
+# Whole-table COUNT(*)/CHECKSUM TABLE source-vs-target is RED every day while the
+# application writes: replication lag means the newest rows (the "tail") are on the
+# source but not yet on the target at the instant each side is read. Confirmed live
+# (MySQL 8.0 -> RDS 8.4 under app writes): every daily check went RED for that reason
+# alone. So, per table, compare only rows up to a WATERMARK both sides already hold —
+# pk <= min(source MAX(pk), target MAX(pk)) - margin, or <timestamp column> <= source
+# NOW() - N minutes when a timestamp column is configured for that table — and report the
+# tail beyond it as informational detail, never as a failure. Tables without a
+# single-column integer primary key (and no configured timestamp column) fall back to the
+# whole-table comparison, and the detail says so. A mismatch BELOW the watermark is still
+# a real failure (RED); it can also mean an UPDATE/DELETE of an old row still in flight —
+# the agent reviews it (needs_agent_review), it is never silently passed.
+# KEEP IN SYNC with soak_check.py — scripts/test_soak_scripts.py asserts identical SQL.
+_INTEGER_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer", "bigint", "int2", "int4", "int8"}
+_BINARY_TYPE_HINTS = ("binary", "blob", "bit", "geometry", "point", "linestring", "polygon")
+WATERMARK_DEFAULTS = {"enabled": True, "pk_margin": 10000, "timestamp_columns": {}, "timestamp_age_minutes": 15}
+
+
+def _ident_sql(family, name):
+    quote = '`' if family == 'mysql' else '"'
+    return quote + name.replace(quote, quote * 2) + quote
+
+
+def _pk_sql(family, table):
+    """Primary-key columns (name, type) in key order — catalog only, no table scan."""
+    parts = _table_parts(table)
+    name = _sql_literal(family, parts[-1])
+    schema = (_sql_literal(family, parts[0]) if len(parts) == 2 else
+              "DATABASE()" if family == "mysql" else "current_schema()")
+    if family == "mysql":
+        return ("SELECT k.column_name, c.data_type FROM information_schema.key_column_usage k "
+                "JOIN information_schema.columns c ON c.table_schema=k.table_schema AND "
+                "c.table_name=k.table_name AND c.column_name=k.column_name "
+                f"WHERE k.table_schema={schema} AND k.table_name={name} AND k.constraint_name='PRIMARY' "
+                "ORDER BY k.ordinal_position")
+    return ("SELECT attribute.attname, pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) "
+            "FROM pg_catalog.pg_index idx JOIN pg_catalog.pg_class relation ON relation.oid=idx.indrelid "
+            "JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace "
+            "JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid=relation.oid AND attribute.attnum=ANY(idx.indkey) "
+            f"WHERE idx.indisprimary AND namespace.nspname={schema} AND relation.relname={name} "
+            "ORDER BY array_position(idx.indkey::int2[], attribute.attnum)")
+
+
+def _single_integer_pk(rows):
+    """The PK column name if the key is exactly one integer column, else None."""
+    if len(rows) != 1:
+        return None
+    base = str(rows[0][1]).strip().lower().split("(")[0].split()[0] if rows[0][1] else ""
+    return str(rows[0][0]) if base in _INTEGER_TYPES else None
+
+
+def _max_sql(family, table, column):
+    return f"SELECT MAX({_ident_sql(family, column)}) FROM {_table_sql(family, table)}"
+
+
+def _cutoff_sql(family, minutes):
+    """Evaluated on the SOURCE only; the same literal then bounds both sides (the target's
+    time_zone must match the source's — Phase 7 already verifies that)."""
+    m = int(minutes)
+    if family == "mysql":
+        return f"SELECT DATE_FORMAT(NOW(6) - INTERVAL {m} MINUTE, '%Y-%m-%d %H:%i:%s.%f')"
+    return f"SELECT to_char(now() - interval '{m} minutes', 'YYYY-MM-DD HH24:MI:SS.US')"
+
+
+def _bound_sql(family, column, op, value):
+    literal = str(int(value)) if isinstance(value, int) else _sql_literal(family, str(value))
+    return f"{_ident_sql(family, column)} {op} {literal}"
+
+
+def _count_where_sql(family, table, where):
+    return f"SELECT COUNT(*) FROM {_table_sql(family, table)} WHERE {where}"
+
+
+def _bounded_checksum_sql(family, table, column_types, where):
+    """Order-independent fingerprint of the rows matching `where`. MySQL: COUNT + SUM and
+    BIT_XOR of CRC32 over a length-prefixed, NULL-marked concatenation of every column in
+    name order (CHECKSUM TABLE cannot take a WHERE clause). Fast and non-cryptographic,
+    like CHECKSUM TABLE itself. PostgreSQL: the same md5(string_agg) shape as the
+    whole-table checksum, restricted by `where`."""
+    if family != "mysql":
+        return f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {_table_sql(family, table)} t WHERE {where}"
+    terms = []
+    for col in sorted(column_types):
+        q = _ident_sql(family, col)
+        typ = str(column_types[col]).lower()
+        v = f"HEX({q})" if any(h in typ for h in _BINARY_TYPE_HINTS) else f"CAST({q} AS CHAR)"
+        terms.append(f"IFNULL(CONCAT(CHAR_LENGTH({v}), ':', {v}), 'N')")
+    row = "CONCAT_WS('|', " + ", ".join(terms) + ")" if terms else "''"
+    return (f"SELECT CONCAT(COUNT(*), ':', COALESCE(SUM(CRC32(r)), 0), ':', BIT_XOR(CRC32(r))) "
+            f"FROM (SELECT {row} AS r FROM {_table_sql(family, table)} WHERE {where}) w")
+
+
+def watermark_config(cfg):
+    w = dict(WATERMARK_DEFAULTS)
+    w.update({k: v for k, v in (cfg.get("watermark") or {}).items() if v is not None})
+    return w
+
+
+def plan_bound(table, wcfg, src_pk_rows, tgt_pk_rows):
+    """('timestamp', column) | ('pk', column) | (None, reason) for one table."""
+    if not wcfg.get("enabled", True):
+        return None, "watermark disabled in config — whole-table comparison"
+    ts_col = (wcfg.get("timestamp_columns") or {}).get(table)
+    if ts_col:
+        return "timestamp", ts_col
+    src_pk, tgt_pk = _single_integer_pk(src_pk_rows), _single_integer_pk(tgt_pk_rows)
+    if src_pk and src_pk == tgt_pk:
+        return "pk", src_pk
+    if src_pk != tgt_pk:
+        return None, (f"primary key differs between sides (source {src_pk!r}, target {tgt_pk!r}) — "
+                      "whole-table comparison")
+    return None, ("no single-column integer primary key and no timestamp column configured — "
+                  "whole-table comparison; under live writes this can be RED from replication lag alone")
+
+
+_TIMESTAMP_BASES = {"datetime", "timestamp", "date", "timestamptz"}
+
+
+def _type_base(typ):
+    t = str(typ or "").strip().lower()
+    if t.startswith("timestamp"):
+        return "timestamptz" if "with time zone" in t else "timestamp"
+    return t.split("(")[0].split()[0] if t else ""
+
+
+def check_timestamp_column(column, src_cols, tgt_cols):
+    """(ok, nullable, reason). A configured timestamp watermark column must exist on BOTH
+    sides with the same date/time type; `nullable` is True if either side allows NULL —
+    then NULL rows are compared explicitly (they have no position relative to a cutoff)."""
+    s_attr, t_attr = (src_cols or {}).get(column), (tgt_cols or {}).get(column)
+    if not s_attr or not t_attr:
+        missing = [side for side, a in (("source", s_attr), ("target", t_attr)) if not a]
+        return False, False, f"timestamp column {column!r} not found on {'/'.join(missing)}"
+    sb, tb = _type_base(s_attr.get("type")), _type_base(t_attr.get("type"))
+    if sb not in _TIMESTAMP_BASES or tb not in _TIMESTAMP_BASES or sb != tb:
+        return False, False, (f"timestamp column {column!r} has type {s_attr.get('type')!r} (source) / "
+                              f"{t_attr.get('type')!r} (target) — needs the same date/time type on both")
+    nullable = "YES" in (str(s_attr.get("nullable")).upper(), str(t_attr.get("nullable")).upper())
+    return True, nullable, None
+
+
+def resolve_mode(table, wcfg, src_pk_rows, tgt_pk_rows, src_cols, tgt_cols):
+    """Joint (both-schema) decision: (mode, column_or_reason, nullable)."""
+    mode, info = plan_bound(table, wcfg, src_pk_rows, tgt_pk_rows)
+    if mode != "timestamp":
+        return mode, info, False
+    ok, nullable, why = check_timestamp_column(info, src_cols, tgt_cols)
+    if not ok:
+        return None, why + " — whole-table comparison", False
+    return "timestamp", info, nullable
+
+
+def bound_predicates(family, column, bound, nullable):
+    """(le, gt, null_pred_or_None). With a nullable timestamp column the compared set is
+    `col <= bound OR col IS NULL` (NULL rows are counted and checksummed, never silently
+    dropped), the tail is `col > bound`; together they cover every row."""
+    q = _ident_sql(family, column)
+    le, gt = _bound_sql(family, column, "<=", bound), _bound_sql(family, column, ">", bound)
+    if nullable:
+        return f"({le} OR {q} IS NULL)", gt, f"{q} IS NULL"
+    return le, gt, None
+
+
+def _min_sql(family, table, column):
+    return f"SELECT MIN({_ident_sql(family, column)}) FROM {_table_sql(family, table)}"
+
+
+def resolve_pk_watermark(src_max, tgt_max, src_min, margin):
+    """(watermark, None) or (None, reason-for-whole-table-fallback)."""
+    if src_max is None or tgt_max is None:
+        return None, "table empty on at least one side — whole-table comparison"
+    wm = min(int(src_max), int(tgt_max)) - int(margin)
+    if src_min is None or wm < int(src_min):
+        return None, (f"no rows below the watermark (table spans fewer than the {int(margin)}-key margin) "
+                      "— whole-table comparison")
+    return wm, None
+
+
+_BOUNDED_NOTE = ("compared rows up to the watermark only; the tail beyond it is informational "
+                 "(replication lag), not a failure")
+
+
+def bounded_verdict(sc, tc, s_tail, t_tail):
+    """True/False for the bounded comparison, or None when nothing was below the watermark
+    while rows exist (timestamp mode, every row recent) — inconclusive, needs review."""
+    if sc is None or tc is None:
+        return None
+    if sc == 0 and tc == 0 and (s_tail or t_tail):
+        return None
+    return sc == tc
+
+
+def combine_checks(values):
+    """Per-table True/False/None -> one check value: any False -> False, else any None ->
+    None (needs review), else True."""
+    values = list(values)
+    if any(v is False for v in values):
+        return False
+    if any(v is None for v in values):
+        return None
+    return True
+
+
+def _pair(fn_source, fn_target):
+    """Run the source-side and target-side query concurrently (two independent
+    connections) — halves wall time on ~100M-row tables."""
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fs, ft = ex.submit(fn_source), ex.submit(fn_target)
+        return fs.result(), ft.result()
+
+
+def _scalar(family, conn, sql):
+    rows = _query(family, conn, sql)
+    return rows[0][0] if rows and rows[0] and rows[0][0] is not None else None
+
+
+def compare_table(family, wcfg, table, source_conn, target_conn, want_checksum, src_cols, tgt_cols):
+    """Returns (row_detail, row_ok, checksum_detail_or_None, checksum_ok). Details keep the
+    existing 'source'/'target' keys (backward compatible) and add 'mode' + bound info;
+    *_ok is True/False/None (None = inconclusive -> needs review). src_cols/tgt_cols are the
+    columns() fingerprints of each side."""
+    column_types = {name: a["type"] for name, a in (src_cols or {}).items()}
+    src_pk_rows, tgt_pk_rows = _pair(lambda: _query(family, source_conn, _pk_sql(family, table)),
+                                     lambda: _query(family, target_conn, _pk_sql(family, table)))
+    mode, info, nullable = resolve_mode(table, wcfg, src_pk_rows, tgt_pk_rows, src_cols, tgt_cols)
+    bound, extra = None, {}
+    if mode == "pk":
+        (smax, smin), tmax = _pair(
+            lambda: (_scalar(family, source_conn, _max_sql(family, table, info)),
+                     _scalar(family, source_conn, _min_sql(family, table, info))),
+            lambda: _scalar(family, target_conn, _max_sql(family, table, info)))
+        bound, why = resolve_pk_watermark(smax, tmax, smin, wcfg["pk_margin"])
+        extra = {"column": info, "max_pk": {"source": smax, "target": tmax}, "margin": int(wcfg["pk_margin"])}
+        if bound is None:
+            mode, info = None, why
+        else:
+            extra["watermark"] = bound
+    elif mode == "timestamp":
+        cutoff = _scalar(family, source_conn, _cutoff_sql(family, wcfg["timestamp_age_minutes"]))
+        extra = {"column": info, "age_minutes": int(wcfg["timestamp_age_minutes"])}
+        if cutoff is None:
+            mode, info = None, "could not read the source clock — whole-table comparison"
+        else:
+            bound = extra["watermark"] = str(cutoff)
+    if mode is None:
+        sc, tc = _pair(lambda: row_count(family, source_conn, table), lambda: row_count(family, target_conn, table))
+        row_detail = {"source": sc, "target": tc, "mode": "whole_table", "note": info, **extra}
+        ck, ck_ok = None, None
+        if want_checksum:
+            cs, ct = _pair(lambda: checksum(family, source_conn, table), lambda: checksum(family, target_conn, table))
+            ck, ck_ok = {"source": cs, "target": ct, "mode": "whole_table", "note": info}, (cs is not None and cs == ct)
+        return row_detail, (sc is not None and sc == tc), ck, ck_ok
+    col = extra["column"]
+    le, gt, null_pred = bound_predicates(family, col, bound, nullable and mode == "timestamp")
+    sc, tc = _pair(lambda: _scalar(family, source_conn, _count_where_sql(family, table, le)),
+                   lambda: _scalar(family, target_conn, _count_where_sql(family, table, le)))
+    stail, ttail = _pair(lambda: _scalar(family, source_conn, _count_where_sql(family, table, gt)),
+                         lambda: _scalar(family, target_conn, _count_where_sql(family, table, gt)))
+    sc, tc = (int(sc) if sc is not None else None), (int(tc) if tc is not None else None)
+    tail = {"source": int(stail or 0), "target": int(ttail or 0)}
+    nulls = None
+    if null_pred:
+        sn, tn = _pair(lambda: _scalar(family, source_conn, _count_where_sql(family, table, null_pred)),
+                       lambda: _scalar(family, target_conn, _count_where_sql(family, table, null_pred)))
+        nulls = {"source": int(sn or 0), "target": int(tn or 0)}
+        extra["null_rows"] = nulls
+    row_ok = bounded_verdict(sc, tc, tail["source"], tail["target"])
+    if nulls and nulls["source"] != nulls["target"]:
+        row_ok = False
+    note = _BOUNDED_NOTE if row_ok is not None else (
+        "no rows below the watermark while recent rows exist — inconclusive, needs review "
+        "(lower timestamp_age_minutes or use the PK watermark)")
+    if nulls:
+        note += "; NULL-timestamp rows are included in the compared set and counted separately"
+    row_detail = {"source": sc, "target": tc, "mode": f"{mode}_watermark", **extra, "tail_rows": tail, "note": note}
+    ck, ck_ok = None, None
+    if want_checksum:
+        sql = _bounded_checksum_sql(family, table, column_types, le)
+        cs, ct = _pair(lambda: _scalar(family, source_conn, sql), lambda: _scalar(family, target_conn, sql))
+        cs, ct = (None if cs is None else str(cs)), (None if ct is None else str(ct))
+        ck = {"source": cs, "target": ct, "mode": f"{mode}_watermark", "column": col,
+              "watermark": extra["watermark"], "note": note}
+        ck_ok = None if row_ok is None else (cs is not None and cs == ct)
+    return row_detail, row_ok, ck, ck_ok
 
 
 def cloudwatch_alarms(alarm_names, aws_errors=None):
@@ -533,6 +836,40 @@ def db_headroom_pct(db_instance_id, aws_errors=None):
     return round(100 * free_gb / float(allocated_gb), 1)
 
 
+# AWS/DMS task metrics carry the dimension ReplicationTaskIdentifier = the task's RESOURCE ID
+# (the last ':' segment of its ARN, e.g. arn:aws:dms:<region>:<acct>:task:CPSTBQCAAFB67LEICTHDNETPSU),
+# NOT the friendly ReplicationTaskIdentifier ("myproj-fwd-cdc"). The instance dimension
+# ReplicationInstanceIdentifier IS the friendly instance identifier. Confirmed live with
+# `aws cloudwatch list-metrics --namespace AWS/DMS`: the friendly task name returns ZERO
+# datapoints — indistinguishable from "no metrics" unless flagged. KEEP IN SYNC (both scripts).
+DMS_DIMENSION_HINT = ("wrong ReplicationTaskIdentifier? use the task ARN's resource-id suffix "
+                      "(arn:...:task:<RESOURCE-ID>), not the friendly task name — or the task is not "
+                      "running / has emitted no datapoint in the last 15 minutes")
+
+
+def dms_metric_task_id(task_id, task_arn):
+    """(dimension_value_or_None, problem_or_None) for the ReplicationTaskIdentifier dimension.
+    An ARN (in either setting) is authoritative: its last ':' segment is the resource id."""
+    tid = (task_id or "").strip()
+    from_arn = tid.startswith("arn:")
+    if from_arn:   # provenance: a value taken from an ARN IS the resource id (custom ones may be lowercase)
+        tid = tid.rsplit(":", 1)[-1]
+    arn = (task_arn or "").strip()
+    arn_id = arn.rsplit(":", 1)[-1] if arn.startswith("arn:") and ":task:" in arn else None
+    if arn_id:
+        if tid and tid != arn_id:
+            return arn_id, (f"DMS_TASK_ID {task_id!r} is not the task's resource id {arn_id!r} (the "
+                            "DMS_TASK_ARN suffix) — metrics are queried with the ARN suffix; fix the config")
+        return arn_id, None
+    if not tid:
+        return None, None
+    if not from_arn and re.search(r"[a-z-]", tid):
+        return tid, (f"DMS_TASK_ID {tid!r} looks like the friendly task name (lowercase/hyphens) — "
+                     + DMS_DIMENSION_HINT + ". If a custom ResourceIdentifier really looks like this, "
+                     "also set DMS_TASK_ARN so it can be confirmed")
+    return tid, None
+
+
 def measure_replication_lag(cfg, family, source_conn, target_conn, aws_errors=None):
     """Returns (lag_seconds_or_None, mechanism_or_None). mechanism is one of
     "dms"/"mysql_replica_status"/"postgres_logical_requires_review"/None (nothing configured for
@@ -540,6 +877,10 @@ def measure_replication_lag(cfg, family, source_conn, target_conn, aws_errors=No
     dms_task_id = cfg.get("dms_task_id")
     dms_instance_id = cfg.get("dms_replication_instance_id")
     if dms_task_id and dms_instance_id:
+        dms_task_id, id_problem = dms_metric_task_id(dms_task_id, cfg.get("dms_task_arn"))
+        if id_problem and aws_errors is not None:
+            aws_errors.append({"check": "replication_lag", "iam_action": "n/a (config)",
+                               "resource": "DMS_TASK_ID", "result": "Error", "message": id_problem})
         now = datetime.datetime.now(datetime.timezone.utc)
         best = None
         for metric in ("CDCLatencyTarget", "CDCLatencySource"):
@@ -556,10 +897,13 @@ def measure_replication_lag(cfg, family, source_conn, target_conn, aws_errors=No
                 return None, "dms"
             points = stats.get("Datapoints", [])
             if not points:
+                if aws_errors is not None:
+                    aws_errors.append({"check": "replication_lag", "iam_action": "cloudwatch:GetMetricStatistics",
+                                       "resource": f"AWS/DMS {metric} ReplicationTaskIdentifier={dms_task_id}",
+                                       "result": "Error", "message": "no datapoints — " + DMS_DIMENSION_HINT})
                 return None, "dms"
-            if points:
-                worst = max(float(p["Maximum"]) for p in points)
-                best = worst if best is None else max(best, worst)
+            worst = max(float(p["Maximum"]) for p in points)
+            best = worst if best is None else max(best, worst)
         # Missing either required metric cannot establish the lag bound.
         return best, "dms"
 
@@ -615,7 +959,7 @@ def replication_errors(cfg, aws_errors=None):
     return ok, detail
 
 
-def run_day(cfg, source_conn, target_conn):
+def run_day(cfg, source_conn, target_conn, run_date=None):
     """checks{} four-state model:
       True/False  — measured and passed/failed.
       None        — missing/INSUFFICIENT_DATA/unreachable, or pending full-period evidence
@@ -626,6 +970,9 @@ def run_day(cfg, source_conn, target_conn):
                     BOTH the green calculation AND needs_agent_review, so a clean day can
                     actually reach `state: complete` instead of being permanently stuck.
     """
+    # Pin the verdict date at START: a 23:30Z run that finishes after midnight still records
+    # the UTC day it checked (and the next day's run doesn't overwrite it).
+    run_date = run_date or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     source_family = _engine_family(cfg["source_engine"])
     target_family = _engine_family(cfg["target_engine"])
     if source_family != target_family:
@@ -643,24 +990,29 @@ def run_day(cfg, source_conn, target_conn):
     _start_consistent_read(family, source_conn)
     _start_consistent_read(family, target_conn)
     try:
-        row_check = {"pass": True, "detail": {}}
-        for t in tables:
-            sc, tc = row_count(family, source_conn, t), row_count(family, target_conn, t)
-            row_check["detail"][t] = {"source": sc, "target": tc}
-            if sc != tc or sc is None:
-                row_check["pass"] = False
-
+        wcfg = watermark_config(cfg)
         checksum_tables = cfg.get("checksum_tables") or tables[:2]
+        row_check = {"pass": True, "detail": {}}
         checksum_check = {"pass": True, "detail": {}}
-        for t in checksum_tables:
-            sc, tc = checksum(family, source_conn, t), checksum(family, target_conn, t)
-            checksum_check["detail"][t] = {"source": sc, "target": tc}
-            if sc != tc or sc is None:
-                checksum_check["pass"] = False
-
         drift_check = {"pass": True, "detail": {}}
+        fingerprints, row_oks, ck_oks = {}, [], []
+        for t in dict.fromkeys(list(tables) + list(checksum_tables)):
+            fingerprints[t] = _pair(lambda t=t: columns(family, source_conn, t),
+                                    lambda t=t: columns(family, target_conn, t))
+            row_detail, row_ok, ck_detail, ck_ok = compare_table(
+                family, wcfg, t, source_conn, target_conn, t in checksum_tables,
+                fingerprints[t][0], fingerprints[t][1])
+            if t in tables:
+                row_check["detail"][t] = row_detail
+                row_oks.append(row_ok)
+            if ck_detail is not None:
+                checksum_check["detail"][t] = ck_detail
+                ck_oks.append(ck_ok)
+        row_check["pass"] = combine_checks(row_oks)
+        checksum_check["pass"] = combine_checks(ck_oks)
+
         for t in tables:
-            sc, tc = columns(family, source_conn, t), columns(family, target_conn, t)
+            sc, tc = fingerprints[t]
             if sc != tc or not sc or not tc:
                 drift_check["pass"] = False
                 mismatched = sorted(k for k in (set(sc) & set(tc)) if sc[k] != tc[k])
@@ -721,7 +1073,7 @@ def run_day(cfg, source_conn, target_conn):
         # resource so the fix is one targeted change (see module docstring).
         detail["aws_errors"] = aws_errors
     return {
-        "date": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
+        "date": run_date,
         "checks": checks,
         "detail": detail,
         "overall": "green" if overall_green else "red",
@@ -778,6 +1130,65 @@ def _is_precondition_failed(e):
     return code in ("PreconditionFailed", "ConditionalRequestConflict") or status in (409, 412)
 
 
+class StatusShapeError(RuntimeError):
+    """status.json cannot be safely updated (not JSON / soak block of the wrong type)."""
+
+
+def ensure_soak_shape(status, n_total):
+    """Make `status` carry the soak block the writer needs, without touching anything else.
+    Returns the list of fields it added. Missing `soak`, `soak.days`, `n_total`,
+    `consecutive_green`, `state` are created (a dashboard seeded without them is common —
+    live, the first scheduled write crashed on a status.json with no `soak.days`); a soak
+    block or days list of the WRONG TYPE is never overwritten — StatusShapeError instead.
+    KEEP IN SYNC (soak_check.py / soak_check_lambda.py)."""
+    if not isinstance(status, dict):
+        raise StatusShapeError(f"status.json holds a {type(status).__name__}, not a JSON object")
+    added = []
+    soak = status.get("soak")
+    if soak is None:
+        soak = status["soak"] = {}
+        added.append("soak")
+    elif not isinstance(soak, dict):
+        raise StatusShapeError(f"status.json 'soak' is a {type(soak).__name__}, not an object — repair it "
+                               "(dashboard_update.py --replace soak) before the soak writer runs")
+    days = soak.get("days")
+    if days is None:
+        soak["days"] = []
+        added.append("soak.days")
+    elif not isinstance(days, list) or not all(isinstance(d, dict) for d in days):
+        raise StatusShapeError("status.json 'soak.days' must be a list of objects — repair it before the "
+                               "soak writer runs")
+    else:
+        # Everything the writer/streak consumes: a real UTC calendar date per day (sorted and
+        # compared as dates), `checks` an object, `overall` a string, `needs_agent_review` a bool.
+        for d in days:
+            date = d.get("date")
+            try:
+                if not isinstance(date, str) or len(date) != 10:
+                    raise ValueError
+                datetime.date.fromisoformat(date)
+            except ValueError:
+                raise StatusShapeError(f"status.json soak.days[].date {date!r} is not a real YYYY-MM-DD date — "
+                                       "repair it before the soak writer runs") from None
+            if not isinstance(d.get("checks", {}), dict) or not isinstance(d.get("overall", ""), str) \
+                    or not isinstance(d.get("needs_agent_review", False), bool):
+                raise StatusShapeError(f"status.json soak.days[{date}] has a checks/overall/needs_agent_review "
+                                       "field of the wrong type — repair it before the soak writer runs")
+    for field, default in (("n_total", n_total), ("consecutive_green", 0), ("state", "active")):
+        if field not in soak:
+            soak[field] = default
+            added.append(f"soak.{field}")
+    return added
+
+
+def _parse_status(raw):
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError as e:
+        raise StatusShapeError(f"status.json is not valid JSON ({e}) — rebuild it (dashboard_update.py "
+                               "refuses to patch a corrupt file) before the soak writer runs") from e
+
+
 def update_status_json(bucket, key, day_result, n_total):
     """Idempotent per calendar day AND safe against a genuinely concurrent writer to the
     same status.json — EventBridge Scheduler retries are at-least-once (handled by the
@@ -795,15 +1206,20 @@ def update_status_json(bucket, key, day_result, n_total):
     drifting from what days[] actually contains."""
     for attempt in range(_CAS_MAX_ATTEMPTS):
         raw, etag = _s3_get_with_etag(bucket, key)
-        status = json.loads(raw) if raw else {}
-        soak = status.setdefault("soak", {"days": [], "n_total": n_total, "consecutive_green": 0, "state": "active"})
+        status = _parse_status(raw)
+        ensure_soak_shape(status, n_total)
+        soak = status["soak"]
         days = soak["days"]
         existing_idx = next((i for i, d in enumerate(days) if d.get("date") == day_result["date"]), None)
         if existing_idx is not None:
             days[existing_idx] = day_result
         else:
             days.append(day_result)
-        consecutive = _green_streak(days, datetime.datetime.now(datetime.timezone.utc).date().isoformat())
+        # Streak counted back from the LATEST recorded day (not wall-clock "today", not the
+        # incoming record's date): a run finishing after 00:00 UTC (pinned to its scheduled
+        # day, see _scheduled_date) and an out-of-order late retry of an older day must
+        # neither break nor reset a newer valid streak.
+        consecutive = _green_streak(days, max(d["date"] for d in days))
         soak["consecutive_green"] = consecutive
         soak["n_total"] = n_total
         # S3 is now the single source of truth during the soak window — this timestamp is
@@ -927,6 +1343,16 @@ def _load_config():
         "pg_replication_lag_side": _env("PG_REPLICATION_LAG_SIDE"),
         "customer_test_suite_provided": os.environ.get("CUSTOMER_TEST_SUITE_PROVIDED", "false").lower() == "true",
         "n_total": int(os.environ["N_TOTAL"]),
+        # Watermark-bounded comparison (see WATERMARK_DEFAULTS); empty env == default.
+        "watermark": {
+            "enabled": (os.environ.get("WATERMARK_ENABLED") or "true").lower() != "false",
+            "pk_margin": int(_env("WATERMARK_PK_MARGIN") or WATERMARK_DEFAULTS["pk_margin"]),
+            "timestamp_columns": _env_json("WATERMARK_TIMESTAMP_COLUMNS", {}),
+            "timestamp_age_minutes": int(_env("WATERMARK_AGE_MINUTES") or WATERMARK_DEFAULTS["timestamp_age_minutes"]),
+        },
+        # Per-statement DB read timeout. A COUNT(*)/checksum over a ~100M-row table needs
+        # minutes, not the old fixed 25 s (cdk-stacks.md §soak-stack.ts sizing note).
+        "db_query_timeout_seconds": int(_env("DB_QUERY_TIMEOUT_SECONDS") or 300),
     }
     # Checked FIRST, before any Secrets Manager read or DB connection attempt — a
     # misconfigured heterogeneous pair (or an engine string outside both supported
@@ -973,8 +1399,16 @@ def _side_settings(side):
     }
 
 
+class _BudgetExhausted(Exception):
+    """Preflight stopped before a DB round trip because the function's remaining time ran low."""
+
+
 class _Unverified(Exception):
     """A probe that could not prove the permission without mutating data."""
+
+
+class _Info(str):
+    """A PASS probe's informational message (e.g. which comparison mode a table uses)."""
 
 
 # Stop starting new probes when less than this is left: one probe is bounded by the
@@ -990,7 +1424,7 @@ def _preflight_row(check, iam_action, resource, fn):
     try:
         value = fn()
         return {"check": check, "iam_action": iam_action, "resource": resource,
-                "result": "PASS", "message": "ok"}, value
+                "result": "PASS", "message": str(value) if isinstance(value, _Info) else "ok"}, value
     except AwsCallError as e:
         row = e.as_dict()
         row["check"] = check
@@ -998,6 +1432,9 @@ def _preflight_row(check, iam_action, resource, fn):
     except _Unverified as e:
         return {"check": check, "iam_action": iam_action, "resource": resource,
                 "result": "UNVERIFIED", "message": str(e)}, None
+    except _BudgetExhausted as e:
+        return {"check": check, "iam_action": iam_action, "resource": resource,
+                "result": "SKIPPED", "message": str(e)}, None
     except Exception as e:  # DB driver / TLS / socket errors — reported, not raised
         return {"check": check, "iam_action": iam_action, "resource": resource,
                 "result": "Error", "message": f"{type(e).__name__}: {e}"}, None
@@ -1010,6 +1447,19 @@ class _Preflight:
     def _budget_ok(self):
         remaining = getattr(self.context, "get_remaining_time_in_millis", None)
         return remaining is None or remaining() > _PREFLIGHT_RESERVE_MS
+
+    def q(self, family, conn, sql):
+        """One DB round trip, started only while the budget allows it — compound probes
+        (several queries) re-check before EVERY query, not once per row."""
+        if not self._budget_ok():
+            raise _BudgetExhausted("time budget: stopped before the next DB query (too close to the "
+                                   "function timeout) — re-run preflight or raise the function timeout")
+        return _query(family, conn, sql)
+
+    def qn(self, conn, sql):
+        if not self._budget_ok():
+            raise _BudgetExhausted("time budget: stopped before the next DB query — re-run preflight")
+        return _query_named(conn, sql)
 
     def emit(self, row):
         self.rows.append(row)
@@ -1060,6 +1510,50 @@ def _pf_s3_write_probe(pf_s3, bucket, key, body, content_type, absent_ok):
                        "depends on them. Investigate before enabling the schedule.")
 
 
+def _preflight_watermark(pf, family, cfg, conns, tables):
+    """Joint (both-schema) watermark probes with the SAME builders as compare_table: the PK /
+    column catalog of both sides decides the mode (resolve_mode), then each side compiles
+    and runs the real bounded predicates — count, tail, NULL count, bounded checksum —
+    under a zero-row condition (`... AND 1=0`), plus MAX/MIN(pk) or the source clock. A
+    configured timestamp column that is missing or mistyped on either side is an Error row."""
+    wcfg = watermark_config(cfg)
+    for t in tables:
+        catalog = {}
+        for sl, (conn, _) in conns.items():
+            try:
+                catalog[sl] = (pf.q(family, conn, _pk_sql(family, t)), columns(family, conn, t, pf.q))
+            except Exception as e:  # incl. _BudgetExhausted — reported by that side's row below
+                catalog[sl] = e
+        src = catalog.get("source", catalog.get("target"))
+        tgt = catalog.get("target", catalog.get("source"))
+        for sl, (conn, endpoint) in conns.items():
+            def probe(t=t, sl=sl, conn=conn):
+                for c in (catalog[sl], src, tgt):
+                    if isinstance(c, Exception):
+                        raise c
+                mode, info, nullable = resolve_mode(t, wcfg, src[0], tgt[0], src[1], tgt[1])
+                ts_col = (wcfg.get("timestamp_columns") or {}).get(t)
+                if ts_col and wcfg.get("enabled", True) and mode != "timestamp":
+                    raise RuntimeError(f"configured {info}")
+                if not mode:
+                    return _Info(f"ok — {info}")
+                if mode == "pk":
+                    pf.q(family, conn, _max_sql(family, t, info))
+                    pf.q(family, conn, _min_sql(family, t, info))
+                    dummy = 0
+                else:
+                    pf.q(family, conn, _cutoff_sql(family, wcfg["timestamp_age_minutes"]))
+                    dummy = "1970-01-01 00:00:00"
+                le, gt, null_pred = bound_predicates(family, info, dummy, nullable and mode == "timestamp")
+                for pred in (le, gt, null_pred):
+                    if pred:
+                        pf.q(family, conn, _count_where_sql(family, t, f"({pred}) AND 1=0"))
+                types = {name: a["type"] for name, a in catalog[sl][1].items()}
+                pf.q(family, conn, _bounded_checksum_sql(family, t, types, f"({le}) AND 1=0"))
+                return _Info(f"ok — {mode}_watermark on {info}" + (" (nullable: NULL rows compared)" if nullable else ""))
+            pf.run(f"{sl}_db_watermark {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe)
+
+
 def run_preflight(cfg, bucket, prefix, context=None):
     """Exercise every AWS call + DB access a normal run makes — same table list, same SQL
     builders (_select_probe_sql/_columns_sql/_checksum_sql), both DMS metrics, all alarms,
@@ -1074,6 +1568,7 @@ def run_preflight(cfg, bucket, prefix, context=None):
     checksum_tables = cfg.get("checksum_tables") or tables[:2]
     now = datetime.datetime.now(datetime.timezone.utc)
 
+    conns = {}
     for side in ("SOURCE", "TARGET"):
         sl = side.lower()
         st = _side_settings(side)
@@ -1094,20 +1589,20 @@ def run_preflight(cfg, bucket, prefix, context=None):
         try:
             for t in tables:
                 def probe_table(t=t, conn=conn):
-                    _query(family, conn, _select_probe_sql(family, t))
-                    if not _query(family, conn, _columns_sql(family, t)):
+                    pf.q(family, conn, _select_probe_sql(family, t))
+                    if not pf.q(family, conn, _columns_sql(family, t)):
                         raise RuntimeError("no columns visible in the catalog — table missing or no "
                                            "privilege on it (schema-drift check would fail)")
                 pf.run(f"{sl}_db_select {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe_table)
             for t in checksum_tables:
                 pf.run(f"{sl}_db_checksum {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}",
-                       lambda t=t, conn=conn: _query(family, conn, _checksum_sql(family, t, probe=True)))
+                       lambda t=t, conn=conn: pf.q(family, conn, _checksum_sql(family, t, probe=True)))
             if family == "mysql" and cfg.get("mysql_replica_status_side") == sl:
                 def probe_replica(conn=conn):
                     try:
-                        cols, rrows = _query_named(conn, "SHOW REPLICA STATUS")
+                        cols, rrows = pf.qn(conn, "SHOW REPLICA STATUS")
                     except Exception:
-                        cols, rrows = _query_named(conn, "SHOW SLAVE STATUS")
+                        cols, rrows = pf.qn(conn, "SHOW SLAVE STATUS")
                     if not rrows:
                         raise RuntimeError("SHOW REPLICA STATUS returned no rows — replication not configured "
                                            "on this side, or the user lacks REPLICATION CLIENT")
@@ -1115,6 +1610,12 @@ def run_preflight(cfg, bucket, prefix, context=None):
                         raise RuntimeError(f"no lag column ({'/'.join(LAG_COLUMN_NAMES)}) in replica status")
                 pf.run(f"{sl}_db_replica_status", "n/a (DB grant: REPLICATION CLIENT)", endpoint, probe_replica)
         finally:
+            conns[sl] = (conn, endpoint)   # kept open for the joint watermark probes below
+
+    try:
+        _preflight_watermark(pf, family, cfg, conns, list(dict.fromkeys(list(tables) + list(checksum_tables))))
+    finally:
+        for conn, _ in conns.values():
             try:
                 conn.close()
             except Exception:
@@ -1150,15 +1651,24 @@ def run_preflight(cfg, bucket, prefix, context=None):
         not_configured.append("headroom (TARGET_DB_INSTANCE_ID empty)")
 
     if cfg.get("dms_task_id") and cfg.get("dms_replication_instance_id"):
+        task_dim, id_problem = dms_metric_task_id(cfg["dms_task_id"], cfg.get("dms_task_arn"))
+        if id_problem:
+            pf.emit({"check": "dms_task_id", "iam_action": "n/a (config: AWS/DMS ReplicationTaskIdentifier dimension)",
+                     "resource": f"DMS_TASK_ID={cfg['dms_task_id']}", "result": "Error", "message": id_problem})
         dims = [{"Name": "ReplicationInstanceIdentifier", "Value": cfg["dms_replication_instance_id"]},
-                {"Name": "ReplicationTaskIdentifier", "Value": cfg["dms_task_id"]}]
+                {"Name": "ReplicationTaskIdentifier", "Value": task_dim}]
         for metric in ("CDCLatencyTarget", "CDCLatencySource"):  # same pair as measure_replication_lag
-            pf.run(f"dms_lag_metric {metric}", "cloudwatch:GetMetricStatistics", f"* (AWS/DMS {metric})",
-                   lambda metric=metric: _aws("dms_lag_metric", "cloudwatch:GetMetricStatistics", "*",
-                                              pf_clients.cloudwatch.get_metric_statistics, Namespace="AWS/DMS",
-                                              MetricName=metric, Dimensions=dims,
-                                              StartTime=now - datetime.timedelta(minutes=15), EndTime=now,
-                                              Period=300, Statistics=["Maximum"]))
+            def probe_metric(metric=metric):
+                resp = _aws("dms_lag_metric", "cloudwatch:GetMetricStatistics", "*",
+                            pf_clients.cloudwatch.get_metric_statistics, Namespace="AWS/DMS",
+                            MetricName=metric, Dimensions=dims,
+                            StartTime=now - datetime.timedelta(minutes=15), EndTime=now,
+                            Period=300, Statistics=["Maximum"])
+                if not resp.get("Datapoints"):
+                    # Never PASS on empty: the normal run would report lag as needs-review forever.
+                    raise RuntimeError(f"no datapoints for ReplicationTaskIdentifier={task_dim} — " + DMS_DIMENSION_HINT)
+                return resp
+            pf.run(f"dms_lag_metric {metric}", "cloudwatch:GetMetricStatistics", f"* (AWS/DMS {metric})", probe_metric)
     else:
         not_configured.append("dms lag metrics (DMS_TASK_ID/DMS_REPLICATION_INSTANCE_ID empty)")
     if cfg.get("dms_task_arn"):
@@ -1174,6 +1684,16 @@ def run_preflight(cfg, bucket, prefix, context=None):
                        (f"{prefix}activity-log.jsonl", "application/x-ndjson")):
         ok, got = pf.run(f"s3_get {key}", "s3:GetObject (+kms:Decrypt if CMK)", _s3_arn(bucket, key),
                          lambda key=key: _pf_s3_read(pf_clients.s3, bucket, key))
+
+        if key.endswith("status.json") and ok:
+            def probe_shape(got=got):
+                body = got[0]
+                if body is None:
+                    raise _Unverified("status.json absent — upload the seeded dashboard files, then re-run")
+                added = ensure_soak_shape(_parse_status(body), cfg["n_total"])
+                return _Info("ok — soak block present" if not added else
+                             f"ok — writer will add {', '.join(added)} on its first write (seed them to silence this)")
+            pf.run("status_json_shape", "n/a (dashboard data: JSON + soak block)", _s3_arn(bucket, key), probe_shape)
 
         def probe_write(key=key, ctype=ctype, got=got, read_ok=ok):
             if not read_ok:
@@ -1211,7 +1731,12 @@ def handler(event, context):
     if isinstance(event, dict) and event.get("mode") == "preflight":
         return run_preflight(cfg, bucket, prefix, context)
     try:
-        return _run_normal(cfg, bucket, prefix)
+        return _run_normal(cfg, bucket, prefix, _scheduled_date(event))
+    except StatusShapeError as e:
+        print("SOAK_CHECK_ERROR " + json.dumps({"check": "status_json_shape", "iam_action": "n/a (dashboard data)",
+                                                 "resource": f"s3://{bucket}/{prefix}status.json", "result": "Error",
+                                                 "message": str(e)}, ensure_ascii=False))
+        raise
     except AwsCallError as e:
         # Fatal AWS failure (secret read, S3 read/write): one structured line naming the
         # exact IAM action + resource, then fail the invocation (Lambda Errors metric /
@@ -1220,7 +1745,23 @@ def handler(event, context):
         raise
 
 
-def _run_normal(cfg, bucket, prefix):
+def _scheduled_date(event):
+    """UTC date the run is FOR. The schedule (cdk-stacks.md §soak-stack.ts) fires at
+    cron(30 23 * * ? *) UTC and passes {"scheduled_time": "<aws.scheduler.scheduled-time>"}
+    (e.g. 2026-10-06T23:30:00Z), so a retry or a long run that finishes after 00:00 UTC is
+    still recorded against the calendar day it checks — not the next one. Manual invokes
+    without it use the current UTC date."""
+    raw = event.get("scheduled_time") if isinstance(event, dict) else None
+    if not raw or "<" in str(raw):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(
+            datetime.timezone.utc).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _run_normal(cfg, bucket, prefix, day_date=None):
     family = cfg["family"]
     status_key = f"{prefix}status.json"
     log_key = f"{prefix}activity-log.jsonl"
@@ -1233,12 +1774,17 @@ def _run_normal(cfg, bucket, prefix):
     source_creds = _get_secret(src["secret_arn"], "source_secret")
     target_creds = _get_secret(tgt["secret_arn"], "target_secret")
 
+    # Fail fast — before minutes of DB scans — if status.json can't take today's result.
+    raw, _ = _s3_get_with_etag(bucket, status_key)
+    ensure_soak_shape(_parse_status(raw), cfg["n_total"])
+
+    qt = cfg.get("db_query_timeout_seconds", 300)
     source_conn = _connect(family, src["host"], src["port"], source_creds, src["database"],
-                            src["ssl_ca_path"], src["ssl_insecure"])
+                            src["ssl_ca_path"], src["ssl_insecure"], read_timeout=qt)
     target_conn = _connect(family, tgt["host"], tgt["port"], target_creds, tgt["database"],
-                            tgt["ssl_ca_path"], tgt["ssl_insecure"])
+                            tgt["ssl_ca_path"], tgt["ssl_insecure"], read_timeout=qt)
     try:
-        day_result = run_day(cfg, source_conn, target_conn)
+        day_result = run_day(cfg, source_conn, target_conn, day_date)
     finally:
         try:
             source_conn.close()

@@ -9,8 +9,13 @@
 1. **Refresh optimizer statistics** — `ANALYZE TABLE` on all tables (MySQL/MariaDB),
    `ANALYZE` / autovacuum check (PostgreSQL), `DBMS_STATS.GATHER_SCHEMA_STATS` (Oracle),
    `sp_updatestats` (SQL Server). Most "the new DB is slow" reports trace here.
-2. **Baseline comparison** — re-run the Phase 2 top-20 statement set on the target and
-   diff against the source baseline in `migration-plan.md` (plans, latency). Regressions →
+2. **Baseline comparison (required — the rollback window does not close without it)** —
+   compare the Phase 2 baseline (`preflight-iam-cost.md` §4: top-20 statements by total time
+   with their `EXPLAIN` plans; peak/typical connections, QPS, p95 latency from the app's own
+   metrics) with the same metrics on the target after cutover, same time-of-day window.
+   Record a table in `migration-plan.md` (metric · Phase 2 value · post-cutover value ·
+   delta · verdict) and present it; a missing baseline is stated as such, never filled in.
+   Regressions →
    [validation-patterns.md](validation-patterns.md) §Performance Baseline and, for
    major-version gaps, [version-upgrades.md](version-upgrades.md) "After the upgrade".
 3. **Confirm alarms are quiet** and reverse replication lag ≈ 0; record the T+24h check
@@ -54,5 +59,11 @@
       managed instance — list it explicitly in the decommission confirmation, don't let
       attention move straight to the EC2/DMS items and skip it.
     - Remove migration-only security-group rules and the migration stack from the CDK app.
-11. Mark the plan complete: final costs vs the GATE 2 estimate, lessons-learned notes,
+11. **Reconcile IaC drift before handover.** Anything created or changed outside the CDK
+    app (helper EC2, RDS parameters such as `binlog retention hours`, Proxy auth entries,
+    alarms, SG rules) is either back-ported into the CDK app (and `cdk diff` shows no change)
+    or listed as drift with an owner and a reconcile step (`../patterns/cdk-stacks.md`
+    §Post-stabilization changes). Stored procedures like `rds_set_configuration` are not CDK
+    resources: record them in the README's post-deploy steps.
+12. Mark the plan complete: final costs vs the GATE 2 estimate, lessons-learned notes,
     handover of the CDK project + runbooks to the customer.

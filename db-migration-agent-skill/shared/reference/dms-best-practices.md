@@ -128,6 +128,13 @@ This checks:
 
 ## Monitoring Metrics
 
+Task metrics (`CDCLatency*`, `CDCIncomingChanges`, …) are published with two dimensions:
+`ReplicationTaskIdentifier` = the task's **resource id** — the last `:` segment of its ARN (`arn:aws:dms:<region>:<acct>:task:CPSTBQCAAFB67LEICTHDNETPSU` → `CPSTBQCAAFB67LEICTHDNETPSU`), **not** the friendly task name; `ReplicationInstanceIdentifier` = the friendly instance identifier. Verified live with `aws cloudwatch list-metrics --namespace AWS/DMS`; the friendly
+name silently returns zero datapoints (an alarm on it sits in `INSUFFICIENT_DATA` forever). Get
+the id with `aws dms describe-replication-tasks --query 'ReplicationTasks[].ReplicationTaskArn'`
+and take the last segment (`${ARN##*:}`); CDK: `Fn.select(6, Fn.split(':', task.ref))`.
+Empty datapoints are never "zero lag".
+
 | Metric | Warning Threshold | Action |
 |--------|------------------|--------|
 | CDCLatencySource | > 30 seconds | Check source load, increase instance |
@@ -135,6 +142,43 @@ This checks:
 | FreeableMemory | < 2 GB | Scale up replication instance |
 | SwapUsage | > 0 | Instance is undersized |
 | CPUUtilization | > 80% sustained | Scale up or reduce parallelism |
+
+## Endpoint TLS (`SslMode`) — MySQL-family
+
+AWS DMS supports **`none`, `verify-ca` and `verify-full`** for MySQL / MariaDB / Aurora
+MySQL endpoints; **`require` is "Not supported"** and the endpoint fails at deploy with
+`The require SSL mode is not supported by the 'mysql' engine` (live: a stack rollback after
+synth passed). Source: DMS User Guide, "Using SSL with AWS DMS" (per-engine table).
+
+- `verify-ca` / `verify-full` need the CA certificate **imported into DMS** first (PEM;
+  `aws dms import-certificate` or CDK `dms.CfnCertificate` — its `Ref` is the ARN to set as
+  the endpoint's `CertificateArn`; `cdk-stacks.md` §migration-stack.ts).
+- **Self-managed MySQL source:** import the server's CA — the file named by
+  `SHOW GLOBAL VARIABLES LIKE 'ssl_ca'` (MySQL's auto-generated set puts `ca.pem` in the
+  data directory). Fetch the public `ca.pem` only (never `ca-key.pem`) through the
+  approved access path. Auto-generated server certificates don't carry the host name, so use
+  `verify-ca`; `verify-full` needs a certificate whose name matches the endpoint's server name.
+- **RDS/Aurora target:** import the RDS CA bundle for the region
+  (`https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem`, or the global
+  bundle this skill ships as `shared/assets/rds-global-bundle.pem`); `verify-full` works
+  against the RDS endpoint name.
+- `none` is rejected by a target with `require_secure_transport=ON` (MySQL error 3159 —
+  the default on Aurora MySQL 8.4) and needs explicit approval anyway.
+- The same rules apply to the **reverse** task's endpoints (new target as DMS source, old
+  source as DMS target). The reverse target endpoint's account is a dedicated migration
+  account with only apply grants — never the application account
+  (`cutover-procedures.md` §Reverse Replication).
+
+## Reverse (rollback) task from RDS/Aurora MySQL — prerequisites
+
+DMS CDC **from** an AWS-managed MySQL needs automated backups on (RDS binlog), `binlog_format=ROW`
+and `binlog_row_image=FULL`, and binlog retention set with
+`CALL mysql.rds_set_configuration('binlog retention hours', 24)` — RDS purges binlogs as soon
+as possible otherwise (DMS User Guide, "MySQL as a source", AWS-managed section). Turn on
+task logging (`"Logging": {"EnableLogging": true}`) for every task. The writer on the old
+source needs DMS's target grants including `ALL PRIVILEGES ON awsdms_control.*` (control
+schema, `ControlTablesSettings.ControlSchema`). Full checklist and GATE 4 rule:
+`cutover-procedures.md` §Reverse-CDC prerequisites.
 
 ## Engine-Specific Gotchas
 

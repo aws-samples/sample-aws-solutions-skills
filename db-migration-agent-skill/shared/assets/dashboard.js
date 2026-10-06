@@ -48,6 +48,12 @@
       logH2: 'Activity Log',
       logSub: 'Historical events · newest first; later entries may supersede earlier findings',
       logEmpty: 'No activity recorded yet.',
+      logShowAll: (n) => `Show all (${n})`,
+      cutoverDone: 'Cutover completed',
+      cutoverDoneSub: 'Production now runs on the new database. The gates below are the pre-cutover record.',
+      cdCompleted: 'Completed', cdPause: 'Measured write pause', cdEndpoint: 'Target endpoint',
+      cdRollbackEnds: 'Rollback window ends', cdRollbackState: 'Rollback path',
+      cdSeconds: (n) => `${n} s`,
       objectsEmpty: 'No schema-object inventory yet (populated after Phase 2).',
       objectsNone: 'This source has no schema objects beyond tables.',
       footer: 'db-migration-agent · single-user, no login · auto-refreshes every 5s',
@@ -145,6 +151,12 @@
       logH2: '활동 로그',
       logSub: '과거 활동 · 최신순; 이후 기록에서 앞선 발견이 정정될 수 있습니다',
       logEmpty: '아직 기록된 활동이 없습니다.',
+      logShowAll: (n) => `모두 보기 (${n})`,
+      cutoverDone: '컷오버 완료',
+      cutoverDoneSub: '운영 트래픽은 이제 새 데이터베이스에서 처리됩니다. 아래 게이트는 컷오버 이전 기록입니다.',
+      cdCompleted: '완료 시각', cdPause: '측정된 쓰기 중단', cdEndpoint: '대상 엔드포인트',
+      cdRollbackEnds: '롤백 기간 종료', cdRollbackState: '롤백 경로',
+      cdSeconds: (n) => `${n}초`,
       objectsEmpty: '아직 스키마 객체 인벤토리가 없습니다 (Phase 2 이후 채워집니다).',
       objectsNone: '이 소스에는 테이블 외 스키마 객체가 없습니다.',
       footer: 'db-migration-agent · 단일 사용자, 로그인 없음 · 5초마다 자동 갱신',
@@ -391,9 +403,26 @@
     const ready = !!s.cutover_ready;
     const unmet = gates.filter(g => !g.met).length;
     const box = $('#cutover');
-    box.className = 'cutover ' + (ready ? 'ready' : 'notready');
-    $('#verdict-text').textContent = ready ? l.verdictReady : l.verdictNotReady(unmet);
-    $('#verdict-sub').textContent = ready ? l.verdictSubReady : l.verdictSubNotReady;
+    // Additive `cutover` block (dashboard.md §Phase 8–9): once a completion is recorded, the
+    // pre-cutover readiness verdict is history — show the completion card instead.
+    const done = s.cutover && typeof s.cutover === 'object' && s.cutover.completed_at ? s.cutover : null;
+    if (done) {
+      box.className = 'cutover done';
+      $('#verdict-text').textContent = l.cutoverDone;
+      const pause = typeof done.measured_write_pause_seconds === 'number' && isFinite(done.measured_write_pause_seconds)
+        ? l.cdSeconds(done.measured_write_pause_seconds) : null;
+      $('#verdict-sub').textContent = [
+        `${l.cdCompleted}: ${fmtTime(done.completed_at)}`,
+        pause && `${l.cdPause}: ${pause}`,
+        done.target_endpoint && `${l.cdEndpoint}: ${done.target_endpoint}`,
+        done.rollback_window_ends && `${l.cdRollbackEnds}: ${fmtTime(done.rollback_window_ends)}`,
+        done.rollback_path_state && `${l.cdRollbackState}: ${done.rollback_path_state}`,
+      ].filter(Boolean).join(' · ') + ' — ' + l.cutoverDoneSub;
+    } else {
+      box.className = 'cutover ' + (ready ? 'ready' : 'notready');
+      $('#verdict-text').textContent = ready ? l.verdictReady : l.verdictNotReady(unmet);
+      $('#verdict-sub').textContent = ready ? l.verdictSubReady : l.verdictSubNotReady;
+    }
     setHTML('#gates', gates.map(g => `
       <div class="gate ${g.met ? 'met' : 'unmet'}">
         <span class="icon">${g.met ? '✓' : '·'}</span>
@@ -618,8 +647,10 @@
       ${renderCompressedWindow(soak.compressed_window)}`);
   }
 
+  const LOG_VISIBLE = 25;   // newest entries shown; older ones sit behind a keyboard-accessible disclosure
+
   function logRows(lines) {
-    return lines.slice().reverse().map(e => `
+    const rows = lines.slice().reverse().map(e => `
       <div class="entry ${ENTRY_CLASS[e.result] || 'success'}">
         <span class="icon">${ENTRY_ICON[e.result] || '✓'}</span>
         <div class="body">
@@ -628,7 +659,11 @@
           ${e.detail ? `<div class="detail">${esc(e.detail)}</div>` : ''}
           ${references(e.files)}
         </div>
-      </div>`).join('');
+      </div>`);
+    if (rows.length <= LOG_VISIBLE) return rows.join('');
+    return rows.slice(0, LOG_VISIBLE).join('')
+      + `<details data-key="log-older"><summary>${esc(L().logShowAll(rows.length))}</summary>`
+      + rows.slice(LOG_VISIBLE).join('') + '</details>';
   }
 
   function renderLog(lines) {

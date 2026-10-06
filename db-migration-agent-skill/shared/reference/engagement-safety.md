@@ -110,7 +110,8 @@ Record the choice in the plan. The handover package the customer receives:
    and abort action per step; **each timing** marked *measured* with its evidence or
    *estimated* with its basis, including mixed component-test/rehearsal coverage.
 2. **`rollback-runbook.md`** — the exact failback procedure, with the reverse-replication
-   path armed-but-not-started (a) or the snapshot/PITR path documented (b).
+   path prepared, connection-tested and rehearsed but not started (a) — "armed" only once
+   it is running and its application is verified — or the snapshot/PITR path documented (b).
 3. **The client repoint list** — every client discovered in Phase 7.5 with the *exact*
    change each one needs (file, key, old → new value) and where that config is deployed
    from, so their team can land it in their own repo/pipeline.
@@ -130,8 +131,11 @@ Record the choice in the plan. The handover package the customer receives:
   criteria; the agent stops and asks whenever a criterion trips rather than deciding.
 - **Timing is earned, not promised:** quote a write-pause budget only from a measured
   rehearsal, and treat rehearsal × 2 as the honest number.
-- **A rollback path must be armed before the flip** — reverse replication, or write-log
-  replay, or an explicitly acknowledged RPO loss window.
+- **A rollback path must be prepared and rehearsed before the flip** (cutover-procedures.md
+  §Reverse-CDC prerequisites) and **armed** — running and verified applying — right after it:
+  reverse replication, or write-log replay, or an explicitly acknowledged RPO loss window.
+  Reserve "armed" for that verified running state; before activation say "prepared /
+  connection-tested / rehearsed".
 - Mode 3 is **never the default recommendation.** If the customer hasn't asked for
   agent-executed cutover specifically, propose Mode 2.
 
@@ -182,6 +186,55 @@ approved compressed window, record the waiver and use manual reports with explic
 start/end timestamps, contiguous intervals, and one verdict per interval; missing,
 unknown, or RED intervals break the streak. Do not use the scripts' daily completion
 state as hourly evidence.
+
+### Phase 7.7 entry — choose the sampler explicitly, state the timetable
+
+Live failure: one run never offered soak automation, then told the customer "periodic
+samples are running automatically" while nothing was deployed — samples happened only
+when someone poked the session. At Phase 7.7 entry, ask in chat as its own numbered
+choice (and mirror it into `customer_actions` until answered):
+
+- **A — soak Lambda stack (recommended):** `cdk-stacks.md` §soak-stack.ts behind its own
+  A3 block; preflight first, schedule enabled only after preflight passes; runs at 23:30
+  UTC daily and writes the S3 dashboard itself.
+- **B — manual `soak_check.py` runs:** name **who** runs it, **from which host**, and
+  **when (UTC)** each day (or the bastion cron fallback, if that is what is chosen).
+- A and B exist only when source and target normalize to the **same engine family** (both
+  scripts reject cross-family pairs). For a **heterogeneous** pair offer instead:
+  **C — manual reconciliation** per `execution-runbooks.md` §Soak automation's heterogeneous
+  callout: DMS task CloudWatch metrics/alarms plus agent-run dual-read spot checks with
+  per-side queries — name **who** runs them, **when (UTC)**, and **what evidence** each
+  period records (queries, row counts/aggregates compared, DMS validation status). A
+  full-load-only heterogeneous move has no soak at all (static-validation window, waiver).
+
+Record the choice, reason and date in the plan's Phase 7.7 row. State the notification
+path for RED/needs-review days (SNS topic with a confirmed subscription for a named person,
+or none — §Surfacing what's needed). **Never describe
+sampling as automatic, scheduled or "running" unless a deployed schedule exists and is
+ENABLED (A) or the agreed cron is installed and its first run verified (B)**; otherwise
+say exactly when the next sample happens and who triggers it (hard constraint: never
+invent progress).
+
+**State the timetable and the wake-up path.** List each verdict's UTC time (e.g. "Day 1
+verdict 2026-10-06 23:30Z; soak-exit review 2026-10-07 00:00Z"), when the day's coverage
+starts, and **what brings the agent back for each verdict**: an agent session — headless
+or interactive — does not wake itself. Name the trigger (the customer re-invoking the
+agent at an agreed time, a scheduled job that starts a session, or the SNS
+`needs_agent_review` alert reaching a person who then does). The dashboard's 36-hour
+overdue banner is a backstop, not the wake-up mechanism.
+**Never claim "I've scheduled a check-in / I'll check back at <time>"** from a session that
+cannot wake itself (headless `claude -p`, non-interactive Kiro, any turn-based chat) unless a
+real external scheduler exists and was verified (an enabled EventBridge schedule, an
+installed cron that starts a session). Say instead: "the next check happens when you (or
+<operator>) re-invoke me at <UTC time>; nothing runs in between unless <the deployed
+schedule>."
+
+**Compressed or manual windows carry explicit UTC timestamps.** The scripts' "day" is a
+UTC calendar day. Any other window — "24 hours from 18:31Z", or hours under a waiver — is
+manual tracking: record its `started_at` and `planned_end_at` as UTC instants, say in chat
+which definition applies ("24 h from start" vs "UTC calendar day 2026-10-06"), and use
+[dashboard.md](dashboard.md)'s `soak.compressed_window`. Never leave the reader to infer
+whether "1 day" means 24 hours from now or the next UTC date.
 
 ### Reassessing the tier during soak
 
@@ -253,9 +306,10 @@ customer's language; keep the structure, not the exact words):
 > Do you want to keep that, shorten it, or skip it entirely? Either way I'll record which
 > and why.
 >
-> One logistics note if you keep it: for those [N] day(s), the checks run automatically on
-> AWS-managed infrastructure (not your own machine — that's not reliable left running for
-> days), and I'll send a dashboard link at the start. Longer windows require renewal
+> One logistics note if you keep it: at the start of the soak I'll ask you to choose how
+> the daily checks run — recommended: automatically on AWS-managed infrastructure (a small
+> scheduled Lambda; not your own machine — that's not reliable left running for days) — and
+> I'll send a dashboard link at the start. Longer windows require renewal
 > before URL or signing-credential expiry; reopen the new link when it is issued.
 > Nothing else about how you work changes.
 
@@ -289,6 +343,16 @@ reverse replication):
 Why this matters: a declined rehearsal plus one untested engine-version-specific command
 is all it takes to turn a 40-second freeze into a 5-minute write pause.
 
+**Soak-exit and waiver blocks state their evidence, not a verdict.** Each must name the
+evidence **source and coverage**: continuous metric history (metric, dimensions, UTC time
+range, gaps) vs N point samples (list their UTC timestamps); and list the **un-observed
+intervals** (nights, batch windows, periods with no metric data). "Green across the whole
+period" / "RED 0" / "lag always ≤ X" only with continuous evidence covering that period;
+with point samples, say "N samples at <times>, all green; not observed between them".
+(Live: ~5 customer-triggered samples and no lag history — wrong DMS dimension — were
+presented as "green across the whole period", and the reverse rollback as "armed" though
+its task had never run.)
+
 ## Approvals of record
 
 Chat approvals drift and scroll away — that's why every gate, action-class authorization,
@@ -298,6 +362,15 @@ and waiver gets its own durable block in **`authorizations.md`** (template in
 by design** — see that template's header note. `migration-plan.md` gate rows point at the
 corresponding block. The customer can hand the file to an auditor as a record of *what*
 was authorized and *when*; it does not answer *who*, and it never will.
+
+**An action executed without its required block is never "Confirmed."** (Live: a source
+`GRANT` ran without an A2, and a live rollback + re-cutover without an A5; both were later
+listed as approvals.) Record it in the template's "NOT pre-approved — recorded after
+execution" form with the reason, tell the customer immediately (hard constraint 13), and
+list it as a **violation** in the final report — this is an extra status for a different
+case; the no-name/date-only model is unchanged. A live rollback or re-cutover always needs
+its A5 (or new A4) block presented and accepted in full, even when the customer asked for
+it in chat.
 
 **The customer never edits `authorizations.md` themselves.** The agent drafts and appends
 each block; gathering and recording evidence (a green validation battery, a green soak
@@ -378,6 +451,15 @@ constraint 11 — those report progress, this requests a decision. The block abo
 English form of the template — translate the header and every item into the user's
 conversation language (the Language rule in `SKILL.md` applies here too); keep the box
 characters, emoji, and `[ ]`/numbering exactly as shown.
+
+**Never promise a notification you cannot deliver.** "I'll let you know immediately if
+anything goes wrong" (live: said with no schedule and no subscription) is a claim about a
+mechanism. Before saying anything like it, name the actual path: an SNS topic **with a
+confirmed subscription** for that person (`aws sns list-subscriptions-by-topic` — not
+`PendingConfirmation`), fed by alarms that exist and see data, or an **enabled** schedule
+that writes and alerts. If there is none, say so plainly — "nothing will notify you between
+checks; the next check is <UTC time>, run by <who>" — and offer to set one up (A3).
+Agent sessions do not watch anything between turns.
 
 Action classes requiring a confirmed context-and-mark block **before** first execution:
 1. Read-only source access (assessment)

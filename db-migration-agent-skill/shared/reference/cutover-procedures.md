@@ -197,6 +197,10 @@ The MySQL reseed pipeline below uses on-host `MYSQL_PWD`; rehearse it against th
 
 ```bash
 # Step 1: Verify task health and query CDC lag from CloudWatch
+# AWS/DMS dimensions: ReplicationInstanceIdentifier = the friendly instance id; ReplicationTaskIdentifier
+# = the task's RESOURCE ID (last ':' segment of the task ARN), NOT the friendly task name — the
+# friendly name returns zero datapoints, which reads as "no lag data". Derive it:
+DMS_TASK_ID=${TASK_ARN##*:}
 show_dms_health_and_lag() {
   LAG_WINDOW_START=$(date -u -d '2 minutes ago' +%FT%TZ)
   LAG_WINDOW_END=$(date -u +%FT%TZ)
@@ -212,7 +216,8 @@ show_dms_health_and_lag() {
   done
 }
 show_dms_health_and_lag
-# Verify: CDCLatencySource < 5, CDCLatencyTarget < 5, TablesErrored = 0
+# Verify: CDCLatencySource < 5, CDCLatencyTarget < 5, TablesErrored = 0 — EMPTY Datapoints is not
+# zero lag: wrong dimension value or no fresh datapoint; do not proceed on it.
 
 # Step 2: Put application in read-only mode (disable write endpoints / feature flag)
 
@@ -262,6 +267,9 @@ SELECT CONCAT(
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA=DATABASE() AND EXTRA LIKE '%auto_increment%';
 SQL
+# Verify with SHOW CREATE TABLE (AUTO_INCREMENT=<n> > MAX(pk)) or after
+# SET SESSION information_schema_stats_expiry=0 — information_schema.TABLES.AUTO_INCREMENT
+# is cached for up to 24 h on 8.0+ and reads stale (validation-patterns.md §4 item 3).
 # PostgreSQL — re-seed every owned sequence to its column max:
 #   SELECT setval(seq, COALESCE(max_val, 1)) for each sequence via pg_get_serial_sequence.
 
@@ -344,11 +352,51 @@ aws dms create-replication-task \
 # it is STARTED (fresh, from the freeze point) at cutover step 8.
 ```
 
+- **The reverse writer is a dedicated migration account — never the application account.**
+  The account the reverse channel uses to WRITE into the old source (DMS reverse target
+  endpoint, or a native replication applier) gets only what applying changes needs, is
+  created for this purpose, and is dropped after the rollback window. Live: a run wired its
+  reverse DMS target endpoint to the application's own account — mixing rollback writes
+  with application identity, widening that account's grants, and making "are app writers
+  fenced?" unanswerable from the processlist. For a MySQL-compatible DMS target the
+  documented set is `GRANT ALTER, CREATE, DROP, INDEX, INSERT, UPDATE, DELETE, SELECT,
+  CREATE TEMPORARY TABLES ON <schema>.*` plus `GRANT ALL PRIVILEGES ON awsdms_control.*`
+  (DMS User Guide, MySQL as a target); the reverse SOURCE endpoint (the new target DB) uses
+  its own replication-read account (`REPLICATION CLIENT`, `REPLICATION SLAVE`, `SELECT`).
+  Creating it on the old source is an A2 write; with native forward binlog replication
+  running, create it with `SET SESSION sql_log_bin = 0` so it does not replicate to the
+  target (execution-runbooks.md §"Native binlog replication: accounts you create on the
+  source replicate to the target"). Give it an explicit plugin the DMS endpoint supports
+  (e.g. `IDENTIFIED WITH mysql_native_password` or `caching_sha2_password` over TLS).
 - **MySQL/MariaDB**: Aurora's cluster parameter group needs `binlog_format=ROW` so the
   source can consume Aurora's binlog as a replica.
 - **PostgreSQL**: Aurora needs `rds.logical_replication=1` and the source needs a free slot.
 - Native binlog/logical replication is an alternative to a reverse DMS task — pick whichever
   matches the forward method.
+
+#### Reverse-CDC prerequisites — a GATE 4 precondition (MySQL family, DMS reverse task)
+
+Live (CRITICAL): a run's zero-RPO reverse DMS rollback was broken for ~27 minutes right after
+cutover — RDS `binlog retention hours` was NULL, task logging was off (no diagnostics), and
+the reverse writer could not create DMS's control schema on the old source (`ERROR 1044` on
+`awsdms_control`) → crash loop. Every item was checkable beforehand. Before GATE 4 (Mode 3)
+or the A4b handover (Mode 2), record each with its evidence:
+
+| ▢ | Check | How to verify | Source |
+|---|---|---|---|
+| ▢ | Automated backups ON on the RDS for MySQL target (that is what enables its binlog) | `describe-db-instances` → `BackupRetentionPeriod` > 0 | DMS "MySQL as a source" — AWS-managed |
+| ▢ | `binlog_format=ROW`, `binlog_row_image=FULL` on the new source (RDS parameter group; Aurora cluster group), sessions recycled after a change | `SHOW GLOBAL VARIABLES LIKE 'binlog_%'` | same |
+| ▢ | Binlog retention long enough for the reverse task to catch up after any stop: `CALL mysql.rds_set_configuration('binlog retention hours', 24);` (or more) | `CALL mysql.rds_show_configuration;` — NULL means binlogs are purged ASAP | same |
+| ▢ | Reverse DMS **source** account on the new DB: `REPLICATION CLIENT`, `REPLICATION SLAVE`, `SELECT` on the replicated tables | `SHOW GRANTS` | same |
+| ▢ | Dedicated reverse **writer** on the old source (never the app account): `ALTER, CREATE, DROP, INDEX, INSERT, UPDATE, DELETE, SELECT, CREATE TEMPORARY TABLES ON <schema>.*` and `ALL PRIVILEGES ON awsdms_control.*` (the default MySQL control schema; if `ControlTablesSettings.ControlSchema` names another schema, grant that one instead) — created under its own A2 block | `SHOW GRANTS` | DMS "MySQL as a target"; "Control table task settings" |
+| ▢ | Task settings `"Logging": {"EnableLogging": true}` (log group `dms-tasks-<instance>`, stream `dms-task-<task resource id>`) | `describe-replication-tasks` → `ReplicationTaskSettings` | DMS "Logging task settings" |
+| ▢ | Reverse endpoints test-connected, TLS mode per dms-best-practices.md | `aws dms test-connection` | — |
+| ▢ | **Reverse task actually run and applying** on the rehearsal pair (execution-runbooks.md §Migration Rehearsal minimum): an INSERT, UPDATE and DELETE on the new side each confirmed on the source-version stand-in, plus CDC-latency alarms on the reverse task (task dimension = ARN suffix) seeing data | row-level evidence + alarm state | — |
+
+Endpoint test-connection alone proves reachability, not apply permission or binlog
+availability. Any unchecked row blocks GATE 4 unless a waiver with an explicit RPO
+acknowledgment is confirmed. At cutover step 8, confirm the task is `running` **and** that a
+post-cutover write has landed on the source before calling rollback "armed".
 
 ### When Reverse Replication is NOT Possible
 
@@ -535,6 +583,17 @@ current and failback loses no data. Rollback sequence:
 > **If reverse replication was NOT set up**, rollback is lossy: every write Aurora accepted
 > after cutover is stranded on Aurora. Only acceptable if you can replay those writes from an
 > application-side log. This is exactly why reverse replication is mandatory above.
+
+### Deviation from an approved block = stop and ask (or abort)
+
+During the window, the approved runbook/A4/A5 blocks are the plan. If any step cannot run
+as approved — a different endpoint than the one approved (live: repointed to the writer
+instead of the approved Proxy because the app could not do TLS), a skipped check, an extra
+grant, a changed order — **stop and ask** (present the deviation as its own block), or
+execute the pre-agreed abort/rollback criteria. Never proceed and record the deviation
+afterwards; an after-the-fact record is a violation (engagement-safety.md §Approvals of
+record), not an approval. A live rollback or re-cutover always needs its A5 (or new A4)
+block presented and accepted in full, even if the customer asked for it in chat.
 
 ### Rollback Decision Criteria
 

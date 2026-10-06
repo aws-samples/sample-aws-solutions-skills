@@ -318,6 +318,41 @@ async function main() {
   await page.update({ ...small, lang: 'en' });
   assert(page.get('risks').innerHTML.includes('Risk register not recorded'));
   assert(page.get('actions').innerHTML.includes('Customer actions have not been recorded'));
+  // Long activity logs: newest 25 entries, the rest behind a "show all (N)" disclosure.
+  const many = Array.from({ length: 472 }, (_, i) => JSON.stringify({ phase: '7.7', title: `ev-${i}`, result: 'success', time: '2026-10-06T00:00:00Z' })).join('\n');
+  const logPage = await mount({ ...small, lang: 'en' }, many);
+  const logHTML = logPage.get('log').innerHTML;
+  const [visible, hidden] = logHTML.split('<details data-key="log-older">');
+  assert.equal((visible.match(/class="entry /g) || []).length, 25, 'newest 25 visible');
+  assert.equal((hidden.match(/class="entry /g) || []).length, 447, 'older entries behind the toggle');
+  assert(visible.indexOf('ev-471') < visible.indexOf('ev-447') && !visible.includes('ev-446<'), 'newest first');
+  assert(hidden.includes('<summary>Show all (472)</summary>'));
+  const logDetails = logPage.get('log').querySelectorAll()[0];
+  logDetails.open = true;
+  await logPage.update({ ...small, lang: 'en' }, many + '\n' + JSON.stringify({ phase: '9', title: 'ev-new', result: 'success' }));
+  assert(logPage.get('log').innerHTML.includes('Show all (473)'));
+  assert.equal(logPage.get('log').querySelectorAll()[0].open, true, 'toggle state preserved across polls');
+  const koLog = await mount({ ...small, lang: 'ko' }, many);
+  assert(koLog.get('log').innerHTML.includes('모두 보기 (472)'));
+  const shortLog = await mount({ ...small, lang: 'en' }, many.split('\n').slice(0, 10).join('\n'));
+  assert(!shortLog.get('log').innerHTML.includes('<details'), 'short logs unchanged');
+  const xss = await mount({ ...small, lang: 'en' }, JSON.stringify({ title: '<img src=x>', result: 'success' }));
+  assert(!xss.get('log').innerHTML.includes('<img'), 'log stays escaped');
+
+  // Post-cutover: an additive `cutover` block replaces the readiness verdict with a completion card.
+  const cut = { ...small, lang: 'en', cutover_ready: true, cutover: { completed_at: '2026-10-06T14:03:01Z',
+    measured_write_pause_seconds: 45.3, target_endpoint: 'db.example.ap-northeast-2.rds.amazonaws.com',
+    rollback_window_ends: '2026-10-13T14:03:00Z', rollback_path_state: 'reverse DMS running, applying' } };
+  const cutPage = await mount(cut, smallLog);
+  assert.equal(cutPage.get('cutover').className, 'cutover done');
+  assert.equal(cutPage.get('verdict-text').textContent, 'Cutover completed');
+  for (const part of ['45.3 s', 'db.example.ap-northeast-2', 'reverse DMS running']) assert(cutPage.get('verdict-sub').textContent.includes(part));
+  const koCut = await mount({ ...cut, lang: 'ko' }, smallLog);
+  assert.equal(koCut.get('verdict-text').textContent, '컷오버 완료');
+  assert(koCut.get('verdict-sub').textContent.includes('45.3초'));
+  const notDone = await mount({ ...small, lang: 'en', cutover: { target_endpoint: 'x' } }, smallLog);
+  assert.equal(notDone.get('cutover').className, 'cutover ' + (small.cutover_ready ? 'ready' : 'notready'), 'no completed_at = readiness card');
+  console.log('PASS long-log toggle (en/ko, newest-first, state preserved, escaped); cutover-completed card (en/ko, additive)');
   const empty = await mount({ phases: [], cutover_gates: [] }, '');
   assert.equal(empty.document.documentElement.lang, 'en');
   console.log(`PASS ${omissions} optional-field omissions; spec examples; en/ko parity; readiness; four-state soak; gaps; compressed soak window; escaping; fetch recovery; legacy logs; disclosure/focus preservation; zero/range costs`);

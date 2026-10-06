@@ -103,10 +103,25 @@ Budget the entire copy/validation outage; in Mode 2 the customer executes this b
 **Total budgeted write-pause: {n}s. End-to-end rehearsal: {measured duration + evidence /
 not measured; do not describe summed component times as a measured full pause}.**
 
+## Post-cutover account cleanup (native binlog replication only)
+
+Source-only accounts created while forward binlog replication ran replicate to the target
+unless created with `SET SESSION sql_log_bin = 0` (execution-runbooks.md §"Native binlog
+replication: accounts you create on the source replicate to the target").
+
+| ▢ | Replicated source-only account on target | Why it exists | Action (destructive — confirm first) | Verify |
+|---|---|---|---|---|
+| ▢ | {e.g. 'soak_ro'@'%' / 'dms_rev'@'%' — or "none: all created with sql_log_bin=0"} | {soak read-only / reverse-CDC writer} | `DROP USER ...` on the target after confirming no target-side use | `SELECT user, host FROM mysql.user` |
+
 ## T+15m / T+1h / T+24h — Watch
 - Error rate {baseline}% → now: __ · p95 latency {baseline}ms → now: __
 - Reverse CDC lag: __ · Missing clients on processlist: __
 - Slow queries → run targeted `ANALYZE TABLE` before suspecting worse.
+
+## Deviation rule (any step that cannot run exactly as approved)
+
+STOP and ask — present the deviation as its own block — or execute the abort criteria below.
+Never proceed and record afterwards. Rollback / re-cutover = A5 / new A4 block accepted in full.
 
 ## Abort / rollback criteria (from cutover-procedures.md — pre-agreed, not negotiable mid-incident)
 | Signal | Action |

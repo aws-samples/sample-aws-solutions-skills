@@ -44,6 +44,7 @@ hard constraint 10.
    and sign-off as it lands. A step without its result written down is not done. **Every
    time you update it, also refresh `dashboard/status.json` and append one line to
    `dashboard/activity-log.jsonl`** (`shared/reference/dashboard.md`) — one habit, not two.
+   `shared/scripts/dashboard_update.py` does all three in one validated, atomic, read-back command — use it instead of hand-editing JSON.
    Mirror phase outcomes, findings, remaining work and evidence; keep risks, cost/timing
    estimates, architecture rationale, and individual gate requirements current using that
    reference's optional schema and population schedule. Mirror each pending ACTION NEEDED
@@ -152,7 +153,8 @@ hard constraint 10.
     must never have to hunt through prose to find what's blocking — every pending approval,
     open question, or unconfirmed `authorizations.md` block goes in this list, nothing
     blocking exists only in prose. Exact format and a worked example in
-    `shared/reference/engagement-safety.md` §Surfacing what's needed from the user.
+    `shared/reference/engagement-safety.md` §Surfacing what's needed from the user. Never
+    write the customer's answer yourself — end the turn with the question.
 13. **A genuine surprise is never saved up for the next gate.** Silence between gates is
     fine for routine, expected work — that's what the autonomous half of the Execution
     model table above is for. But the moment you discover something that contradicts a
@@ -161,7 +163,9 @@ hard constraint 10.
     stale, an alarm that's been watching the wrong metric — say so immediately, in the
     conversation, right then. This applies even inside phases documented as otherwise
     autonomous (Phase 6 included). Waiting for GATE 3 to mention something you noticed
-    during Phase 6 is exactly the failure mode this constraint exists to prevent.
+    during Phase 6 is exactly the failure mode this constraint exists to prevent. Never call
+    anything fixed, proven or armed until the check that would fail if it weren't has passed
+    (e.g. reverse task running AND applying — not "endpoint test OK").
 
 ## Execution model
 
@@ -176,6 +180,8 @@ over as a single copy-paste block and ask for the output).
 | Validation queries, evidence collection, plan updates | Accepting a non-lossless rollback (RPO sign-off) |
 | Retrying transient AWS errors (≤3, backoff) | Quota increases, cross-account access, anything needing other teams |
 
+Routine autonomous prep (drafting runbooks, re-syncing the dashboard, evidence collection)
+does not stop for "may I proceed?" — only the right-hand column asks.
 Silent execution still publishes dashboard progress under hard constraint 1, including
 during assessment, data load, and validation. Phase 7.7 soak retains its daily cadence.
 
@@ -194,7 +200,7 @@ Include setup first; assign work between phases to its owning phase before start
 |---|---|
 | Phase 2 — assessment | Use separate steps for each major check category: blocker scan, inventory/sizing, replication readiness, throughput estimate, and performance baseline. Publish each as `in_progress` as it starts and its concrete findings as it finishes; do not batch the sweep into one end-of-phase update. Populate discovered `migration_objects` totals progressively. |
 | Phase 6 — data load | Publish a step for each table/chunk when the method exposes that granularity, updating observed progress while it loads (e.g. “table 3/4 loading”). As each table finishes, immediately update its `migration_objects.tables.items[]` entry with observed `rows_target` and `status:"loaded"`, and the `loaded` count. For a backup/restore or dump with no incremental telemetry, keep the real load stage `in_progress` and report job state/elapsed time at each check; never fabricate table/chunk progress. |
-| Phase 7 — validation | Publish each table's validation step before its queries run. **As each table's checksum is confirmed, immediately update its `migration_objects.tables.items[]` entry's `checksum_match` and `status:"validated"` and refresh the `validated` count; never batch these updates at the end.** Report per-table progress in `current_activity` and step `detail`. A mismatch is a failed validation, blocks the validation gate, and must not be reported as a successful step. Preserve the existing validation scope and GATE 3 acceptance requirement. |
+| Phase 7 — validation | Publish each table's validation step before its queries run. **As each table's checksum is confirmed, immediately update its `migration_objects.tables.items[]` entry's `checksum_match` and `status:"validated"` and refresh the `validated` count; never batch these updates at the end.** Report per-table progress in `current_activity` and step `detail`. A mismatch is a failed validation, blocks the validation gate, and must not be reported as a successful step. Preserve the existing validation scope and GATE 3 acceptance requirement. Every validation query expected to exceed two minutes (counts, checksums, ad-hoc/app-level checks) runs under the supervisor recipe below. |
 | Phase 7.7 — soak | Keep the scheduled once-daily report/sample updates and 36-hour-overdue detection. These active-work checkpoints add no five-minute soak polling, extra daily samples, or compressed green periods; existing waiver/manual-tracking rules still apply. Concurrent rehearsal uses the active-work cadence without changing soak cadence or overwriting the scheduler's latest data. |
 
 **Why both a transition checkpoint and a supervisor loop:** a live four-table
@@ -493,8 +499,9 @@ if DataSync can't close the gap either, not a method to improvise around). Captu
 **performance baseline** (top-20 statements + plans). Korean-enterprise check runs here.
 Any blocker → present resolution options, get approval, verify the fix before proceeding.
 **Source and target majors differ (e.g. MySQL 8.0 → 8.4)?** Load
-`shared/reference/version-upgrades.md` now (§"MySQL 8.0 → 8.4": auth plugin, an 8.4-capable
-client on the bastion, renamed replication commands/RDS procedures, replication direction).
+`shared/reference/version-upgrades.md` now (§"MySQL 8.0 → 8.4": auth plugin, dump with a
+source-major `mysqldump` but connect with a caching_sha2+TLS-capable client, renamed
+replication commands/RDS procedures, replication direction).
 
 ### Phase 3: Select the method
 
@@ -539,14 +546,19 @@ creating anything, then generate and deploy the CDK project per
 `shared/patterns/cdk-stacks.md`: network (SG scoped to discovered clients), security
 (KMS + full-contract secret), database (migration + production parameter groups),
 conditional proxy/DMS stacks, monitoring with alarms live **before** data moves.
-`cdk synth` must pass; verify volatile facts via MCP.
+`cdk synth` must pass, then the SG-description charset check (`cdk-stacks.md` §scripts/
+contract — ASCII only, even in a Korean session; synth doesn't catch it); verify volatile facts via MCP.
+Alarms (`preflight-iam-cost.md` §4a): all must EXIST before data moves (already-emitting ones
+seeing data); replication/DMS alarms must show datapoints right after their task's first start, before the load proceeds.
 
 ### Phase 6: Execute the migration
 
 Follow the approved method's runbook in `shared/reference/execution-runbooks.md` only.
 Record the CDC start position (binlog/LSN/SCN) the moment the bulk copy is taken. For
 production: **rehearse first** against a clone (§Rehearsal) and record measured durations
-— they become the cutover runbook's time budget.
+— they become the cutover runbook's time budget. "Rehearsed" requires the minimum contents
+in §Migration Rehearsal (freeze→drain→repoint→verify with a measured pause, rollback actually
+exercised); anything skipped is a waiver, never "met".
 
 ### Phase 7: Validate
 
@@ -560,7 +572,8 @@ Per `shared/reference/validation-patterns.md`: row counts (all tables), checksum
 timezone shift, auto-increment high-water marks, aggregate fidelity), read-only smoke
 test, and **application accounts + effective grants + authentication through the intended
 endpoint** (§2.6, mandatory before GATE 3). Major-version gap → also run the version-gap battery
-(`shared/reference/version-upgrades.md`). Paste evidence into the plan.
+(`shared/reference/version-upgrades.md`). Paste evidence into the plan. Before GATE 3, list
+current CloudWatch alarm states (§2.7); any alarm in ALARM is resolved or explained first.
 
 ⛔ **GATE 3** — present the validation evidence table and stop with a standalone ACTION
 NEEDED block; say what each check actually proves and what it does NOT prove (see
@@ -621,7 +634,14 @@ counts, not the agent recording that the periods came up green — write the dat
 that reply lands. Shortening or skipping is a waiver
 (engagement-safety.md §Waiver protocol). **Run the clone rehearsal (Phase 6, §Rehearsal)
 concurrently with this soak, not after it** — they test different things and don't depend
-on each other; don't serialize two independent waits. Soak Lambda accepted? Run
+on each other; don't serialize two independent waits. **Phase 7.7 entry is an
+explicit chat choice — A: soak Lambda stack (recommended) / B: manual `soak_check.py` runs
+(who/when, UTC), both same-engine-family only; C: manual reconciliation for heterogeneous
+pairs (who/when/evidence) — recorded in the plan; never call sampling automatic unless a deployed,
+enabled schedule exists; state the UTC verdict timetable and what wakes the session for each
+verdict — a session cannot self-wake, so never claim a scheduled check-in without a real scheduler** (`engagement-safety.md` §Phase 7.7 entry). Never promise "I'll notify you if
+anything goes wrong" without a confirmed delivery path — name it, or say there is none and
+when the next check happens (`engagement-safety.md` §Surfacing what's needed). Soak Lambda accepted? Run
 `shared/reference/preflight-iam-cost.md` §0b before the first deploy, deploy once, invoke
 its `{"mode":"preflight"}` with the schedule still DISABLED, fix every gap in one change, then
 enable the schedule (`shared/patterns/cdk-stacks.md` §soak-stack.ts) — never redeploy on a guess.
@@ -630,8 +650,9 @@ enable the schedule (`shared/patterns/cdk-stacks.md` §soak-stack.ts) — never 
 
 Both modes first instantiate `shared/templates/cutover-runbook.md` and
 `rollback-runbook.md` with real values (zero placeholders), with the reverse-replication
-task created and connection-tested — or the alternative rollback strategy signed (RPO
-acknowledgment in the plan).
+task created and connection-tested and every row of `cutover-procedures.md` §Reverse-CDC
+prerequisites evidenced (a GATE 4 / A4b precondition) — or the alternative rollback strategy
+signed (RPO acknowledgment in the plan).
 
 **Mode 2 (default) — hand over, do not execute.** Assemble the handover package
 (engagement-safety.md §Mode 2 handover contract): runbook with timings marked *measured*
@@ -658,7 +679,8 @@ and stop to ask whenever one trips.
 ### Phase 9: Post-migration
 
 Per `shared/reference/post-migration.md`: refresh statistics, verify production parameters
-(already applied before Phase 7), scale down, compare against the Phase 2 baseline, keep the source +
+(already applied before Phase 7), scale down, compare against the Phase 2 baseline (required
+table, post-migration.md step 2; IaC drift reconciled, step 11), keep the source +
 reverse replication through the rollback window, then decommission (with constraint 8's
 confirmation). Hand over the CDK project + plan as the customer's operational record. In
 Mode 2 this phase starts **after the customer reports their cutover complete** — offer it

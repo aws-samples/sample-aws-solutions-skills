@@ -25,9 +25,11 @@ python3 -c "import boto3" 2>&1
 # Optional — only affects which source-access path is available; Send-Command
 # (running the client that already exists ON the source/target host via SSM) always
 # works without these, so their absence is never a blocker, just a narrower menu
-mysql --version 2>&1   # 8.4 target: the client must PROVE a TLS + caching_sha2_password login to
-                       # the real target (Oracle MySQL 8.4 client = tested toolchain; a MariaDB 10.5
-                       # client failed this in a dry run) — version-upgrades.md MySQL 8.0 → 8.4
+mysql --version 2>&1      # 8.4 target: must PROVE a TLS + caching_sha2_password login to the real
+                          # target (an 8.0.x Oracle MySQL client does; a MariaDB 10.5 client failed)
+mysqldump --version 2>&1  # DUMP client major must match the SOURCE (8.0.x for an 8.0 source):
+                          # mysqldump 8.4 --source-data sends SHOW BINARY LOG STATUS -> ERROR 1064 on
+                          # 8.0. Don't install an 8.4 client to dump an 8.0 source — version-upgrades.md
 psql --version 2>&1
 ```
 
@@ -120,9 +122,28 @@ aws service-quotas get-service-quota --service-code rds --quota-code L-7B6409FD 
   --query 'Quota.Value'
 # CDK bootstrapped? (only if deploying the CDK project)
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].StackStatus' 2>/dev/null
+# Host automation that can REBOOT the source / migration host / app hosts mid-job
+# (live: the account's SSM patch association patched and rebooted every newly registered
+# managed host ~10 min after registration, killing in-progress work):
+for id in $SOURCE_INSTANCE_ID $MIGRATION_HOST_ID $APP_INSTANCE_IDS; do
+  aws ssm describe-instance-associations-status --instance-id "$id" \
+    --query 'InstanceAssociationStatusInfos[].[Name,AssociationName,Status,ExecutionDate]' --output table
+done
+aws ssm list-associations --query 'Associations[].[Name,AssociationName,ScheduleExpression,Targets]' --output json
+aws ssm describe-maintenance-windows --query 'WindowIdentities[].[WindowId,Name,Schedule,Enabled]' --output table
+aws ssm describe-patch-baselines --filters Key=OWNER,Values=Self --query 'BaselineIdentities[].[BaselineName,DefaultBaseline]' --output table
 ```
 
 Report results as a table: ✅/❌ per check. Any ❌ → present the fix, wait for the user.
+**Host patch/reboot automation:** record every association, maintenance window and patch
+baseline that targets the source, the migration host or app hosts (including tag- or
+resource-group targets that a host joins when it registers). Ask the customer to suspend
+them or schedule around the migration window (seed, CDC catch-up, rehearsal, cutover) — a
+customer-side change, never one the agent makes. For on-prem/other-cloud hosts, ask about
+their patch tooling (WSUS, yum-cron/dnf-automatic, unattended-upgrades, vendor agents).
+Long-running jobs must be **resumable** regardless (recorded binlog coordinates, per-table
+chunks, supervisor that can re-attach): a reboot mid-load is then a restart of one step, not
+of the migration.
 **CDK bootstrap specifically** is a fix the agent can offer, not just report — but it is a
 real infrastructure deploy into the account (an S3 bucket, IAM roles, an ECR repo), so it
 falls under action class **A3** (`engagement-safety.md` §Action classes) like any other
@@ -209,10 +230,17 @@ On the target, enable at provisioning time (all are in the CDK stacks —
 [../patterns/cdk-stacks.md](../patterns/cdk-stacks.md)):
 
 - **Performance Insights** (retention ≥ 7 days) + **Enhanced Monitoring** (60s).
-- **CloudWatch alarms**: `CPUUtilization` > 80%, `FreeableMemory` < 10%, 
+- **CloudWatch alarms**: `CPUUtilization` > 80%, `FreeableMemory` < 10% of the instance
+  class memory **in bytes** (the metric's unit is Bytes — a literal `10` never fires; the
+  threshold is a byte count: GiB of the class × 1024³ × 0.10, e.g. `db.r6g.large` 16 GiB →
+  `1717986918`; take the GiB from the instance-class table or
+  `aws ec2 describe-instance-types --instance-types r6g.large --query 'InstanceTypes[0].MemoryInfo.SizeInMiB'`
+  (MiB × 1024² × 0.10) and record the computed number in constants.ts),
   `DatabaseConnections` > 80% of `max_connections`, `ReadLatency`/`WriteLatency` > 20 ms,
   `AuroraReplicaLag` > 1000 ms, and during migration `CDCLatencySource`/`CDCLatencyTarget`
-  > 30 s on the DMS task → SNS topic the operator actually watches during cutover.
+  > 30 s on the DMS task → SNS topic the operator actually watches during cutover. DMS
+  dimensions: `ReplicationTaskIdentifier` = the task's **resource id** — the last `:` segment of its ARN (`arn:aws:dms:<region>:<acct>:task:CPSTBQCAAFB67LEICTHDNETPSU` → `CPSTBQCAAFB67LEICTHDNETPSU`), **not** the friendly task name; `ReplicationInstanceIdentifier` = the friendly instance identifier (the friendly name matches zero datapoints → the alarm is
+  `INSUFFICIENT_DATA` forever).
 - **Mandatory replication-stall alarm alongside the positive-lag threshold:** for
   RDS MySQL/MariaDB native replicas, alarm on **`ReplicaLag < 0`**. A `-1` is a real
   datapoint (replication inactive or lag unavailable), not healthy zero and not missing
@@ -228,6 +256,44 @@ On the target, enable at provisioning time (all are in the CDK stacks —
   `0, 0, -1, 0` breaches the stall rule (do not average away or clamp negative values).
   DMS paths retain their CDC-latency and task/error-state monitoring separately.
 - **Log exports** to CloudWatch (error/slowquery/audit as the engine provides).
+
+### 4a. Alarm readiness — ONE rule, two checkpoints
+
+Live: a run deployed only RDS alarms and no DMS alarms at all — and with the friendly task
+name as dimension they would have been `INSUFFICIENT_DATA` forever. The rule:
+
+1. **Before Phase 6 moves any data:** every alarm the plan requires (the §4 set for the
+   chosen method, including the DMS/replication ones) **exists**, points at the right
+   dimensions (DMS task = ARN resource-id suffix), and feeds a topic with a confirmed
+   subscription. Alarms on resources that already emit — the target instance/cluster, the
+   DMS replication instance, the source host — must also be **not `INSUFFICIENT_DATA`** with
+   recent datapoints.
+2. **Immediately after the authorized first start of each replication channel** (forward
+   DMS task / native binlog channel; later the reverse task, at rehearsal and at cutover
+   step 8): its lag/state alarms must show datapoints with the alarm's own dimensions
+   **before the load proceeds further** (seed + CDC: before the next table/phase step;
+   cutover: before repointing). A replication alarm can't have data before its task first
+   runs — that is why it is checked here, not at step 1, and why it is never skipped.
+
+Re-check both before the soak starts. The snippet below lists required alarms, their
+state, and the datapoint count for one DMS metric:
+
+```bash
+REQUIRED="${PREFIX}-target-cpu ${PREFIX}-target-freeable-memory ${PREFIX}-dms-cdc-latency-source ${PREFIX}-dms-cdc-latency-target"
+aws cloudwatch describe-alarms --region "$REGION" --alarm-names $REQUIRED   --query 'MetricAlarms[].[AlarmName,StateValue,MetricName,join(`,`, Dimensions[].join(`=`,[Name,Value]))]' --output table
+for a in $REQUIRED; do   # missing alarm = not in the output
+  aws cloudwatch describe-alarms --region "$REGION" --alarm-names "$a" --query 'length(MetricAlarms)' --output text     | grep -qx 1 || echo "MISSING: $a"
+done
+# Recent datapoints for one DMS metric with the exact alarm dimensions (task = ARN suffix):
+aws cloudwatch get-metric-statistics --region "$REGION" --namespace AWS/DMS --metric-name CDCLatencyTarget   --dimensions Name=ReplicationInstanceIdentifier,Value="$DMS_INSTANCE_ID" Name=ReplicationTaskIdentifier,Value="${TASK_ARN##*:}"   --start-time "$(date -u -d '30 minutes ago' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" --period 300 --statistics Maximum   --query 'length(Datapoints)'
+```
+
+Record the table in the plan. At checkpoint 1 a missing alarm, or an `INSUFFICIENT_DATA`
+alarm on an already-emitting resource, blocks Phase 6; at checkpoint 2 zero datapoints with
+the alarm's own dimensions stops the load from proceeding (fix the alarm/dimension,
+re-check) — never run a data move on an unwatched pipeline. Also
+confirm the SNS topic has a **confirmed** subscription for the people who must act
+(`aws sns list-subscriptions-by-topic` — `PendingConfirmation` delivers nothing).
 
 First-24-hours watchlist after cutover: [validation-patterns.md](validation-patterns.md)
 §Monitoring Checklist.

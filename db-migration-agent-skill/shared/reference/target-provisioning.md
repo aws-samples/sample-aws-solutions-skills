@@ -91,6 +91,25 @@ aws rds register-db-proxy-targets \
   --db-cluster-identifier your-aurora-cluster
 ```
 
+🔴 **One `--auth` entry per account that logs in through the Proxy** — the example above
+registers a single secret; list every application/service/job account's own secret
+(`[{"AuthScheme":"SECRETS","SecretArn":"<app1>","IAMAuth":"DISABLED","ClientPasswordAuthType":"MYSQL_NATIVE_PASSWORD"}, {…app2…}]`),
+with `ClientPasswordAuthType` matching that account's plugin (`MYSQL_NATIVE_PASSWORD` for
+`mysql_native_password`, `MYSQL_CACHING_SHA2_PASSWORD` for `caching_sha2_password`; PostgreSQL
+`POSTGRES_SCRAM_SHA_256`/`POSTGRES_MD5`). RDS Proxy needs "a separate Secrets Manager secret for
+each database user account that the proxy connects to"; an unregistered account gets
+`ERROR 1045` through the Proxy while direct login works (live, cutover-blocking). Each secret
+holds that account's `username`/`password`; the proxy role needs `GetSecretValue` (and
+`kms:Decrypt` for a CMK) on every one. CDK: `cdk-stacks.md` §proxy-stack.ts (the L2's
+`clientPasswordAuthType` is one value for all secrets — override per entry on the L1 for mixed
+plugins). Phase 7 §2.6 then authenticates as each account through the Proxy endpoint.
+
+**GATE 2 check — app TLS capability vs `requireTLS`:** with `requireTLS: true` (or
+`require_secure_transport=ON`), every client must connect with TLS. Confirm each app's driver
+and effective config can (and will) use TLS before choosing the Proxy endpoint as the
+cutover target; a non-TLS app is a finding to resolve before GATE 2, never a mid-window
+endpoint switch (live deviation).
+
 Then point clients at the **proxy endpoint** (`your-app-proxy.proxy-xxxx.<region>.rds.amazonaws.com`) in Phase 7.5/8, not the cluster endpoint. PostgreSQL: use `--engine-family POSTGRESQL`. (RDS Proxy requires the target to be RDS/Aurora — it's a target-side construct, so it works for EC2→RDS even though the *source* can't be proxied.)
 
 ### Parameter Mapping (source snapshot → target parameter groups)

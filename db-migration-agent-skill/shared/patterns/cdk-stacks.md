@@ -63,6 +63,19 @@ new rds.SubnetGroup(this, 'DbSubnets', { vpc,
 Pitfalls: `Vpc.fromLookup` needs `env: { account, region }` set on the stack (no
 env-agnostic synth); DMS needs its own SG allowed **into both** the source SG and `dbSg`.
 
+🔴 **Pitfall — EC2 security-group descriptions are a restricted charset, checked only at
+DEPLOY time (hit by both live runners).** A security group's `GroupDescription` and every
+ingress/egress **rule** `Description` accept only `a-z A-Z 0-9`, space and
+`. _ - : / ( ) # , @ [ ] + = & ; { } ! $ *`, up to 255 characters (EC2 API
+`CreateSecurityGroup` / `IpRange`). `cdk synth` passes; `cdk deploy` then fails with
+`Invalid rule description ... a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*` and rolls the stack back.
+Live offenders: an ASCII arrow `'DMS -> target DB'` (the `>`), `<`, `→`, em dashes `—`,
+quotes, and Korean text. **This applies in a Korean-language session too**: chat, plan and
+dashboard prose follow the user's language; SG/rule descriptions stay plain ASCII from that
+set (`'DMS to target DB'`, `'app client sg-0abc'`). The L2 default `GroupDescription` is
+the construct path, so keep construct ids/stack names ASCII as well. Before every
+`cdk deploy`, after `cdk synth`, run the check in §scripts/ contract (`02-deploy.sh`).
+
 ## security-stack.ts
 
 ```typescript
@@ -194,32 +207,82 @@ const instance = new dms.CfnReplicationInstance(this, 'DmsInstance', {
   replicationSubnetGroupIdentifier: subnetGrp.ref,
   vpcSecurityGroupIds: [dmsSg.securityGroupId], publiclyAccessible: false });
 
+// verify-ca / verify-full need the CA imported into DMS (Ref = the certificate ARN). import * as fs from 'fs';
+// Source (self-managed MySQL): the server's CA file — SHOW GLOBAL VARIABLES LIKE 'ssl_ca'
+// (auto-generated installs: ca.pem in the datadir). Public cert only; never ca-key.pem.
+// Target (RDS/Aurora): the RDS CA bundle for the region (shared/assets/rds-global-bundle.pem
+// covers every region; the regional bundle is truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem).
+const sourceCa = new dms.CfnCertificate(this, 'SourceCa', {
+  certificatePem: fs.readFileSync(constants.SOURCE_CA_PEM_PATH, 'utf8') });
+const targetCa = new dms.CfnCertificate(this, 'TargetCa', {
+  certificatePem: fs.readFileSync(constants.RDS_CA_BUNDLE_PATH, 'utf8') });
+
 const sourceEp = new dms.CfnEndpoint(this, 'SourceEp', { endpointType: 'source',
   engineName: constants.SOURCE_ENGINE, serverName: constants.SOURCE_HOST,
   port: constants.DB_PORT, databaseName: constants.DB_NAME,
-  sslMode: 'verify-ca', certificateArn: constants.SOURCE_DMS_CA_CERTIFICATE_ARN,
+  // MySQL-family endpoints: 'none' | 'verify-ca' | 'verify-full' ONLY — 'require' is
+  // rejected at deploy ("The require SSL mode is not supported by the 'mysql' engine").
+  sslMode: 'verify-ca', certificateArn: sourceCa.ref,
   mySqlSettings: {
     secretsManagerAccessRoleArn: constants.DMS_SECRET_ACCESS_ROLE_ARN,
     secretsManagerSecretId: constants.SOURCE_DMS_SECRET_ARN,
   } });
-// target endpoint analogous, pointing at cluster endpoint
+// target endpoint analogous, pointing at cluster endpoint, certificateArn: targetCa.ref,
+// sslMode 'verify-full' (RDS endpoint names match the RDS CA-issued server certificate)
 
+// CloudWatch: AWS/DMS task metrics use ReplicationTaskIdentifier = the task's RESOURCE ID
+// (Fn.select(6, Fn.split(':', task.ref)) — CfnReplicationTask's Ref/attrReplicationTaskArn is
+// the ARN; there is no resource-id attribute) plus ReplicationInstanceIdentifier = the friendly
+// instance id. Build the CDCLatencySource/Target alarms (preflight-iam-cost.md §4) from those.
 // FORWARD task (full-load-and-cdc) AND REVERSE task (cdc, created stopped) — the reverse
 // task is part of the plan, not an afterthought. Task settings JSON from
 // ../reference/dms-best-practices.md; table mappings from constants.
 ```
 
 This endpoint example is MySQL-specific: use the corresponding engine settings property
-for other engines. Use CA-verified TLS (`verify-ca` here, `verify-full` where supported)
-and the appropriate imported CA certificate on both endpoints. Verify engine/version
-support; any weaker mode needs explicit approval, never default to `none`. Use Secrets Manager references,
+for other engines. **AWS DMS supports only `none`, `verify-ca` and `verify-full` for
+MySQL/MariaDB/Aurora MySQL endpoints — `require` is "Not supported"** (DMS User Guide,
+"Using SSL with AWS DMS") and fails the stack at deploy, after synth passed. Use
+`verify-ca` for a self-managed source whose certificate is the engine's auto-generated one
+(its CN does not match the hostname, so `verify-full` fails) and `verify-full` for an
+RDS/Aurora target; both need the imported CA (`CfnCertificate` above, or
+`aws dms import-certificate`). `none` is not only weaker: a target with
+`require_secure_transport=ON` rejects it (MySQL error 3159). Any weaker mode needs explicit
+approval, never default to `none`. Use Secrets Manager references,
 never plaintext passwords in constants or synthesized templates. Test both endpoints post-deploy in
 `scripts/01-precondition-check.sh` via `aws dms test-connection`.
 
 ## proxy-stack.ts (conditional) / monitoring-stack.ts
 
-Proxy: `rds.DatabaseProxy` with `requireTLS: true`, secret-based auth, the app SGs allowed
-in — output the proxy endpoint; Phase 8 points clients at it. Monitoring: the alarm set
+Proxy: `rds.DatabaseProxy` with `requireTLS: true`, the app SGs allowed in — output the
+proxy endpoint; Phase 8 points clients at it.
+
+🔴 **Register EVERY account that will log in through the Proxy — not just the admin
+secret.** RDS Proxy authenticates clients only against the secrets in its auth list ("a
+separate Secrets Manager secret for each database user account that the proxy connects
+to"); an application account without its own registered secret gets `ERROR 1045 Access
+denied` through the Proxy while a direct login works (live: cutover-blocking, caught only by
+the Phase 7 §2.6 check). Each entry's client auth type must match that account's
+authentication plugin: `MYSQL_NATIVE_PASSWORD` for `mysql_native_password`,
+`MYSQL_CACHING_SHA2_PASSWORD` for `caching_sha2_password` (CDK `rds.ClientPasswordAuthType`;
+CloudFormation `AuthFormat.ClientPasswordAuthType`). The CDK L2 prop
+`clientPasswordAuthType` applies **one** value to every secret, so either keep all
+Proxy-facing accounts on one plugin, or override the per-entry value on the L1:
+
+```typescript
+const proxy = new rds.DatabaseProxy(this, 'Proxy', {
+  proxyTarget: rds.ProxyTarget.fromInstance(db),           // fromCluster(cluster) for Aurora
+  secrets: [adminSecret, ...appAccountSecrets],            // one secret per login account (Phase 7 §2.6 list)
+  vpc, securityGroups: [proxySg], requireTLS: true,
+  clientPasswordAuthType: rds.ClientPasswordAuthType.MYSQL_NATIVE_PASSWORD,  // = the accounts' plugin
+});
+// Mixed plugins: Auth entries follow the `secrets` order — e.g. entry 1 is caching_sha2:
+// (proxy.node.defaultChild as rds.CfnDBProxy).addPropertyOverride('Auth.1.ClientPasswordAuthType', 'MYSQL_CACHING_SHA2_PASSWORD');
+```
+
+An account added later (Phase 7.5) needs its secret added here and a redeploy before
+cutover. Phase 7 then authenticates as **each** application account through the Proxy
+endpoint (`validation-patterns.md` §2.6), not only directly. Monitoring: the alarm set
 from [../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4 + a
 dashboard with source-vs-target panels during the migration window, all → one SNS topic.
 
@@ -336,6 +399,9 @@ export interface SoakStackProps extends StackProps {
   tables: string[];
   checksumTables?: string[];
   alarmNames?: string[];
+  /** taskId = the task's RESOURCE ID (CloudWatch ReplicationTaskIdentifier dimension), NOT the
+   *  friendly task name: Fn.select(6, Fn.split(':', task.ref)) — Ref is the task ARN.
+   *  replicationInstanceId = the friendly instance identifier. */
   dms?: { taskId?: string; replicationInstanceId?: string; taskArn?: string };
   mysqlReplicaStatusSide?: 'source' | 'target';
   pgReplicationLagSide?: 'source' | 'target';
@@ -349,10 +415,19 @@ export interface SoakStackProps extends StackProps {
    *  'docker': CDK bundles in public.ecr.aws/sam/build-python3.12 (needs Docker + network). */
   bundling?: 'prebuilt' | 'docker';
   assetPath?: string;                   // default 'lambda/soak-check'
-  /** Default false: the schedule deploys DISABLED (a rate() schedule with no StartDate
-   *  fires immediately — before DB users, dashboard files, or a passing preflight exist).
-   *  Flip to true only after preflight is ok, then redeploy (template stays the truth). */
+  /** Default false: the schedule deploys DISABLED — enabled, its next 23:30 UTC run would
+   *  fire before DB users, dashboard files, or a passing preflight exist. Flip to true only
+   *  after preflight is ok, then redeploy (template stays the truth). */
   scheduleEnabled?: boolean;
+  /** Lambda timeout. Default 900 (the Lambda maximum; you pay only for actual duration).
+   *  Size from a measured COUNT/checksum of the largest table — see "Sizing" below. */
+  functionTimeoutSeconds?: number;
+  /** Per-statement DB read timeout inside the function. Default 300. */
+  dbQueryTimeoutSeconds?: number;
+  /** Watermark-bounded comparison under live writes (soak_check_lambda.py WATERMARK_DEFAULTS):
+   *  pkMargin default 10000 keys; timestampColumns {table: column} bound those tables by
+   *  `column <= source NOW() - ageMinutes` (default 15) instead of the PK. */
+  watermark?: { enabled?: boolean; pkMargin?: number; timestampColumns?: Record<string, string>; ageMinutes?: number };
 }
 
 // Same normalization as soak_check_lambda.py's _engine_family() — keep in sync.
@@ -443,9 +518,9 @@ export class SoakStack extends Stack {
     const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
       runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
       handler: 'soak_check_lambda.handler', code,
-      // 300s: a normal run scans every table on both sides sequentially (each query bounded by
-      // a 25s read timeout); preflight budgets itself against the remaining time anyway.
-      timeout: Duration.seconds(300), memorySize: 256,
+      // 900s default: full scans of ~100M-row tables (source and target run concurrently,
+      // tables sequentially) needed ~900s live. Preflight budgets itself against the remaining time.
+      timeout: Duration.seconds(props.functionTimeoutSeconds ?? 900), memorySize: 256,
       logGroup,
       vpc, vpcSubnets: { subnets }, securityGroups: [sg],
       environment: {
@@ -469,6 +544,11 @@ export class SoakStack extends Stack {
         SOURCE_TLS_SKIP_VERIFY: `${source.tlsSkipVerify ?? false}`,
         TARGET_TLS_SKIP_VERIFY: `${target.tlsSkipVerify ?? false}`,
         N_TOTAL: `${props.nTotal}`,
+        DB_QUERY_TIMEOUT_SECONDS: `${props.dbQueryTimeoutSeconds ?? 300}`,
+        WATERMARK_ENABLED: `${props.watermark?.enabled ?? true}`,
+        WATERMARK_PK_MARGIN: props.watermark?.pkMargin !== undefined ? `${props.watermark.pkMargin}` : '',
+        WATERMARK_TIMESTAMP_COLUMNS: props.watermark?.timestampColumns ? JSON.stringify(props.watermark.timestampColumns) : '',
+        WATERMARK_AGE_MINUTES: props.watermark?.ageMinutes !== undefined ? `${props.watermark.ageMinutes}` : '',
         DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
       },
     });
@@ -499,9 +579,14 @@ export class SoakStack extends Stack {
     const schedule = new scheduler.CfnSchedule(this, 'SoakDailySchedule', {
       state: props.scheduleEnabled ? 'ENABLED' : 'DISABLED',
       flexibleTimeWindow: { mode: 'OFF' },
-      scheduleExpression: 'rate(1 day)',   // Phase 7.7 cadence is daily
+      // Soak verdicts are per UTC CALENDAR day: run once near the end of each UTC day.
+      // (rate(1 day) fires relative to enable time, so its runs straddle two UTC days.)
+      scheduleExpression: 'cron(30 23 * * ? *)',
+      scheduleExpressionTimezone: 'UTC',
       target: {
         arn: soakFn.functionArn, roleArn: schedulerRole.roleArn,
+        // Pins the verdict to the scheduled UTC day even if a retry finishes after 00:00.
+        input: JSON.stringify({ scheduled_time: '<aws.scheduler.scheduled-time>' }),
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 3600 },
         deadLetterConfig: { arn: soakDlq.queueArn },
       },
@@ -562,7 +647,11 @@ new SoakStack(app, `${constants.PREFIX}-SoakStack`, {
   targetDbInstanceId: constants.TARGET_DB_INSTANCE_ID,                  // '' / omit for Aurora
   tables: constants.SOAK_TABLES, checksumTables: constants.SOAK_CHECKSUM_TABLES,
   alarmNames: constants.SOAK_ALARM_NAMES,
-  dms: constants.SOAK_DMS,                       // omit entirely for binlog/native replication
+  // omit `dms` entirely for binlog/native replication. taskId is the ARN's resource-id suffix
+  // (import { Fn } from 'aws-cdk-lib'; forwardTask = the migration-stack CfnReplicationTask):
+  dms: { taskArn: migrationStack.forwardTask.ref,                                  // Ref = task ARN
+         taskId: Fn.select(6, Fn.split(':', migrationStack.forwardTask.ref)),      // arn:aws:dms:r:a:task:<ID>
+         replicationInstanceId: constants.DMS_INSTANCE_ID },                       // friendly instance id
   mysqlReplicaStatusSide: constants.SOAK_MYSQL_REPLICA_STATUS_SIDE,      // omit if n/a
   customerTestSuiteProvided: constants.CUSTOMER_TEST_SUITE_PROVIDED,   // Q18
   nTotal: constants.SOAK_N_TOTAL,
@@ -579,6 +668,33 @@ verify-full); set it to the actual CA file for an on-prem self-signed/private-CA
 `tlsSkipVerify: true` only when that CA file genuinely can't be retrieved (see
 execution-runbooks.md §Soak automation). Import the bastion's SG by ID with
 `mutable: false` — never add ingress rules on the DB SGs from here.
+
+### Live writes and sizing — watermark comparison, timeouts
+
+Under live application writes a whole-table source-vs-target `COUNT(*)`/checksum is RED
+every day from replication lag alone (confirmed live). Both soak scripts therefore compare,
+per table with a single-column integer PK, only rows with `pk <= min(source MAX(pk),
+target MAX(pk)) - pkMargin` (default 10000 keys — set it above peak inserts/s × the 30 s
+lag threshold × 2), or `column <= source NOW() - ageMinutes` for tables listed in
+`watermark.timestampColumns` (same date/time type required on both sides; NULL rows of a
+nullable column are compared explicitly); the tail beyond is reported as `detail.row_count.<t>.tail_rows`
+(informational, never a failure). Tables without such a key fall back to the whole-table
+comparison and say so in `detail.*.<t>.note`. A mismatch below the watermark stays RED
+(it can be a lost row, or an UPDATE/DELETE of an old row still in flight — review it).
+Preflight's `*_db_watermark <table>` rows show which mode each table will use.
+
+Timeouts: source and target queries run concurrently, tables sequentially. Measure the
+largest checksum table's bounded COUNT + checksum on the target during Phase 7 and set
+`functionTimeoutSeconds` ≥ 1.5 × the sum over all tables (default 900 = the Lambda
+maximum; a ~100M-row table needed ~900 s live) and `dbQueryTimeoutSeconds` ≥ 1.5 × the
+slowest single statement (default 300). If the total cannot fit in 900 s, reduce the
+per-run scope — checksum only the critical tables (`checksumTables`) and row-count the
+rest — or, for
+very large engagements, run the standalone `shared/scripts/soak_check.py` from the
+migration host (no 900 s ceiling; `batch_timeout_seconds`). **Sharding the tables across
+several soak stacks/functions is unsupported:** each run replaces the whole day entry in
+`status.json`, so shards overwrite each other's results. Never silently drop tables from
+the soak.
 
 ### Network — the Lambda reaches AWS APIs only through its subnets
 
@@ -597,9 +713,21 @@ don't add them silently (this stack deliberately creates none).
 
 ### Deploy-once workflow (preflight mode) — never redeploy on a guess
 
-The schedule deploys **DISABLED** (`scheduleEnabled` defaults to false): a `rate(1 day)`
-schedule with no start date fires right after creation — before the read-only DB users
-exist, the dashboard files are uploaded, or preflight has passed.
+The schedule deploys **DISABLED** (`scheduleEnabled` defaults to false): enabled, it would
+fire at the next 23:30 UTC whether or not the read-only DB users exist, the dashboard files
+are uploaded, or preflight has passed.
+
+**Why `cron(30 23 * * ? *)` in `UTC`, not `rate(1 day)`:** each soak verdict is for one
+**UTC calendar day** (`soak.days[].date`, the green streak, the 36-hour-overdue banner). A
+`rate(1 day)` schedule fires relative to whenever it was enabled (e.g. 18:37Z), so "day 1"
+mixes two UTC days and agents try to anchor it with `StartDate` (which must then be
+`yyyy-MM-ddTHH:mm:ss.SSSZ`, in UTC — a live deploy failed on the format). The cron form needs
+no `StartDate`: it runs near the end of every UTC day (EventBridge Scheduler
+`scheduleExpressionTimezone: 'UTC'`), and the target input passes
+`<aws.scheduler.scheduled-time>` so a retry or long run finishing after 00:00 UTC is still
+recorded against the day it checked. State the resulting timetable in chat (Phase 7.7):
+first verdict = the first 23:30 UTC after enabling; a day whose 23:30 run is the first one
+only covers the hours since enabling — say so, or count from the next full UTC day.
 
 1. `cdk synth` → `cdk deploy` **once** (schedule DISABLED).
 2. Create the read-only DB users (§Dedicated read-only DB credentials) and upload the initial
@@ -690,10 +818,7 @@ relative paths silently 403). It signs for the bucket's **actual** region (detec
 S3; `--region` must match it), then GETs every URL and refuses to print the customer link
 unless all return HTTP 200 — a URL signed for the wrong region fails with
 `AuthorizationQueryParametersError` while the script's own upload still succeeds, which is
-how this bug shipped once. Read its credential-longevity caveat first: for a 3- or 7-day
-soak, sign with a throwaway IAM user's long-term access key (with `kms:Decrypt` +
-`kms:GenerateDataKey` on the key if the bucket uses a CMK), not a temporary/SSO session.
-Sign for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
+how this bug shipped once. Signing credentials cap every link: with temporary credentials (a role/SSO/instance session) a link dies when that session does, whatever `--expires-seconds` says — the script detects this and prints the **effective** expiry; tell the customer that time and **re-issue on demand** (re-run the script) by default. A dedicated signing IAM user is the exception, proposed only when a longer link is genuinely needed, behind its own A3 block (script docstring) — never suggest long-term keys casually. With credentials that do last, sign for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
 tier and `302400` (3.5 days) for the 3-day tier. Plan **648000 seconds (7.5 days) of
 coverage** for the 7-day tier, but never request a single S3 signature that long: SigV4
 rejects expiries over `604800` seconds. Issue with `--expires-seconds 604800`, renew by
@@ -724,7 +849,8 @@ choice for a short, low-stakes engagement.
 
 ## scripts/ contract
 
-Each script is idempotent, `set -euo pipefail`, reads identifiers from `cdk` outputs
+Each script is idempotent, `set -euo pipefail`, non-interactive (no `read` prompts — a
+headless session hangs on them; confirmations happen in chat), reads identifiers from `cdk` outputs
 (`aws cloudformation describe-stacks --query ...Outputs`), and refuses to run if the
 previous stage's completion marker is absent in `migration-plan.md`. `05-cutover.sh` and
 `06-rollback.sh` are generated from the runbook templates
@@ -732,7 +858,25 @@ previous stage's completion marker is absent in `migration-plan.md`. `05-cutover
 [../templates/rollback-runbook.md](../templates/rollback-runbook.md)) with real values —
 no placeholders left at generation time.
 
+`02-deploy.sh` runs `cdk synth` and then this **security-group description check** before
+any `cdk deploy` (see the network-stack pitfall — synth does not catch it):
+
+```bash
+python3 -c 'import json,glob,re,sys;ok=re.compile(r"[a-zA-Z0-9. _\-:/()#,@\[\]+=&;{}!$*]{0,255}");bad=[(f,k,v) for f in glob.glob("cdk.out/*.template.json") for k,r in json.load(open(f)).get("Resources",{}).items() for v in ([r.get("Properties",{}).get("GroupDescription")]+[x.get("Description") for x in r.get("Properties",{}).get("SecurityGroupIngress",[])+r.get("Properties",{}).get("SecurityGroupEgress",[])] if r.get("Type")=="AWS::EC2::SecurityGroup" else [r.get("Properties",{}).get("Description")] if r.get("Type") in ("AWS::EC2::SecurityGroupIngress","AWS::EC2::SecurityGroupEgress") else []) if isinstance(v,str) and not ok.fullmatch(v)];[print("INVALID SG description:",*b) for b in bad];sys.exit(1 if bad else 0)'
+```
+
+It exits non-zero and names the template, logical id and offending text; fix the string in
+code (ASCII from the allowed set), re-synth, re-check. Token-valued descriptions (e.g.
+`Fn::Join`) are not strings in the template and are skipped — keep those to ASCII literals.
+
 ## Post-stabilization changes (the CDK project owns day-2)
+
+- **No silent IaC drift.** Every ad-hoc resource or configuration change made outside this
+  app during the engagement (a helper EC2, RDS parameter changes, `binlog retention hours`,
+  Proxy auth fixes, extra alarms or SG rules) is either back-ported here — then `cdk diff`
+  is clean — or recorded in the plan as drift with an owner and a reconcile step before
+  handover / Phase 9. Non-CloudFormation settings (`CALL mysql.rds_set_configuration(...)`)
+  go in the README's post-deploy steps.
 
 - Verify production parameters remain active; the swap/reboot occurs before validation/soak.
 - Scale writer down to steady-state instance type.

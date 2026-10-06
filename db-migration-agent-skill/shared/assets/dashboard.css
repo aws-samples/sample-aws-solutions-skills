@@ -52,6 +52,9 @@ h1{font-size:24px;font-weight:800;margin:0;letter-spacing:-.01em}
 .cutover{border-radius:16px;padding:18px 20px;margin-bottom:22px;border:1px solid var(--border)}
 .cutover.ready{background:linear-gradient(135deg,rgba(16,185,129,.14),rgba(16,185,129,.04));
   border-color:rgba(16,185,129,.45)}
+.cutover.done{background:linear-gradient(135deg,rgba(59,130,246,.12),rgba(59,130,246,.03));border-color:rgba(59,130,246,.35)}
+.cutover.done .verdict .dot{background:#3b82f6;box-shadow:0 0 0 4px rgba(59,130,246,.18)}
+#log details>summary{cursor:pointer;font-size:12px;color:var(--ink-s);padding:8px 0}
 .cutover.notready{background:linear-gradient(135deg,rgba(224,145,59,.10),rgba(224,145,59,.03));
   border-color:rgba(224,145,59,.35)}
 .cutover .verdict{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:800;margin-bottom:4px}

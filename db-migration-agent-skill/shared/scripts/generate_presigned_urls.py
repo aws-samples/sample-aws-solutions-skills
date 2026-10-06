@@ -21,44 +21,41 @@ cdk-stacks.md §soak-stack.ts for the bucket + upload step). It does two things:
    an unconditional 403, not a stale-but-working fetch. Every sub-resource the page loads
    must carry its OWN presigned query string, embedded absolute, not left relative.
 
-⚠️ CREDENTIAL-LONGEVITY CAVEAT (real AWS behavior, confirmed while building this) — a
-presigned URL can never outlive the credentials used to SIGN it, no matter what Expires
-value you pass. Temporary/STS credentials (an assumed role, an EC2/Lambda execution role,
-an SSO session) typically live 1-12 hours; asking for `--expires-seconds 604800` (7 days)
-with those credentials produces a URL whose querystring claims 7-day validity but which
-actually stops working the moment the underlying STS session expires — with a confusing
-SignatureDoesNotMatch/ExpiredToken, not a clean "expired" message. The only credential type
-that genuinely supports the full SigV4 604800s (7-day) ceiling is a long-term IAM user
-access key. For any 3- or 7-day soak tier:
-  1. Create a throwaway IAM user scoped to `s3:GetObject` AND `s3:PutObject` on this
-     bucket only (never wider — no console access, no other bucket), at soak start. Both
-     actions are genuinely required: this script presigns GETs for the customer's link,
-     but it also RE-UPLOADS (`PutObject`) the rewritten `index.html` itself (see
-     `materialize_index_html` below) — a user scoped to `GetObject` only can presign the
-     sub-resource URLs but the script's own final `put_object` call for `index.html` will
-     fail with AccessDenied. This is a real, minimum-necessary requirement, not scope
-     creep — don't narrow it back to `GetObject`-only to look more least-privilege; that
-     just breaks the script. If the bucket is encrypted with a customer-managed KMS key
-     (SSE-KMS with a CMK, not SSE-S3/aws-managed), the same user ALSO needs
-     `kms:Decrypt` (every customer GET is authorized as the signer, so this is checked on
-     every page load) and `kms:GenerateDataKey` (the script's own put_object) on that key
-     ARN — without them S3 answers AccessDenied/KMS.AccessDeniedException even though the
-     S3 policy looks right. Optionally grant `s3:ListBucket` (lets `head_bucket` return
-     200 instead of 403 — the region is resolved either way, see `resolve_bucket_region`).
-  2. Run this script authenticated AS that user — boto3 (and this script) reads
-     credentials from the environment via the standard chain, e.g.
-     `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...`, or
-     `export AWS_PROFILE=<throwaway-user-profile>` if saved as a named profile in
-     `~/.aws/credentials` — not as your own role/SSO session. (There is no `--profile`
-     flag on this script itself — set the environment before invoking it.)
-  3. Keep the key alive for the entire soak window — the permission AND the key's
-     existence are both checked live on every GET, not frozen at signing time.
-  4. Deactivate/delete the key right after soak-exit (Phase 7.7 sign-off), as part of the
-     same cleanup that ends the soak.
-A 1-day soak can usually get away with an operator's own long-lived CLI credentials if
-their session genuinely outlives 24h — check `aws sts get-caller-identity` /
-`aws configure list` before relying on this; when in doubt, use the throwaway-IAM-user path
-regardless of tier.
+⚠️ CREDENTIAL-LONGEVITY CAVEAT (real AWS behavior, confirmed live twice) — a presigned URL
+can never outlive the credentials used to SIGN it, no matter what Expires value you pass.
+AWS: with temporary credentials "the URL expires when the credential expires ... even if
+the URL was created with a later expiration time"; for an IAM role it "expires when the
+role session expires" (S3 User Guide, "Sharing objects with presigned URLs"). Temporary
+credentials — an assumed role (often a 1-hour max session), an EC2/Lambda execution role
+(instance-profile credentials rotate every few hours), an SSO session — produce a URL whose
+querystring claims days of validity but which stops working when THAT session ends, with a
+confusing ExpiredToken/AccessDenied rather than a clean "expired". This script therefore
+detects temporary credentials (a session token is present), prints the EFFECTIVE expiry =
+min(requested, credential expiry) and a warning, and reports that effective time — never
+the requested one — as the link's lifetime.
+
+DEFAULT: re-issue on demand. Re-running this script is always safe (it starts from the
+clean template each time — see below); when the customer needs to look, re-run it and send
+the new CUSTOMER LINK, stating its effective expiry. Do NOT casually suggest creating
+long-term IAM user keys to get a longer link.
+
+ONLY IF a longer-lived link is genuinely required (e.g. a stakeholder who must watch a
+multi-day soak without asking): propose a DEDICATED signing IAM user as a new long-term
+credential, behind its own explicit A3 block in authorizations.md (it is new IAM
+infrastructure), never silently:
+  1. Scope it to `s3:GetObject` AND `s3:PutObject` on this bucket only (no console access,
+     no other bucket). Both are required: the script presigns GETs AND re-uploads
+     (`PutObject`) the rewritten `index.html` (`materialize_index_html`). With a
+     customer-managed KMS key on the bucket, also `kms:Decrypt` (every customer GET is
+     authorized as the signer) and `kms:GenerateDataKey` (the script's own put_object) on
+     that key ARN. Optionally `s3:ListBucket` (head_bucket 200 instead of 403 — the region
+     is resolved either way, see `resolve_bucket_region`).
+  2. Run this script authenticated AS that user via the standard credential chain (e.g.
+     `export AWS_PROFILE=<signing-user-profile>`; there is no `--profile` flag). Never put
+     the key in argv or a generated file.
+  3. Keep the key active for the window (the permission AND the key's existence are checked
+     live on every GET), and deactivate/delete it at soak-exit as part of the same cleanup.
+Even then a single SigV4 signature is capped at 604800 s (7 days).
 
 Usage:
     python3 generate_presigned_urls.py --bucket my-dashboard-bucket --region ap-northeast-2 \
@@ -93,6 +90,7 @@ Prints the customer-facing index.html URL last, on its own line, prefixed
 "CUSTOMER LINK: " — that line is the deliverable to hand over.
 """
 import argparse
+import datetime
 import re
 import sys
 import urllib.error
@@ -144,13 +142,74 @@ def resolve_bucket_region(bucket, probe_client=None, hint_region=None):
     return {"EU": "eu-west-1"}.get(loc, loc)
 
 
-def make_signing_client(region, bucket):
+def credential_lifetime(session=None, environ=None):
+    """(is_temporary, expiry_utc_or_None) for the credentials this script signs with.
+    Temporary = a session token is present (STS/role/SSO/instance profile/container).
+    The expiry is reported ONLY from an authoritative source: botocore's refreshable
+    credentials (assumed role, instance/container metadata, SSO, credential_process carry
+    `_expiry_time`), or the AWS_CREDENTIAL_EXPIRATION environment variable that credential
+    exporters set next to AWS_SESSION_TOKEN. Otherwise it is unknown (None) — never guessed."""
+    import os
+    environ = os.environ if environ is None else environ
+    creds = (session or boto3.Session()).get_credentials()
+    if creds is None:
+        return False, None
+    frozen = creds.get_frozen_credentials()
+    temporary = bool(frozen.token)
+    expiry = getattr(creds, "_expiry_time", None)
+    if not isinstance(expiry, datetime.datetime) and temporary and environ.get("AWS_CREDENTIAL_EXPIRATION"):
+        try:
+            expiry = datetime.datetime.fromisoformat(environ["AWS_CREDENTIAL_EXPIRATION"].replace("Z", "+00:00"))
+        except ValueError:
+            expiry = None
+    if isinstance(expiry, datetime.datetime) and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=datetime.timezone.utc)
+    return temporary, (expiry if isinstance(expiry, datetime.datetime) else None)
+
+
+def effective_expiry(requested_seconds, temporary, cred_expiry, now=None):
+    """(effective_expiry_utc_or_None, effective_seconds_or_None, warning_or_None).
+    None = unknown: temporary credentials whose expiry is not authoritatively known — the
+    caller must say "unknown", never print a precise time."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    wanted = now + datetime.timedelta(seconds=requested_seconds)
+    if not temporary:
+        return wanted, requested_seconds, None
+    if cred_expiry is None:
+        return None, None, (
+            "WARNING: signed with TEMPORARY credentials (session token present) whose expiry is "
+            "not known — these links stop working when that session ends (an assumed role is "
+            "often 1 hour), NOT after the requested time. Default: re-issue on demand (re-run "
+            "this script). A longer-lived link needs a dedicated signing user behind an explicit "
+            "A3 approval — see this script's docstring; never suggest long-term keys casually.")
+    eff = min(wanted, cred_expiry)
+    secs = max(0, int((eff - now).total_seconds()))
+    if eff < wanted:
+        return eff, secs, (
+            f"WARNING: signed with TEMPORARY credentials expiring {cred_expiry.isoformat()} — these "
+            f"links stop working then (in {secs // 3600}h {secs % 3600 // 60}m), NOT after the requested "
+            f"{requested_seconds}s. Default: re-issue on demand (re-run this script and send the new "
+            "link). A longer-lived link needs a dedicated signing user behind an explicit A3 "
+            "approval — see this script's docstring; never suggest long-term keys casually.")
+    return eff, secs, None
+
+
+def expiry_line(eff_at, requested_seconds, now=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if eff_at is None:
+        at_most = (now + datetime.timedelta(seconds=requested_seconds)).isoformat(timespec="seconds")
+        return ("EFFECTIVE EXPIRY: unknown — no later than the credential session's expiry "
+                f"(temporary credentials), at most {at_most}")
+    return f"EFFECTIVE EXPIRY: {eff_at.isoformat(timespec='seconds')}"
+
+
+def make_signing_client(region, bucket, session=None):
     """S3 client pinned to the bucket's region, SigV4, virtual-hosted addressing (path-style
     only when the bucket name contains dots, which break virtual-host TLS). botocore
     resolves the regional endpoint itself (incl. non-aws partitions); us-east-1 is forced
     onto its regional endpoint instead of the legacy global one."""
     addressing = "path" if "." in bucket else "virtual"
-    return boto3.client(
+    return (session or boto3).client(
         "s3",
         region_name=region,
         config=Config(signature_version="s3v4",
@@ -245,7 +304,8 @@ def main():
                           "script always detects the bucket's real region from S3; if given, "
                           "it must MATCH the detected one or the script stops.")
     ap.add_argument("--expires-seconds", type=int, default=604800,
-                     help="max 604800 (7 days) — the SigV4 ceiling; see credential-longevity caveat above")
+                     help="max 604800 (7 days) — the SigV4 ceiling; temporary signing credentials cap it further "
+                          "(the script prints the effective expiry)")
     ap.add_argument("--local-template", default=str(DEFAULT_TEMPLATE),
                      help="path to the CLEAN index.html to rewrite (default: this repo's "
                           "own shared/templates/dashboard.html). Never point this at the "
@@ -271,7 +331,12 @@ def main():
         sys.exit(f"--region {args.region} does not match the bucket's actual region {region} "
                  f"(reported by S3 for {args.bucket!r}). Fix the argument/config — URLs "
                  "signed for the wrong region are rejected by S3.")
-    s3 = make_signing_client(region, args.bucket)
+    session = boto3.Session()
+    temporary, cred_expiry = credential_lifetime(session)
+    eff_at, eff_seconds, cred_warning = effective_expiry(args.expires_seconds, temporary, cred_expiry)
+    if cred_warning:
+        print(cred_warning, file=sys.stderr)
+    s3 = make_signing_client(region, args.bucket, session)
     all_keys = ["index.html"] + ASSET_KEYS + DATA_KEYS
     presigned = {k: presign(s3, args.bucket, f"{args.prefix}{k}", args.expires_seconds) for k in all_keys}
 
@@ -298,11 +363,20 @@ def main():
                  "signer lacks s3:GetObject or kms:Decrypt on a CMK bucket (403 AccessDenied), "
                  "region mismatch (400 AuthorizationQueryParametersError).")
 
-    print(f"Bucket region: {region}. Presigned {len(all_keys)} objects (all verified HTTP 200), expiring in {args.expires_seconds}s "
-          f"({args.expires_seconds / 86400:.1f} days).")
+    if eff_at is None:
+        lifetime = "EFFECTIVE expiry unknown (temporary signing credentials without expiry metadata)"
+    else:
+        lifetime = (f"EFFECTIVE expiry {eff_at.isoformat(timespec='seconds')} ({eff_seconds / 3600:.1f} h)"
+                    + (" — limited by temporary signing credentials" if eff_seconds < args.expires_seconds else ""))
+    print(f"Bucket region: {region}. Presigned {len(all_keys)} objects (all verified HTTP 200). "
+          f"Requested {args.expires_seconds}s; {lifetime}.")
     print("Re-uploaded index.html with absolute presigned references (css/js/status/log).")
-    print("Keep the signing credentials' underlying session alive for the full duration above")
-    print("— see this script's own docstring for the long-term-IAM-user requirement on 3/7-day tiers.")
+    if temporary:
+        print("Signed with temporary credentials: tell the customer the EFFECTIVE expiry above and "
+              "re-issue on demand (re-run this script).")
+    if cred_warning:
+        print(cred_warning)
+    print(expiry_line(eff_at, args.expires_seconds))
     print(f"CUSTOMER LINK: {presigned['index.html']}")
 
 

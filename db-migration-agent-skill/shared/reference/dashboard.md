@@ -121,6 +121,46 @@ already have: every GATE sign-off, every phase completion, every soak-report day
 client-inventory row confirmed, rehearsal completion, runbook generation, A4b/A4 signature.
 If it was worth a line in the plan, it is worth updating both dashboard files.
 
+### `dashboard_update.py` — do all three in one command (use it; don't hand-edit JSON)
+
+Live runs corrupted `status.json` with hand edits (a missing `],`), let the plan lag the
+dashboard by 40 minutes, and went silent 8–15 minutes because a dashboard edit felt like a
+separate chore. `shared/scripts/dashboard_update.py` makes each checkpoint one call:
+
+```bash
+python3 <skill>/shared/scripts/dashboard_update.py --dashboard dashboard \
+  --patch '{"current_phase":"6","current_activity":"Table 3/4 loading: orders — 4m elapsed",
+            "phases":[{"id":"6","status":"in_progress","steps":[{"id":"load-orders",
+            "status":"in_progress","detail":"pipe running, checked 17:58Z"}]}]}' \
+  --log-title "load-orders check" --log-action "probe loader PID" --log-result in_progress \
+  --log-detail "running, 4m elapsed" \
+  --plan migration-plan.md --plan-section "Phase 6" --plan-line "17:58Z load-orders running (4m)"
+```
+
+- **Patch semantics:** JSON merge patch (RFC 7396 — objects merge, `null` deletes, scalars
+  replace) except that arrays of objects keyed by `id` (phases, steps, customer_actions,
+  risks, gate items), `key` (cutover_gates) or `name` (migration_objects items) merge
+  **item by key** — you send only the changed phase/step, never the whole array, so the
+  duplicate-phase bug above cannot happen. `{"id":"x","_delete":true}` removes an item;
+  `--replace phases` replaces a top-level key wholesale (repairing an already-damaged array).
+  `--patch-file f.json` or `--patch-file -` (stdin) avoid shell-quoting large patches.
+- **Safety:** holds an exclusive lock (`dashboard/.status.lock`) for the whole
+  read-merge-write-readback, so concurrent writers using the helper serialize instead of
+  losing updates. Refuses a status.json that is not valid JSON (rebuild it from the plan);
+  validates the result (exactly the 11 phase ids, phase/step/log vocabularies, distinct
+  gate keys, `cutover_ready` true only with all six gates present and met) and writes
+  **nothing** on failure; checks all three files are writable, then appends the log line,
+  replaces the plan (temp file + rename) and replaces status.json **last**; reads back the
+  complete payload. On any detected failure it rolls back (log truncated, plan and status
+  restored) and exits 1. Each file is individually crash-safe, but the three are not
+  crash-atomic together: a killed process can leave a log/plan line without its status
+  update (never the reverse) — re-run the checkpoint. Sets `updated_at` and recomputes
+  `overall_progress_pct` (field notes below; `--keep-progress` to skip). Exit 0 only when
+  every write is read back — a ready-made `publish_and_confirm` for the SKILL.md supervisor
+  recipe (milliseconds plus lock wait, `--lock-timeout` default 10 s, inside its 15-second bound).
+- **Soak window:** the live copy is in S3 (below); do not run it on a stale local copy and
+  upload that over the Lambda's data. Exclude `.status.lock` from uploads.
+
 Also mirror each pending chat **ACTION NEEDED** item into `customer_actions` when you
 present it, and resolve it when the specific reply and its record land. The dashboard is
 read-only: answering in chat is still required; it adds no approval mechanism.
@@ -164,7 +204,8 @@ evidence references; do not paste transcripts or credential material.
 | Phase 7.5 / any gate update | Add `cutover_gates[].items` showing individual requirement outcomes, exact missing evidence or next step, and owner when known. For inventory, each client's staged repoint/revert plan and pool preparation, plus CDC-consumer restart plans, belong here; actual repointing is Phase 8. |
 | Rehearsal | Replace the downtime forecast with measured timings where available; label mixed measured/estimated timings honestly, retain assumptions and evidence, and update the next milestone. |
 | Phase 7.7 | Keep daily numeric sample `detail` from either writer intact. Review full-period evidence as before. Publish pending customer test results / soak-exit acceptance as actions; numeric trends never resolve checks or gates. |
-| Phase 8–9 | Surface walkthrough, A4b/A4 acceptance, the customer's reported outcome, and cleanup decisions when actually requested. Update timing/next milestone and close risks only with recorded evidence. |
+| Phase 7.7 start | Seed the **minimal soak block** before the first scheduled/manual run: `{"soak": {"n_total": N, "consecutive_green": 0, "state": "active", "started_at": "<UTC>", "days": []}}` (`dashboard_update.py --seed-soak N`). Both writers now add missing fields themselves and Lambda preflight reports a `status_json_shape` row, but a `soak` or `soak.days` of the wrong type stops the writer — repair it with `--replace soak`. |
+| Phase 8–9 | Surface walkthrough, A4b/A4 acceptance, the customer's reported outcome, and cleanup decisions when actually requested. Update timing/next milestone and close risks only with recorded evidence. **On cutover completion** (Mode 3 executed, or the customer's reported completion in Mode 2), in the same update: add the optional `cutover` block below, replace `estimates.timeline` with actuals (`basis: "measured"`, the measured write pause, rollback window end), and refresh every gate's `detail` so none still describes pre-cutover work. A rollback/re-cutover updates the block (and `rollback_path_state`) again. |
 
 ## `status.json` — full snapshot, OVERWRITTEN every time (never appended)
 
@@ -174,7 +215,7 @@ evidence references; do not paste transcripts or credential material.
   "updated_at": "2026-08-31T14:59:37+09:00",
   "mode": "2",
   "lang": "ko",
-  "overall_progress_pct": 62,
+  "overall_progress_pct": 74,
   "current_phase": "7.7",
   "current_activity": "병행 가동 — Day 3 리포트 생성 중",
   "phases": [
@@ -219,7 +260,7 @@ evidence references; do not paste transcripts or credential material.
     "n_total": 3,
     "consecutive_green": 1,
     "state": "active",
-    "last_checked_at": "2026-09-02T09:00:11+00:00",
+    "last_checked_at": "2026-09-02T23:30:11+00:00",
     "started_at": "2026-08-31T09:00:00+00:00",
     "days": [
       {"date": "2026-09-01", "overall": "red", "needs_agent_review": true,
@@ -261,7 +302,7 @@ mark a gate `met:true` for either reason without one of these:
 | `client_inventory` | every client has a reviewed, staged (inactive) repoint/revert plan and pool prep complete; every CDC consumer has a restart plan | clients already repointed — execution/verification belongs to authorized Phase 8, customer-executed in Mode 2 |
 | `validation` | GATE 3 evidence block confirmed **and**, if the chosen validation depth includes a customer test suite (Q18), its final pre-cutover sign-off is also in (`customer-test-integration.md`) | row counts/checksums pass but the customer's own suite hasn't run its final pass |
 | `soak` | the chosen parallel-run parameter is satisfied: N consecutive greens **and** the soak-exit block confirmed (`SKILL.md` Phase 7.7 requires both) — **or** a dated waiver block in `authorizations.md` for skipping/shortening it | N greens reached but soak-exit isn't confirmed yet; also applies to Mode 2 handover depth (b), where the customer runs the soak themselves — stays `false` until they report it done or confirm the skip waiver |
-| `rehearsal` | the chosen rehearsal parameter is satisfied (one clone rehearsal done, or repeat-until-converged reached) — **or** a dated waiver for rehearsal `none` | a rehearsal is scheduled but hasn't produced measured timings yet |
+| `rehearsal` | the chosen rehearsal parameter is satisfied (one clone rehearsal done, or repeat-until-converged reached) **with the minimum contents** of `execution-runbooks.md` §Migration Rehearsal: freeze → drain → repoint → bidirectional verify executed with a measured write pause, **and** the rollback path actually exercised (reverse task run with INSERT/UPDATE/DELETE landing on a source-version stand-in, or write-log replay tested) — **or** a dated waiver for rehearsal `none` or for each skipped element | a rehearsal is scheduled but hasn't produced measured timings yet; micro-timings of individual commands; a reverse endpoint that only passed test-connection (that is not rollback proven) |
 | `runbook` | `cutover-runbook.md` + `rollback-runbook.md` exist with zero placeholders **and** (reverse replication created + connection-tested, **or** the alternative rollback strategy + RPO acknowledgment block is confirmed) — hard constraint 6's rollback-path requirement | the runbook file exists but reverse replication hasn't been connection-tested |
 | `approvals` | every applicable `authorizations.md` block for this point is confirmed: GATE 1 (in `discovery-questions.md`), GATE 2, GATE 3, **and** — Mode 2: **A4b** handover acceptance; Mode 3: **A4** cutover authorization | GATE 1/2 are confirmed but A4b/A4 (which happens at Phase 8, near the end) is still pending — this is why `approvals` is usually the last gate to flip, not an early one |
 
@@ -269,9 +310,13 @@ mark a gate `met:true` for either reason without one of these:
   The page never recomputes it and never infers readiness from `overall_progress_pct` — a
   94% progress bar next to one unmet gate must still show "아직 컷오버 불가." Never derive
   one from the other.
-- `overall_progress_pct` is informational only — sum of `done` across all phases ÷ sum of
-  `total`, or your own reasonable estimate early on. It is deliberately **not** part of the
-  cutover decision.
+- `overall_progress_pct` is informational only and **deterministic**: each of the 11
+  phases weighs 1/11 — a `done` phase counts 1, an `in_progress` phase counts
+  `done ÷ total` (capped 0–1; 0 when `total` is 0/absent), a `pending` phase 0 —
+  `round(100 × sum ÷ 11)`. (A raw Σdone ÷ Σtotal let phase 1's 18 discovery items push two
+  live runs to 62% at phase 3 and 91% at phase 7.) `shared/scripts/dashboard_update.py`
+  computes it on every write; `dashboard.js` only displays it. It is deliberately **not**
+  part of the cutover decision.
 - `soak` — rendered as its own prominent dashboard section, not folded into the phases
   list, because this is the one gate stakeholders ask about most. `last_checked_at` is set
   by either soak script on every run. Seed `started_at` when activating the schedule;
@@ -525,6 +570,28 @@ These are snapshot facts, not binding approvals. The plan and authorization reco
 authoritative. Examples above illustrate field shapes at different moments, not a seed
 snapshot to copy into an engagement.
 
+### Optional `cutover` block (Phase 8–9, additive)
+
+```json
+{
+  "cutover": {
+    "completed_at": "2026-10-06T14:03:01Z",
+    "measured_write_pause_seconds": 45.3,
+    "target_endpoint": "ordersys.cluster-xxxx.ap-northeast-2.rds.amazonaws.com",
+    "rollback_window_ends": "2026-10-13T14:03:00Z",
+    "rollback_path_state": "reverse DMS task running and applying (verified 14:20Z)"
+  }
+}
+```
+
+Present only after the cutover actually completed. `completed_at` (UTC) is required for the
+page to switch: it then shows a **"Cutover completed" / "컷오버 완료"** card with these
+values in place of the readiness verdict (gates stay listed below as the pre-cutover record).
+`measured_write_pause_seconds` is a measured number or omitted, never an estimate;
+`rollback_path_state` states what was verified (hard constraint 13), not "armed". Without
+the block — or without `completed_at` — the page is unchanged. Live: both dry-run dashboards
+kept showing "컷오버 가능" and a "미측정" timeline after a measured cutover.
+
 ### Optional compressed soak window and manual evidence
 
 Add **`compressed_window` inside the existing `soak` object** only when an approved
@@ -640,7 +707,9 @@ omission cases against this reference's JSON examples. It uses only Node built-i
 
 ## `activity-log.jsonl` — JSON Lines, APPEND ONLY, never rewritten
 
-One line per event, oldest first in the file (the page reverses it for display):
+One line per event, oldest first in the file (the page reverses it for display, shows the
+newest 25 and puts the rest behind a "Show all (N)" / "모두 보기 (N)" disclosure — a
+472-line live log had made the page ~45,000 px tall; shorter logs render unchanged):
 
 ```json
 {"time": "2026-08-31T14:42:05+09:00", "phase": "7.7", "title": "병행 가동 Day 3 리포트", "action": "표본 3개 테이블 행수·체크섬 재확인, 복제 지연 1.8s", "result": "success", "detail": "연속 3/7 green", "files": ["dashboard/../soak-report-day3.md"]}

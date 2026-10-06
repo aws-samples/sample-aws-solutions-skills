@@ -246,9 +246,19 @@ GATE 3 evidence before cutover readiness.
    sequence privileges, and default privileges. For Oracle compare account status,
    roles/default roles and system/object grants; for SQL Server also verify login SID
    → database-user mapping (see §SQL Server Validation). Do not export password hashes.
-3. Authenticate with the application's actual driver/version, credential retrieval
-   path, and TLS settings against its **intended target endpoint** (including RDS Proxy
-   if selected). Run representative read-only queries as that account; record the
+3. Authenticate with the application's **real connection parameters** — its actual
+   driver/version (e.g. pymysql, JDBC), TLS on/off and CA settings, auth plugin, and
+   credential retrieval path, copied from its effective config — against the **exact
+   endpoint it will use after cutover**. A `mysql` CLI login is not this test: the CLI
+   negotiates TLS by default, so it passed while the app (pymysql, no TLS) then failed
+   against an RDS Proxy with `requireTLS: true` mid-freeze (live). If the app cannot do
+   TLS, that is a GATE 2 finding (Proxy `requireTLS` / `require_secure_transport` vs app
+   capability), not something to change during the window. **If an RDS Proxy is
+   provisioned, authenticate as EACH application account THROUGH the Proxy endpoint**, not
+   only directly: an account whose secret is not registered in the Proxy's auth list, or
+   whose `ClientPasswordAuthType` does not match its plugin, gets `ERROR 1045` via the Proxy
+   while a direct login succeeds (live; [../patterns/cdk-stacks.md](../patterns/cdk-stacks.md)
+   §proxy-stack.ts). Run representative read-only queries as that account; record the
    resolved identity, effective database/roles, and results. Use an isolated client
    harness/clone; do not repoint a production client for this test. In Mode 2, required
    application-host checks are performed/reported by the customer under
@@ -260,6 +270,22 @@ GATE 3 evidence before cutover readiness.
    their own A2. Read-only login success does **not** prove workload writes: exercise
    write privileges/behavior on an isolated clone and state any untested paths in the
    GATE 3 presentation.
+
+### 2.7 Current CloudWatch alarm states (required in the GATE 3 presentation)
+
+Immediately before presenting GATE 3, list every alarm the engagement created (monitoring
+and soak stacks) with its **current state**:
+
+```bash
+aws cloudwatch describe-alarms --region <REGION> --alarm-name-prefix <PREFIX> \
+  --query 'MetricAlarms[].[AlarmName,StateValue,StateUpdatedTimestamp,StateReason]' --output table
+```
+
+Present the table. Any alarm in `ALARM` is investigated and either resolved (and shown back
+in `OK`) or explained with evidence and an owner **before** asking for GATE 3; an
+`INSUFFICIENT_DATA` alarm says what it is not yet watching. (Live: GATE 3 was presented while
+a `FreeableMemory` alarm had been firing for about an hour, unnoticed — and its threshold
+was wrong: see [preflight-iam-cost.md](preflight-iam-cost.md) §4, FreeableMemory is bytes.)
 
 ## 3. Post-Cutover Validation
 
@@ -351,10 +377,18 @@ behaves identically against the target. Run them pre-cutover, on BOTH source and
 
 3. **AUTO_INCREMENT / sequence high-water-mark.** Confirm the target's next-value counter sits
    above the current max — otherwise the first inserts collide with existing PKs (see cutover-procedures.md §reset high-water marks):
+   **Do not read `information_schema.TABLES.AUTO_INCREMENT` without disabling its cache.**
+   On MySQL 8.0+/8.4 that column is a *cached* statistic (`information_schema_stats_expiry`,
+   default 86400 s): it can show a value from up to a day ago, so after a load or reseed it
+   looks lower than `MAX(id)` and raises a false stop (live: a rehearsal run halted on it).
+   Use the live per-table value, or turn the cache off for your session first:
    ```sql
-   -- MySQL
-   SELECT TABLE_NAME, AUTO_INCREMENT FROM information_schema.tables WHERE TABLE_SCHEMA = 'your_db';
-   SELECT MAX(id) FROM orders;  -- Must be < AUTO_INCREMENT
+   -- MySQL — reliable: the live counter for one table, then compare with its max
+   SHOW CREATE TABLE orders;          -- read "AUTO_INCREMENT=<n>" from the table options
+   SELECT MAX(id) FROM orders;        -- must be < n
+   -- MySQL — whole schema at once: disable the statistics cache for THIS session first
+   SET SESSION information_schema_stats_expiry = 0;   -- (or ANALYZE TABLE the tables)
+   SELECT TABLE_NAME, AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'your_db';
 
    -- PostgreSQL
    SELECT schemaname, sequencename, last_value FROM pg_sequences;

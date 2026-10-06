@@ -79,6 +79,74 @@ online seed, not a full dump squeezed into the final minutes-long freeze.
    the final freeze/drain/repoint within the minutes budget. Missing/expired coordinates
    require a new consistent seed; do not guess a start point.
 
+#### Which `mysqldump` binary, and the exact source grants for a consistent dump with coordinates
+
+**Dump with a `mysqldump` whose major version matches the SOURCE; load with any client
+that supports the target's auth + TLS.** (Live failure: an agent installed an 8.4 client
+on the migration host for an 8.0 → 8.4 move; `mysqldump --source-data` from 8.4 sends
+`SHOW BINARY LOG STATUS`, a statement that exists only from MySQL 8.2.0 — the 8.0.46
+source answered `ERROR 1064`, and downgrading the client took four package-conflict
+attempts. mysqldump 8.0 sends `SHOW MASTER STATUS`, which 8.4 removed.) So for an 8.0
+source use an 8.0.x Oracle MySQL `mysqldump`; for the import into RDS/Aurora 8.4 the same
+8.0.x `mysql` client works (it supports `caching_sha2_password` and TLS). A MariaDB-branded
+`mysql`/`mysqldump` on the host (common on Amazon Linux) is a different client — check
+`mysqldump --version` and see [version-upgrades.md](version-upgrades.md) §"MySQL 8.0 → 8.4".
+
+**Source privileges for `--single-transaction --source-data=2 --routines --triggers
+--events`** (MySQL 8.0/8.4 mysqldump reference) — request them in **ONE A2 block**, not one
+discovery at a time (BACKUP_ADMIN alone was tried first live and cost two extra approval
+rounds):
+
+| Privilege | Why |
+|---|---|
+| `SELECT` (on the schema) | dump rows |
+| `SHOW VIEW` | dump views |
+| `TRIGGER` | `--triggers` |
+| `EVENT` | `--events` |
+| `RELOAD` (global) | `--source-data`/`--master-data` "also requires the RELOAD privilege": even with `--single-transaction` it takes a brief `FLUSH TABLES WITH READ LOCK` to read consistent coordinates |
+| `REPLICATION CLIENT` (global) | `SHOW MASTER STATUS` / `SHOW BINARY LOG STATUS` for the coordinates |
+| `PROCESS` (global) | tablespace info, unless `--no-tablespaces` (8.0.21+) |
+| `SHOW_ROUTINE` (global, 8.0.20+) | routine bodies for `--routines` when the dump user is not their DEFINER (or global `SELECT`) |
+
+Not needed for this command: `LOCK TABLES` — the global `FLUSH TABLES WITH READ LOCK`
+requires only `RELOAD` (or `FLUSH_TABLES`); `LOCK TABLES` is needed only when dumping
+without `--single-transaction` (`--lock-tables`) or for the named-table `FLUSH TABLES t
+WITH READ LOCK` form (MySQL 8.0 FLUSH reference).
+
+For `--routines`, the definition is exposed only to the routine's DEFINER or a user with
+`SHOW_ROUTINE` (8.0.20+) or global `SELECT`; `CREATE ROUTINE`/`ALTER ROUTINE`/`EXECUTE` make a
+routine visible but its `SHOW CREATE` body can be NULL (`SHOW CREATE PROCEDURE` reference) —
+an incomplete export. Add `SHOW_ROUTINE` to the same block when the schema has routines and
+confirm with a `--no-data` dry run that every routine body appears. Record `SHOW GRANTS FOR
+'<dump_user>'@'<host>'` **before** granting and again after; **revoke** the extra global
+privileges (`RELOAD`, `PROCESS`, …) as soon as the seed and coordinates are recorded and
+paste the post-revoke `SHOW GRANTS` into the plan. Running the dump as the host's local
+root through an already-approved path is the alternative — name it in the same A2 block.
+
+#### Native binlog replication: accounts you create on the source replicate to the target
+
+While native binlog replication (8.0 source → RDS target) is running, `CREATE USER`/`GRANT`
+on the source are written to the binlog and **replicate** (account-management statements
+ride the binlog). Replication replays everything after the seed's recorded coordinates, so
+an account created after those coordinates were captured is replayed even if replication
+was started later. Live: a soak read-only account and the DMS reverse-CDC account created
+on the source during the run appeared on the target and collided with target-side
+accounts. For accounts meant to exist on the **source only**, either:
+- create them in a privileged source session with `SET SESSION sql_log_bin = 0;` first
+  (session-only; needs `SYSTEM_VARIABLES_ADMIN` or `SESSION_VARIABLES_ADMIN`), stated
+  explicitly in that account's authorized A2 block, then `SET SESSION sql_log_bin = 1;`; or
+- create them **before the seed's start coordinates are captured** (they then travel in
+  neither the binlog replay nor — unless you dump the `mysql` schema — the seed), and
+  record them for cleanup.
+A replayed `CREATE USER` that collides with an existing target account **stops the
+target's SQL (applier) thread** (`ERROR 1396 Operation CREATE USER failed`): after creating
+any source account during replication, check `SHOW REPLICA STATUS` (`Replica_SQL_Running`,
+`Last_SQL_Error`) on the target, and fix the collision deliberately rather than skipping
+events blindly. List every source-only account in the cutover runbook's cleanup step:
+after cutover, `SELECT user, host FROM mysql.user` on the target and drop any replicated
+source-only accounts (with the destructive-action confirmation). DMS CDC does not carry
+`mysql` schema changes, so this applies to native replication only.
+
 ### If Percona XtraBackup + S3 (large MySQL, physical)
 
 ```bash
@@ -159,6 +227,14 @@ in step 4, log it as a pre-cutover schema-drift check for the runbook — any re
 change during the migration window needs the same "verify both sides" discipline.
 
 ### Soak automation (Phase 7.7 — optional, offer it, don't set it up silently)
+
+**Phase 7.7 entry is an explicit choice in chat** (A: the soak Lambda stack —
+recommended; B: manual `soak_check.py` runs with who/where/when in UTC — A and B only when
+source and target are the same engine family, which the scripts require; C: for a
+heterogeneous pair, the manual/agent-reviewed reconciliation in the callout below), recorded in the
+plan, with the verdict timetable and what wakes the agent for each verdict — see
+[engagement-safety.md](engagement-safety.md) §Phase 7.7 entry. Never call sampling
+automatic unless a deployed, enabled schedule (or a verified cron) exists.
 
 🔴 **Heterogeneous engagement? Decide this BEFORE recommending Lambda or handing over
 `soak_check.py`.** Both scripts below compute row counts/checksums/column fingerprints
@@ -245,13 +321,35 @@ the scheduler's newer results; the dashboard reference describes coordination.
   "checksum_tables": ["customers"],
   "alarm_names": ["target-cpu-high", "target-replica-lag"],
   "target_db_instance_id": "my-target-instance",
-  "dms_task_id": "MYTASKID1234", "dms_replication_instance_id": "my-dms-ri",
+  "dms_task_id": "CPSTBQCAAFB67LEICTHDNETPSU", "dms_replication_instance_id": "my-dms-ri",
   "dms_task_arn": "arn:aws:dms:...:task:...",
   "mysql_replica_status_side": null, "pg_replication_lag_side": null,
   "customer_test_suite_provided": false,
-  "region": "ap-northeast-2", "n_total": 3
+  "region": "ap-northeast-2", "n_total": 3,
+  "watermark": {"enabled": true, "pk_margin": 10000, "timestamp_columns": {}, "timestamp_age_minutes": 15},
+  "batch_timeout_seconds": 900
 }
 ```
+
+**Live writes — watermark comparison (`watermark`, optional; defaults shown).** Whole-table
+counts/checksums are RED every day while the application writes (replication lag: the
+newest rows are on the source, not yet on the target). Per table with a single-column
+integer primary key, both scripts compare only rows with `pk <= min(source MAX(pk), target
+MAX(pk)) - pk_margin`; tables named in `timestamp_columns` (`{"shop.orders":
+"created_at"}`) are bounded by `column <= source NOW() - timestamp_age_minutes` instead —
+the column must exist with the same date/time type on both sides (else whole-table, and
+preflight reports an Error); if it is nullable on either side, NULL rows are included in
+the compared set and their counts compared explicitly (`null_rows`; a mismatch is RED).
+Rows beyond the bound are reported as `detail.row_count.<table>.tail_rows` — informational,
+never a failure. Tables without such a key fall back to the whole-table comparison and the
+detail's `note` says so (expect RED under writes; prefer a timestamp column for them). A
+mismatch **below** the watermark is RED and needs review — a lost row, or an UPDATE/DELETE
+of an old row still in flight. `pk_margin` ≥ 2 × peak inserts/s × the 30 s lag threshold.
+The bounded MySQL checksum is a CRC32-based fingerprint over every column (CHECKSUM TABLE
+cannot take a WHERE clause) — like CHECKSUM TABLE, a drift detector, not cryptographic.
+`batch_timeout_seconds` (default 900) bounds each per-side client session; size it from a
+measured Phase 7 count/checksum of the largest table (the Lambda equivalents are in
+cdk-stacks.md §soak-stack.ts "Live writes and sizing").
 
 `region` is the AWS region of the target/DMS/alarms (the `aws` CLI calls use it). It has
 **no default**: if omitted, `soak_check.py` derives it from an RDS endpoint
@@ -266,7 +364,12 @@ and the check becomes `null` (needs review) — never a pass. Replica lag is rea
 `source.engine`/`target.engine` are independent (they can legitimately differ across a
 version gap; both must still normalize to the same MySQL-family-or-Postgres-family —
 heterogeneous soak-checking across families is not yet supported). Set exactly ONE of
-`dms_task_id`+`dms_replication_instance_id` (DMS CDC in play), `mysql_replica_status_side`
+`dms_task_id`+`dms_replication_instance_id` (DMS CDC in play — `dms_task_id` is the
+CloudWatch dimension value: the task's **resource id**, i.e. the last `:` segment of
+`dms_task_arn`, **not** the friendly task name, which matches zero datapoints;
+`dms_replication_instance_id` is the friendly instance identifier; both scripts take the ARN
+suffix when `dms_task_arn` is set, flag a friendly-looking id, and treat empty datapoints as
+needs-review with that hint), `mysql_replica_status_side`
 (`"source"`/`"target"`, whichever side runs `SHOW REPLICA STATUS` as the replica),
 or `pg_replication_lag_side` for `replication_lag` — leave all three unset/`null` if this
 engagement has no replication mechanism to measure, and the check reports
@@ -406,8 +509,9 @@ to "not configured yet" unless someone checks *why* it's null. Add this alongsid
 ```bash
 # Fallback only — cron, on the migration bastion (never a personal laptop or workstation:
 # it sleeps, gets its lid closed, gets rebooted for an OS update, and a missed day produces
-# no report with nothing to notice it):
-# 0 9 * * * cd /path/to/engagement && python3 shared/scripts/soak_check.py --config dashboard/soak-config.json >> soak.log 2>&1
+# no report with nothing to notice it). Same UTC-day timing as the Lambda schedule:
+# CRON_TZ=UTC   (cronie; otherwise confirm the host clock is UTC with `timedatectl`)
+# 30 23 * * * cd /path/to/engagement && python3 shared/scripts/soak_check.py --config dashboard/soak-config.json >> soak.log 2>&1
 ```
 
 Exit code 0 (standalone script) / a `needs_agent_review: false` result (Lambda) = clean
@@ -508,14 +612,17 @@ customer. One current link, renewed as described above; presigned URLs support r
 until they expire, so the dashboard's existing 5-second polling just keeps working against
 it without anything being regenerated mid-window.
 
-🔴 **Read the script's own docstring before running it for a 3- or 7-day tier.** A presigned
-URL can never outlive the credentials used to sign it — asking for a 7-day `Expires` while
-signing with a temporary/SSO session that itself expires in a few hours produces a URL that
-stops working when *that* session ends, not when the URL says it should, and fails with a
-confusing signature error rather than a clean "expired" message. For anything past a
-same-day (low-tier) window, sign with a throwaway IAM user's long-term access key created
-for exactly this purpose, kept alive for the soak's duration, and deactivated right after
-soak-exit — not the operator's own role/SSO session.
+🔴 **A presigned URL can never outlive the credentials that signed it.** With temporary
+credentials (an assumed role — often a 1-hour maximum session — an EC2 instance role, an
+SSO session) the link stops working when that session ends, whatever `--expires-seconds`
+says (S3 User Guide: the URL "expires when the credential expires"). The script detects a
+session token and prints the **effective** expiry (`EFFECTIVE EXPIRY:` line — `unknown — no later than the
+credential session's expiry` when the session's expiry isn't exposed) with a
+warning; give the customer that time, never the requested one. **Default: re-issue on
+demand** — re-running the script is safe; send the fresh link when the customer wants to
+look. Only if a longer-lived link is genuinely required, propose a dedicated signing IAM
+user (scope and cleanup in the script's docstring) as new long-term credential
+infrastructure behind its own **A3** block — never suggest long-term user keys casually.
 
 The dashboard bucket itself stays fully private (blocked public access, no bucket-policy
 public-read) — presigned URLs are the only access path, exactly as required everywhere
@@ -956,6 +1063,32 @@ Before executing against production, perform a full dry-run:
 6. **Destroy the clone**: Delete all rehearsal resources.
 
 This de-risks production by: confirming time estimates, catching permission/network/compatibility issues, giving team confidence, and providing a realistic timeline for stakeholders.
+
+#### Minimum contents before the rehearsal requirement is "met"
+
+Live failure: one run marked the rehearsal gate met after micro-timings on a PITR clone
+(AUTO_INCREMENT reseed, an app reconnect) — no freeze, no CDC drain, no repoint, and the
+reverse 8.4 → 8.0 DMS task never run — then told the customer the rollback path was
+"proven" on the strength of an endpoint test-connection. The other run did it properly
+(clone + source-version stand-in; measured 44.0 s write pause; reverse I/U/D; rollback
+drill with zero loss). A rehearsal counts as done only when, on the clone/stand-in pair:
+
+1. **Forward cutover executed end to end** — freeze the (stand-in) source's writers →
+   drain CDC to zero lag → stop the forward channel → spot-validate → reseed
+   AUTO_INCREMENT/sequences → repoint a test client → **bidirectional verification**
+   (client healthy *and* visible in the new DB's processlist) — with the **write pause
+   measured** from first rejected write to first accepted write on the new side.
+2. **Rollback path actually exercised** — the reverse channel started from the recorded
+   post-cutover position, with an INSERT, an UPDATE and a DELETE on the new side each
+   confirmed on a **source-version stand-in** (e.g. 8.0 for an 8.0 → 8.4 move), then a
+   repoint back; or, for write-log replay, a replay run and verified. **Endpoint
+   test-connection ≠ rollback proven** — it shows reachability and credentials only.
+3. **Timings recorded** per step as *measured*; anything reconstructed is labelled
+   *estimated*.
+
+Anything skipped (e.g. no stand-in available, reverse task not run) is a **recorded waiver**
+(§Waiver protocol in `engagement-safety.md`) that names the untested step and its risk —
+never "met", and never described to the customer as proven.
 
 When recording rehearsal results, also refresh the existing phase's findings/work/evidence,
 the `rehearsal` gate's item details, and `estimates.timeline` in the dashboard

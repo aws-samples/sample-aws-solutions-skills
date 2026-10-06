@@ -168,14 +168,36 @@ These bite during *migration* (replication setup, dump/import, tooling), not jus
   `SHOW SLAVE STATUS` (8.0 only) returns `Seconds_Behind_Master`, `Master_Host`, … Scripts must
   look the column up via the cursor description and accept either name (the bundled
   `soak_check*.py` do).
-- **Client on the bastion/migration host: prove it, don't assume it.** Requirement: a demonstrated
-  **TLS + `caching_sha2_password` login to the actual target** with the client you'll use, and
-  dump/load tooling whose syntax the 8.4 server accepts (e.g. the exact `mysqldump` flags in the
-  runbook). Recommended, tested toolchain: the Oracle MySQL 8.4 LTS client. Evidence: in a live
-  dry run a **MariaDB 10.5 `mysql` client failed `caching_sha2_password` authentication** against
-  RDS for MySQL 8.4 — so a MariaDB client must pass the same login test before it is used. Check
-  `mysql --version` / `mysqldump --version` at Phase 0. Same rule for app drivers (see the
-  authentication-plugin bullet above).
+- **Client on the bastion/migration host: DUMP with the source's major, CONNECT/LOAD with any
+  client that does `caching_sha2_password` + TLS.** Two different requirements, often wrongly
+  merged into "install an 8.4 client":
+  - *Dump* with a `mysqldump` whose **major matches the SOURCE** (an 8.0.x Oracle MySQL client
+    for an 8.0 source). mysqldump 8.4 with `--source-data` sends `SHOW BINARY LOG STATUS`, which
+    exists only from MySQL 8.2.0 — an 8.0 source rejects it with `ERROR 1064` (live failure:
+    the fix was downgrading the helper's client to 8.0.46, after four package-conflict
+    attempts). mysqldump 8.0 sends `SHOW MASTER STATUS`, which 8.0 accepts.
+  - *Connect/load* into the 8.4 target with any client that supports `caching_sha2_password`
+    and TLS — the same 8.0.x Oracle MySQL client works — and **prove it**: a demonstrated TLS +
+    `caching_sha2_password` login to the actual target with the client you'll use, plus the
+    exact runbook statements accepted by each side (8.4-only syntax such as `SHOW BINARY LOG
+    STATUS` only against the 8.4 side, `SHOW MASTER STATUS` against the 8.0 side;
+    `SHOW REPLICA STATUS` works on both — it exists from 8.0.22).
+  - *MariaDB-branded clients* (often the default `mysql`/`mysqldump` on Amazon Linux) are a
+    different client: in a live dry run a **MariaDB 10.5 `mysql` client failed
+    `caching_sha2_password` authentication** against RDS for MySQL 8.4, so a MariaDB client must
+    pass the same login test before it is used, and a MariaDB `mysqldump` is not a
+    source-matched MySQL dump client. Check `mysql --version` / `mysqldump --version` at Phase 0.
+  Same rule for app drivers (see the authentication-plugin bullet above). The exact source
+  grants for a consistent dump with coordinates are in
+  [execution-runbooks.md](execution-runbooks.md) §"Which `mysqldump` binary".
+- **Native binlog replication carries account changes.** While 8.0 → 8.4 binlog replication
+  runs, `CREATE USER`/`GRANT` on the source replicate to the target. Create source-only
+  accounts (soak read-only, DMS reverse-CDC writer) with `SET SESSION sql_log_bin = 0` in a
+  privileged source session as part of their authorized A2 block, or before the seed's start
+  coordinates are captured (anything created after them is replayed, even if replication is
+  started later; a colliding replayed `CREATE USER` stops the target's SQL thread — check
+  `SHOW REPLICA STATUS`) — and list them for target cleanup in the cutover runbook ([execution-runbooks.md](execution-runbooks.md)
+  §"Native binlog replication: accounts you create on the source replicate to the target").
 - **`mysqldump --source-data` (not `--master-data`).** `--source-data` exists from mysqldump
   8.0.26; `--master-data` is a deprecated alias. From 8.0.23 the dump writes
   `CHANGE REPLICATION SOURCE TO` (older clients write `CHANGE MASTER TO`, which an 8.4 server

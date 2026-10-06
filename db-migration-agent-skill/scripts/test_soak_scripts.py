@@ -43,7 +43,7 @@ BUCKET = "soak-dash-bucket"
 ENV = {
     "SOURCE_ENGINE": "mysql", "TARGET_ENGINE": "mysql", "TABLES": '["shop.orders", "shop.payments"]',
     "ALARM_NAMES": '["tgt-cpu"]', "TARGET_DB_INSTANCE_ID": "tgt-db",
-    "DMS_TASK_ID": "TASK", "DMS_REPLICATION_INSTANCE_ID": "ri-1", "DMS_TASK_ARN": TASK_ARN,
+    "DMS_TASK_ID": "ABC", "DMS_REPLICATION_INSTANCE_ID": "ri-1", "DMS_TASK_ARN": TASK_ARN,
     "MYSQL_REPLICA_STATUS_SIDE": "target", "PG_REPLICATION_LAG_SIDE": "",
     "N_TOTAL": "3", "DASHBOARD_BUCKET": BUCKET, "DASHBOARD_PREFIX": "",
     "SOURCE_SECRET_ARN": SRC_ARN, "TARGET_SECRET_ARN": TGT_ARN,
@@ -165,12 +165,13 @@ class Stubbed(unittest.TestCase):
                                      {"SecretString": json.dumps({"username": "ro", "password": "p"})},
                                      {"SecretId": arn})
 
-    def pf_aws_ok(self, dms_metrics=("CDCLatencyTarget", "CDCLatencySource")):
+    def pf_aws_ok(self, dms_metrics=("CDCLatencyTarget", "CDCLatencySource"), dms_points=None):
+        dms_points = [{"Maximum": 1.0, "Timestamp": datetime.datetime(2026, 10, 5)}] if dms_points is None else dms_points
         cw = self.stubs["pf_cloudwatch"]
         cw.add_response("describe_alarms", {"MetricAlarms": [{"AlarmName": "tgt-cpu", "StateValue": "OK"}]})
         cw.add_response("get_metric_statistics", {"Datapoints": []})  # RDS FreeStorageSpace
         for m in dms_metrics:
-            cw.add_response("get_metric_statistics", {"Datapoints": []},
+            cw.add_response("get_metric_statistics", {"Datapoints": dms_points},
                             {"Namespace": "AWS/DMS", "MetricName": m, "Dimensions": ANY, "StartTime": ANY,
                              "EndTime": ANY, "Period": 300, "Statistics": ["Maximum"]})
         self.stubs["pf_rds"].add_response("describe_db_instances", {"DBInstances": [{"Engine": "mysql", "AllocatedStorage": 100}]})
@@ -227,6 +228,12 @@ class PreflightTests(Stubbed):
         self.assertIn("dms_lag_metric CDCLatencyTarget", rows)
         self.assertIn("dms_lag_metric CDCLatencySource", rows)
         self.assertEqual(rows["target_db_replica_status"]["result"], "PASS")
+        # Watermark parity: every table probed on both sides, mode reported in the message.
+        for t in ("shop.orders", "shop.payments"):
+            for side in ("source", "target"):
+                row = rows[f"{side}_db_watermark {t}"]
+                self.assertEqual(row["result"], "PASS")
+                self.assertIn("whole-table comparison", row["message"])  # FakeConn exposes no PK
 
     def test_second_table_denied_and_status_put_denied_are_not_ok(self):
         self.secret_ok(SRC_ARN)
@@ -470,6 +477,549 @@ class NormalModeTests(Stubbed):
         self.assertIsNone(cfg["pg_replication_lag_side"])
 
 
+
+class FakeTsDb:
+    """One side holding `shop`.`orders` rows (id, created_at-or-None); no integer PK, so the
+    configured timestamp column drives the watermark. Answers the timestamp-path SQL."""
+    CUTOFF = "2026-10-05 12:00:00.000000"
+
+    def __init__(self, rows, col_type="datetime", nullable="YES", has_col=True):
+        self.rows, self.col_type, self.nullable, self.has_col, self.executed = list(rows), col_type, nullable, has_col, []
+
+    def _lit(self, sql):
+        import re as _re
+        m = _re.search(r"X'([0-9a-f]+)'", sql)
+        return bytes.fromhex(m.group(1)).decode() if m else None
+
+    def _select(self, sql):
+        if "1=0" in sql:
+            return []
+        where = sql.split(" WHERE ", 1)[1] if " WHERE " in sql else None
+        if where is None:
+            return self.rows
+        x = self._lit(where)
+        if "<=" in where and "IS NULL" in where:
+            return [r for r in self.rows if r[1] is None or r[1] <= x]
+        if "IS NULL" in where:
+            return [r for r in self.rows if r[1] is None]
+        if "<=" in where:
+            return [r for r in self.rows if r[1] is not None and r[1] <= x]
+        if ">" in where:
+            return [r for r in self.rows if r[1] is not None and r[1] > x]
+        raise AssertionError(sql)
+
+    def answer(self, sql):
+        self.executed.append(sql)
+        up = sql.strip().upper()
+        if "KEY_COLUMN_USAGE" in up:
+            return [("code", "varchar")]
+        if up.startswith("SELECT COLUMN_NAME"):
+            cols = [("id", "bigint", "NO", None)]
+            if self.has_col:
+                cols.append(("created_at", self.col_type, self.nullable, None))
+            return cols
+        if up.startswith("SELECT DATE_FORMAT(NOW"):
+            return [(self.CUTOFF,)]
+        if up.startswith("SELECT COUNT(*)"):
+            return [(len(self._select(sql)),)]
+        if up.startswith("SELECT CONCAT(COUNT(*)"):
+            sel = self._select(sql[sql.index("FROM `shop`"):].rsplit(") w", 1)[0]) if "1=0" not in sql else []
+            return [(f"{len(sel)}:{sorted((r[0], str(r[1])) for r in sel)}",)]
+        if up.startswith("CHECKSUM TABLE"):
+            return [("shop.orders", hash(tuple(sorted((r[0], str(r[1])) for r in self.rows))))]
+        return []
+
+
+TS_CFG = {"source_engine": "mysql", "target_engine": "mysql", "tables": ["shop.orders"],
+          "checksum_tables": ["shop.orders"], "watermark": {"timestamp_columns": {"shop.orders": "created_at"}, "timestamp_age_minutes": 15}}
+
+
+def ts_rows(n_old=100, n_new=0, nulls=()):
+    rows = [(i, f"2026-10-05 10:{i % 60:02d}:00") for i in range(1, n_old + 1)]
+    rows += [(1000 + i, f"2026-10-05 12:{i:02d}:30") for i in range(n_new)]
+    rows += [(5000 + i, None) for i in nulls]
+    return rows
+
+
+class TimestampWatermarkTests(unittest.TestCase):
+    def lam(self, src, tgt):
+        return L.run_day(dict(TS_CFG), DbConn(src), DbConn(tgt))
+
+    def std(self, src, tgt):
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "mysql", "host": "t"},
+               "tables": ["shop.orders"], "checksum_tables": ["shop.orders"], "watermark": TS_CFG["watermark"]}
+        fake = WatermarkStandaloneTests.fake_batch(None, {"s": src, "t": tgt})
+        with mock.patch.object(soak_check, "run_batch", side_effect=fake):
+            return soak_check.run_day(cfg)
+
+    def both(self, mk_src, mk_tgt):
+        return [f(mk_src(), mk_tgt()) for f in (self.lam, self.std)]
+
+    def test_lagging_recent_rows_and_symmetric_nulls_pass(self):
+        for day in self.both(lambda: FakeTsDb(ts_rows(100, 5, nulls=(1, 2))), lambda: FakeTsDb(ts_rows(100, 2, nulls=(1, 2)))):
+            d = day["detail"]["row_count"]["shop.orders"]
+            self.assertEqual(d["mode"], "timestamp_watermark")
+            self.assertEqual(d["null_rows"], {"source": 2, "target": 2})
+            self.assertEqual((d["source"], d["target"]), (102, 102))   # NULL rows are in the compared set
+            self.assertEqual(d["tail_rows"], {"source": 5, "target": 2})
+            self.assertIs(day["checks"]["row_count"], True)
+            self.assertIs(day["checks"]["checksum"], True)
+
+    def test_asymmetric_nulls_fail_even_when_totals_match(self):
+        # Source row 5000 has NULL; on the target the same row carries an old timestamp:
+        # bounded totals match, so only the explicit NULL comparison catches it.
+        src = lambda: FakeTsDb(ts_rows(100, nulls=(0,)))
+        tgt = lambda: FakeTsDb(ts_rows(100) + [(5000, "2026-10-05 09:00:00")])
+        for day in self.both(src, tgt):
+            d = day["detail"]["row_count"]["shop.orders"]
+            self.assertEqual((d["source"], d["target"]), (101, 101))
+            self.assertEqual(d["null_rows"], {"source": 1, "target": 0})
+            self.assertIs(day["checks"]["row_count"], False)
+
+    def test_not_null_column_issues_no_null_query(self):
+        src, tgt = FakeTsDb(ts_rows(50), nullable="NO"), FakeTsDb(ts_rows(50), nullable="NO")
+        day = self.lam(src, tgt)
+        self.assertNotIn("null_rows", day["detail"]["row_count"]["shop.orders"])
+        self.assertFalse(any("IS NULL" in q for q in src.executed))
+
+    def test_column_missing_on_one_side_falls_back(self):
+        for day in self.both(lambda: FakeTsDb(ts_rows(10)), lambda: FakeTsDb(ts_rows(10), has_col=False)):
+            d = day["detail"]["row_count"]["shop.orders"]
+            self.assertEqual(d["mode"], "whole_table")
+            self.assertIn("not found on target", d["note"])
+
+    def test_type_mismatch_falls_back(self):
+        day = self.lam(FakeTsDb(ts_rows(10)), FakeTsDb(ts_rows(10), col_type="varchar(30)"))
+        self.assertEqual(day["detail"]["row_count"]["shop.orders"]["mode"], "whole_table")
+        self.assertIn("same date/time type", day["detail"]["row_count"]["shop.orders"]["note"])
+
+    def test_scripts_agree(self):
+        a, b = self.both(lambda: FakeTsDb(ts_rows(100, 3, nulls=(1,))), lambda: FakeTsDb(ts_rows(100, 1, nulls=(1,))))
+        self.assertEqual(a["detail"]["row_count"], b["detail"]["row_count"])
+        self.assertEqual(a["checks"], b["checks"])
+
+    def test_resolve_mode_is_joint(self):
+        cols = {"created_at": {"type": "timestamp", "nullable": "NO"}}
+        nullable_t = {"created_at": {"type": "timestamp", "nullable": "YES"}}
+        w = L.watermark_config(TS_CFG)
+        self.assertEqual(L.resolve_mode("shop.orders", w, [], [], cols, nullable_t), ("timestamp", "created_at", True))
+        self.assertEqual(L.resolve_mode("shop.orders", w, [], [], cols, {})[0], None)
+        self.assertEqual(L.check_timestamp_column("c", {"c": {"type": "timestamp with time zone", "nullable": "NO"}},
+                                                  {"c": {"type": "timestamp without time zone", "nullable": "NO"}})[0], False)
+
+
+class TimestampPreflightTests(Stubbed):
+    def test_missing_timestamp_column_is_not_ok(self):
+        self.secret_ok(SRC_ARN)
+        self.secret_ok(TGT_ARN)
+        self.pf_aws_ok()
+        self.s3_get("status.json")
+        self.s3_put_probe("status.json", "PreconditionFailed", 412)
+        self.s3_get("activity-log.jsonl", b"", '"e2"')
+        self.s3_put_probe("activity-log.jsonl", "PreconditionFailed", 412, b"", "application/x-ndjson")
+        self.reports_probe()
+        with mock.patch.dict(os.environ, {"WATERMARK_TIMESTAMP_COLUMNS": '{"shop.orders": "created_at"}'}), \
+             mock.patch.object(L, "_connect", side_effect=[FakeConn(), FakeConn()]), mock.patch("builtins.print"):
+            out = L.handler({"mode": "preflight"}, None)
+        rows = {r["check"]: r for r in out["checks"]}
+        self.assertFalse(out["ok"])
+        for side in ("source", "target"):
+            self.assertEqual(rows[f"{side}_db_watermark shop.orders"]["result"], "Error")
+            self.assertIn("created_at", rows[f"{side}_db_watermark shop.orders"]["message"])
+        self.assertEqual(rows["source_db_watermark shop.payments"]["result"], "PASS")
+
+
+class PgTimeoutTests(unittest.TestCase):
+    def test_connect_bounded_then_query_timeout_applied_to_socket(self):
+        fake_pg = mock.MagicMock()
+        conn = fake_pg.Connection.return_value
+        with mock.patch.object(L, "pg8000", fake_pg), mock.patch.object(L, "_tls_context", return_value=None):
+            got = L._connect("postgres", "db.example", 5432, {"username": "u", "password": "p"}, "d",
+                             connect_timeout=5, read_timeout=300)
+        self.assertIs(got, conn)
+        self.assertEqual(fake_pg.Connection.call_args.kwargs["timeout"], 5)   # connect + TLS + auth
+        conn._usock.settimeout.assert_called_once_with(300)                  # every later read
+
+    def test_real_pg8000_exposes_the_socket_attribute(self):
+        import pg8000.core as core, inspect as _inspect
+        self.assertIn("self._usock", _inspect.getsource(core.CoreConnection.__init__))
+
+    def test_missing_socket_fails_loudly(self):
+        fake_pg = mock.MagicMock()
+        fake_pg.Connection.return_value = mock.MagicMock(spec=["close"])
+        with mock.patch.object(L, "pg8000", fake_pg), mock.patch.object(L, "_tls_context", return_value=None):
+            with self.assertRaises(RuntimeError):
+                L._connect("postgres", "h", 5432, {"username": "u", "password": "p"}, "d", 5, 300)
+
+
+class StreakOrderTests(Stubbed):
+    def test_out_of_order_late_retry_keeps_newer_streak(self):
+        def day(d):
+            return {"date": d, "overall": "green", "needs_agent_review": False, "checks": {"row_count": True}}
+        existing = {"soak": {"days": [day("2026-10-05"), day("2026-10-06")], "n_total": 3,
+                             "consecutive_green": 2, "state": "active"}}
+        self.stubs["_s3"].add_response("get_object", {"Body": body(json.dumps(existing).encode()), "ETag": '"e1"'})
+        self.stubs["_s3"].add_response("put_object", {}, {"Bucket": BUCKET, "Key": "status.json", "Body": ANY,
+                                                          "ContentType": "application/json", "IfMatch": '"e1"'})
+        st = L.update_status_json(BUCKET, "status.json", day("2026-10-05"), 3)   # late retry of Oct 5
+        self.assertEqual(st["soak"]["consecutive_green"], 2)
+        self.assertEqual([d["date"] for d in st["soak"]["days"]], ["2026-10-05", "2026-10-06"])
+
+
+
+class DmsDimensionTests(Stubbed):
+    def test_id_normalization(self):
+        arn = "arn:aws:dms:ap-northeast-2:111122223333:task:CPSTBQCAAFB67LEICTHDNETPSU"
+        self.assertEqual(L.dms_metric_task_id(arn, None), ("CPSTBQCAAFB67LEICTHDNETPSU", None))
+        self.assertEqual(L.dms_metric_task_id("CPSTBQCAAFB67LEICTHDNETPSU", arn), ("CPSTBQCAAFB67LEICTHDNETPSU", None))
+        tid, prob = L.dms_metric_task_id("dryrun4-kiro-fwd-cdc", None)
+        self.assertIn("friendly task name", prob)
+        tid, prob = L.dms_metric_task_id("dryrun4-kiro-fwd-cdc", arn)
+        self.assertEqual(tid, "CPSTBQCAAFB67LEICTHDNETPSU")
+        self.assertIn("not the task's resource id", prob)
+        custom = "arn:aws:dms:ap-northeast-2:111122223333:task:my-custom-fwd1"   # ResourceIdentifier set
+        self.assertEqual(L.dms_metric_task_id(custom, None), ("my-custom-fwd1", None))
+        self.assertEqual(L.dms_metric_task_id("my-custom-fwd1", custom), ("my-custom-fwd1", None))
+        for v in ("dryrun4-kiro-fwd-cdc", arn, "X1", custom):
+            self.assertEqual(L.dms_metric_task_id(v, None), soak_check.dms_metric_task_id(v, None))
+
+    def run_pf(self, env, dms_points):
+        self.secret_ok(SRC_ARN)
+        self.secret_ok(TGT_ARN)
+        self.pf_aws_ok(dms_points=dms_points)
+        self.s3_get("status.json")
+        self.s3_put_probe("status.json", "PreconditionFailed", 412)
+        self.s3_get("activity-log.jsonl", b"", '"e2"')
+        self.s3_put_probe("activity-log.jsonl", "PreconditionFailed", 412, b"", "application/x-ndjson")
+        self.reports_probe()
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "_connect", side_effect=[FakeConn(), FakeConn()]), \
+             mock.patch("builtins.print"):
+            out = L.handler({"mode": "preflight"}, None)
+        return out, {r["check"]: r for r in out["checks"]}
+
+    def test_preflight_empty_dms_datapoints_is_error_not_pass(self):
+        out, rows = self.run_pf({}, [])
+        self.assertFalse(out["ok"])
+        for m in ("CDCLatencyTarget", "CDCLatencySource"):
+            self.assertEqual(rows[f"dms_lag_metric {m}"]["result"], "Error")
+            self.assertIn("resource-id suffix", rows[f"dms_lag_metric {m}"]["message"])
+
+    def test_preflight_flags_friendly_id(self):
+        out, rows = self.run_pf({"DMS_TASK_ID": "dryrun4-kiro-fwd-cdc", "DMS_TASK_ARN": ""}, None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(rows["dms_task_id"]["result"], "Error")
+        self.assertIn("friendly task name", rows["dms_task_id"]["message"])
+
+    def test_normal_run_empty_datapoints_needs_review_with_hint(self):
+        self.stubs["_cloudwatch"].add_response("get_metric_statistics", {"Datapoints": []})
+        errs = []
+        cfg = {"dms_task_id": "ABC", "dms_replication_instance_id": "ri-1", "dms_task_arn": TASK_ARN}
+        self.assertEqual(L.measure_replication_lag(cfg, "mysql", None, None, errs), (None, "dms"))
+        self.assertIn("resource-id suffix", errs[0]["message"])
+
+    def test_normal_run_uses_arn_suffix_dimension(self):
+        self.stubs["_cloudwatch"].add_response(
+            "get_metric_statistics", {"Datapoints": [{"Maximum": 2.0}]},
+            {"Namespace": "AWS/DMS", "MetricName": "CDCLatencyTarget", "StartTime": ANY, "EndTime": ANY,
+             "Period": 300, "Statistics": ["Maximum"],
+             "Dimensions": [{"Name": "ReplicationInstanceIdentifier", "Value": "ri-1"},
+                            {"Name": "ReplicationTaskIdentifier", "Value": "ABC"}]})
+        self.stubs["_cloudwatch"].add_response("get_metric_statistics", {"Datapoints": [{"Maximum": 1.0}]})
+        errs = []
+        cfg = {"dms_task_id": "my-friendly-task", "dms_replication_instance_id": "ri-1", "dms_task_arn": TASK_ARN}
+        self.assertEqual(L.measure_replication_lag(cfg, "mysql", None, None, errs), (2.0, "dms"))
+        self.assertIn("not the task's resource id", errs[0]["message"])
+
+    def test_standalone_empty_datapoints_hint(self):
+        errs = []
+        cfg = {"dms_task_id": "ABC", "dms_replication_instance_id": "ri-1", "region": "ap-northeast-2"}
+        with mock.patch.object(soak_check, "_aws_cli", return_value="[]"):
+            self.assertEqual(soak_check.measure_replication_lag(cfg, "mysql", None, None, errs), (None, "dms"))
+        self.assertIn("resource-id suffix", errs[0]["message"])
+
+
+
+class SoakShapeTests(Stubbed):
+    DAY = {"date": "2026-10-06", "overall": "green", "needs_agent_review": False, "checks": {"row_count": True}}
+
+    def test_shapes_both_scripts(self):
+        for mod in (L, soak_check):
+            st = {"phases": []}
+            self.assertEqual(mod.ensure_soak_shape(st, 3), ["soak", "soak.days", "soak.n_total", "soak.consecutive_green", "soak.state"])
+            self.assertEqual(st["soak"], {"days": [], "n_total": 3, "consecutive_green": 0, "state": "active"})
+            st = {"soak": {"n_total": 1, "started_at": "x"}}
+            self.assertEqual(mod.ensure_soak_shape(st, 3), ["soak.days", "soak.consecutive_green", "soak.state"])
+            self.assertEqual(st["soak"]["n_total"], 1)
+            self.assertEqual(st["soak"]["started_at"], "x")
+            for bad in ([], {"soak": []}, {"soak": "x"}, {"soak": {"days": {}}}, {"soak": {"days": [{"overall": "green"}]}},
+                        {"soak": {"days": [{"date": "2026-10-99"}]}}, {"soak": {"days": [{"date": "2026-02-30"}]}},
+                        {"soak": {"days": [{"date": "2026-10-06", "checks": []}]}},
+                        {"soak": {"days": [{"date": "2026-10-06", "needs_agent_review": "no"}]}}):
+                with self.assertRaises(mod.StatusShapeError):
+                    mod.ensure_soak_shape(bad, 3)
+            with self.assertRaises(mod.StatusShapeError):
+                mod._parse_status(b"{not json" if mod is L else "{not json")
+
+    def test_lambda_writer_creates_missing_days(self):
+        seeded = {"phases": [], "soak": {"n_total": 3, "started_at": "2026-10-05T23:30:00Z", "state": "active"}}
+        self.stubs["_s3"].add_response("get_object", {"Body": body(json.dumps(seeded).encode()), "ETag": '"e1"'})
+        self.stubs["_s3"].add_response("put_object", {}, {"Bucket": BUCKET, "Key": "status.json", "Body": ANY,
+                                                          "ContentType": "application/json", "IfMatch": '"e1"'})
+        st = L.update_status_json(BUCKET, "status.json", dict(self.DAY), 3)
+        self.assertEqual([d["date"] for d in st["soak"]["days"]], ["2026-10-06"])
+        self.assertEqual(st["soak"]["started_at"], "2026-10-05T23:30:00Z")
+        self.assertEqual(st["phases"], [])
+
+    def test_lambda_writer_refuses_malformed(self):
+        self.stubs["_s3"].add_response("get_object", {"Body": body(b'{"soak": []}'), "ETag": '"e1"'})
+        with self.assertRaises(L.StatusShapeError):
+            L.update_status_json(BUCKET, "status.json", dict(self.DAY), 3)
+
+    def test_standalone_writer_creates_missing_days(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "status.json"
+            path.write_text(json.dumps({"soak": {"n_total": 1}}))
+            soak_check.update_status_json(path, dict(self.DAY), 1)
+            out = json.loads(path.read_text())
+            self.assertEqual(len(out["soak"]["days"]), 1)
+            path.write_text('{"soak": {"days": "oops"}}')
+            with self.assertRaises(soak_check.StatusShapeError):
+                soak_check.update_status_json(path, dict(self.DAY), 1)
+
+    def _preflight(self, status_body):
+        self.secret_ok(SRC_ARN)
+        self.secret_ok(TGT_ARN)
+        self.pf_aws_ok()
+        self.s3_get("status.json", status_body)
+        self.s3_put_probe("status.json", "PreconditionFailed", 412, status_body)
+        self.s3_get("activity-log.jsonl", b"", '"e2"')
+        self.s3_put_probe("activity-log.jsonl", "PreconditionFailed", 412, b"", "application/x-ndjson")
+        self.reports_probe()
+        with mock.patch.object(L, "_connect", side_effect=[FakeConn(), FakeConn()]), mock.patch("builtins.print"):
+            out = L.handler({"mode": "preflight"}, None)
+        return out, {r["check"]: r for r in out["checks"]}
+
+    def test_preflight_reports_missing_days_as_pass_with_note(self):
+        out, rows = self._preflight(b'{"phases": []}')
+        self.assertTrue(out["ok"], [r for r in out["checks"] if r["result"] != "PASS"])
+        self.assertIn("soak.days", rows["status_json_shape"]["message"])
+
+    def test_lambda_writer_bad_date_fails_cleanly_on_retry_read(self):
+        self.stubs["_s3"].add_response("get_object", {"Body": body(b'{"soak": {"days": []}}'), "ETag": '"e1"'})
+        self.stubs["_s3"].add_client_error("put_object", "PreconditionFailed", "lost race", 412)
+        # the concurrent writer left an invalid date — the re-read must be re-validated
+        self.stubs["_s3"].add_response("get_object", {"Body": body(b'{"soak": {"days": [{"date": "2026-10-99"}]}}'),
+                                                      "ETag": '"e2"'})
+        with mock.patch.object(L, "_cas_jitter_sleep"), self.assertRaises(L.StatusShapeError):
+            L.update_status_json(BUCKET, "status.json", dict(self.DAY), 3)
+
+    def test_preflight_malformed_status_is_not_ok(self):
+        for bad in (b'{"soak": "x"}', b'{broken', b'{"soak": {"days": [{"date": "2026-10-99"}]}}'):
+            self.setUp_again()
+            out, rows = self._preflight(bad)
+            self.assertFalse(out["ok"])
+            self.assertEqual(rows["status_json_shape"]["result"], "Error")
+
+    def setUp_again(self):
+        self.tearDown()
+        self.setUp()
+
+
+
+class PreflightBudgetTests(Stubbed):
+    def test_budget_checked_before_every_db_round_trip(self):
+        clock = {"ms": 22500, "calls_below_reserve": 0}
+
+        class TickConn(FakeConn):
+            def cursor(self):
+                cur = FakeCursor(self)
+                real = cur.execute
+
+                def execute(sql, params=None):
+                    if clock["ms"] <= L._PREFLIGHT_RESERVE_MS:
+                        clock["calls_below_reserve"] += 1
+                    clock["ms"] -= 1000          # every DB round trip costs a second
+                    return real(sql, params)
+                cur.execute = execute
+                return cur
+
+        class Ctx:
+            def get_remaining_time_in_millis(self):
+                return clock["ms"]
+
+        self.secret_ok(SRC_ARN)
+        self.secret_ok(TGT_ARN)
+        conns = [TickConn(), TickConn()]
+        with mock.patch.dict(os.environ, {"WATERMARK_TIMESTAMP_COLUMNS": "", "MYSQL_REPLICA_STATUS_SIDE": ""}), \
+             mock.patch.object(L, "_connect", side_effect=conns), mock.patch("builtins.print"):
+            out = L.run_preflight(L._load_config(), BUCKET, "", Ctx())
+        self.assertEqual(clock["calls_below_reserve"], 0, "a DB query started with the budget exhausted")
+        self.assertEqual(sum(len(c.executed) for c in conns), 3)   # 22.5, 21.5, 20.5 s; the 4th (19.5 s) is refused
+        results = {r["result"] for r in out["checks"]}
+        self.assertIn("SKIPPED", results)
+        self.assertFalse(out["ok"])
+        self.assertFalse(any(r["result"] == "Error" and "budget" in r["message"] for r in out["checks"]))
+        self.assertTrue(any(r["result"] == "SKIPPED" and "before the next DB query" in r["message"]
+                            for r in out["checks"]), "compound probe stopped mid-way and reported SKIPPED")
+
+
+
+class CrossMidnightTests(unittest.TestCase):
+    def test_standalone_run_date_pinned_at_start(self):
+        import tempfile
+        times = iter([datetime.datetime(2026, 10, 6, 23, 30, tzinfo=datetime.timezone.utc),
+                      datetime.datetime(2026, 10, 7, 0, 5, tzinfo=datetime.timezone.utc)])
+
+        class FakeDT(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next(times, datetime.datetime(2026, 10, 7, 0, 6, tzinfo=datetime.timezone.utc))
+        src, tgt = FakeTableDb(range(1, 100)), FakeTableDb(range(1, 100))
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "mysql", "host": "t"},
+               "tables": ["shop.orders"], "checksum_tables": ["shop.orders"]}
+        fake = WatermarkStandaloneTests.fake_batch(None, {"s": src, "t": tgt})
+        with mock.patch.object(soak_check.datetime, "datetime", FakeDT), \
+             mock.patch.object(soak_check, "run_batch", side_effect=fake):
+            day = soak_check.run_day(cfg)
+            pinned = soak_check.run_day(cfg, "2026-10-05")
+        self.assertEqual(day["date"], "2026-10-06")
+        self.assertEqual(pinned["date"], "2026-10-05")
+
+    def test_standalone_streak_uses_latest_recorded_day(self):
+        import tempfile
+        def day(d):
+            return {"date": d, "overall": "green", "needs_agent_review": False, "checks": {"row_count": True}}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "status.json"
+            path.write_text(json.dumps({"soak": {"days": [day("2026-10-05")], "n_total": 3}}))
+            soak_check.update_status_json(path, day("2026-10-06"), 3)   # written just after midnight
+            self.assertEqual(json.loads(path.read_text())["soak"]["consecutive_green"], 2)
+
+    def test_lambda_run_day_pins_date(self):
+        self.assertEqual(L.run_day(dict(WM_CFG), DbConn(FakeTableDb(range(1, 50))), DbConn(FakeTableDb(range(1, 50))),
+                                   "2026-10-06")["date"], "2026-10-06")
+
+
+
+class ChecksumOnlyTableParityTests(unittest.TestCase):
+    def test_checksum_only_inconclusive_table_is_none_in_both(self):
+        # orders is checksum-only (not in tables) and every row is newer than the watermark:
+        # the bounded checksum covers zero rows — must be None (review), never an empty PASS.
+        mk = lambda: FakeTsDb([(1000 + i, "2026-10-05 12:30:00") for i in range(5)])
+        cfg_l = {**TS_CFG, "tables": ["shop.payments"], "checksum_tables": ["shop.orders"]}
+
+        class Two:
+            def __init__(self):
+                self.o, self.p = mk(), FakeTableDb(range(1, 50))
+            def answer(self, sql):
+                return (self.o if "`orders`" in sql or "6f7264657273" in sql or "DATE_FORMAT(NOW" in sql else self.p).answer(sql)
+        a = L.run_day(cfg_l, DbConn(Two()), DbConn(Two()))
+        cfg_s = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "mysql", "host": "t"},
+                 "tables": ["shop.payments"], "checksum_tables": ["shop.orders"], "watermark": TS_CFG["watermark"]}
+        fake = WatermarkStandaloneTests.fake_batch(None, {"s": Two(), "t": Two()})
+        with mock.patch.object(soak_check, "run_batch", side_effect=fake):
+            b = soak_check.run_day(cfg_s)
+        self.assertIsNone(a["checks"]["checksum"])
+        self.assertIsNone(b["checks"]["checksum"])
+        self.assertEqual(a["detail"]["checksum"], b["detail"]["checksum"])
+        self.assertNotIn("shop.orders", b["detail"]["row_count"])
+
+
+class ScheduledDateTests(unittest.TestCase):
+    def test_scheduled_time_pins_the_utc_day(self):
+        self.assertEqual(L._scheduled_date({"scheduled_time": "2026-10-06T23:30:00Z"}), "2026-10-06")
+        self.assertIsNone(L._scheduled_date({"mode": "x"}))
+        self.assertIsNone(L._scheduled_date({"scheduled_time": "<aws.scheduler.scheduled-time>"}))
+        self.assertIsNone(L._scheduled_date(None))
+
+    def test_streak_counts_back_from_the_run_day_not_now(self):
+        days = [{"date": "2026-10-05", "overall": "green", "needs_agent_review": False, "checks": {"a": True}},
+                {"date": "2026-10-06", "overall": "green", "needs_agent_review": False, "checks": {"a": True}}]
+        self.assertEqual(L._green_streak(list(days), "2026-10-06"), 2)
+
+
+class PresignCredentialLifetimeTests(unittest.TestCase):
+    NOW = datetime.datetime(2026, 10, 5, 18, 0, tzinfo=datetime.timezone.utc)
+
+    def test_long_term_keys_keep_requested_expiry(self):
+        eff, secs, warn = presign.effective_expiry(129600, False, None, now=self.NOW)
+        self.assertEqual(secs, 129600)
+        self.assertIsNone(warn)
+
+    def test_temporary_credentials_cap_the_expiry_and_warn(self):
+        cred_exp = self.NOW + datetime.timedelta(minutes=58)
+        eff, secs, warn = presign.effective_expiry(172800, True, cred_exp, now=self.NOW)
+        self.assertEqual(eff, cred_exp)
+        self.assertEqual(secs, 58 * 60)
+        self.assertIn("TEMPORARY", warn)
+        self.assertIn("re-issue on demand", warn)
+        self.assertIn("A3", warn)
+
+    def test_temporary_with_unknown_expiry_is_unknown_never_precise(self):
+        eff, secs, warn = presign.effective_expiry(3600, True, None, now=self.NOW)
+        self.assertIsNone(eff)
+        self.assertIsNone(secs)
+        self.assertIn("not known", warn)
+        line = presign.expiry_line(None, 3600, now=self.NOW)
+        self.assertEqual(line, "EFFECTIVE EXPIRY: unknown — no later than the credential session's expiry "
+                               "(temporary credentials), at most 2026-10-05T19:00:00+00:00")
+
+    def test_env_expiration_is_authoritative_when_no_refresh_metadata(self):
+        creds = mock.MagicMock(spec=["get_frozen_credentials"])
+        creds.get_frozen_credentials.return_value = mock.MagicMock(token="tok")
+        session = mock.MagicMock()
+        session.get_credentials.return_value = creds
+        self.assertEqual(presign.credential_lifetime(session, environ={}), (True, None))
+        got = presign.credential_lifetime(session, environ={"AWS_CREDENTIAL_EXPIRATION": "2026-10-05T19:30:00Z"})
+        self.assertEqual(got, (True, datetime.datetime(2026, 10, 5, 19, 30, tzinfo=datetime.timezone.utc)))
+
+    def test_main_prints_unknown_for_temporary_without_expiry(self):
+        client = mock.MagicMock()
+        client.generate_presigned_url.side_effect = lambda op, Params, ExpiresIn: f"https://b.example/{Params['Key']}?s"
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(presign, "resolve_bucket_region", return_value="ap-northeast-2"), \
+             mock.patch.object(presign, "make_signing_client", return_value=client), \
+             mock.patch.object(presign, "credential_lifetime", return_value=(True, None)), \
+             mock.patch.object(presign, "verify_url", return_value=(True, 200, "")), \
+             mock.patch.object(sys, "argv", ["x", "--bucket", "b", "--expires-seconds", "172800"]), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            presign.main()
+        self.assertIn("EFFECTIVE EXPIRY: unknown — no later than the credential session's expiry", out.getvalue())
+        self.assertNotRegex(out.getvalue(), r"EFFECTIVE EXPIRY: \d")
+
+    def test_credential_lifetime_detects_session_token(self):
+        exp = datetime.datetime(2026, 10, 5, 19, 0)  # naive -> treated as UTC
+        creds = mock.MagicMock()
+        creds.get_frozen_credentials.return_value = mock.MagicMock(token="FwoG...")
+        creds._expiry_time = exp
+        session = mock.MagicMock()
+        session.get_credentials.return_value = creds
+        temporary, expiry = presign.credential_lifetime(session)
+        self.assertTrue(temporary)
+        self.assertEqual(expiry, exp.replace(tzinfo=datetime.timezone.utc))
+        creds.get_frozen_credentials.return_value = mock.MagicMock(token=None)
+        del creds._expiry_time
+        self.assertEqual(presign.credential_lifetime(session, environ={}), (False, None))
+
+    def test_main_reports_effective_not_requested_expiry(self):
+        client = mock.MagicMock()
+        client.generate_presigned_url.side_effect = lambda op, Params, ExpiresIn: f"https://b.example/{Params['Key']}?s"
+        soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=50)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(presign, "resolve_bucket_region", return_value="ap-northeast-2"), \
+             mock.patch.object(presign, "make_signing_client", return_value=client), \
+             mock.patch.object(presign, "credential_lifetime", return_value=(True, soon)), \
+             mock.patch.object(presign, "verify_url", return_value=(True, 200, "")), \
+             mock.patch.object(sys, "argv", ["x", "--bucket", "b", "--expires-seconds", "172800"]), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            presign.main()
+        self.assertIn("TEMPORARY", err.getvalue())
+        self.assertIn(f"EFFECTIVE EXPIRY: {soon.isoformat(timespec='seconds')}", out.getvalue())
+        self.assertIn("limited by temporary signing credentials", out.getvalue())
+        self.assertIn("CUSTOMER LINK:", out.getvalue())
+
+
 class PresignRegionTests(unittest.TestCase):
     def client(self):
         c = boto3.client("s3", region_name="us-east-1")
@@ -494,6 +1044,186 @@ class PresignRegionTests(unittest.TestCase):
         url = presign.presign(c, "my-bucket", "index.html", 60)
         self.assertTrue(url.startswith("https://my-bucket.s3.ap-northeast-2.amazonaws.com/index.html?"), url)
         self.assertIn("%2Fap-northeast-2%2Fs3%2Faws4_request", url)
+
+
+class FakeTableDb:
+    """One side of a MySQL pair holding a single table `shop`.`orders` with integer ids
+    (ids=[...]) — answers exactly the SQL shapes the watermark path issues."""
+
+    def __init__(self, ids, pk=("id", "bigint"), values=None):
+        self.ids, self.pk, self.values, self.executed = list(ids), pk, values or {}, []
+
+    def answer(self, sql):
+        import re as _re
+        self.executed.append(sql)
+        up = sql.strip().upper()
+        if "KEY_COLUMN_USAGE" in up:
+            return [self.pk] if self.pk else []
+        if up.startswith("SELECT COLUMN_NAME"):
+            return [("id", "bigint", "NO", None), ("v", "varchar(10)", "YES", None)]
+        if up.startswith("SELECT MAX("):
+            return [(max(self.ids) if self.ids else None,)]
+        if up.startswith("SELECT MIN("):
+            return [(min(self.ids) if self.ids else None,)]
+        m = _re.search(r"WHERE `id` (<=|>) (-?\d+)", sql)
+        sel = self.ids if not m else [i for i in self.ids if (i <= int(m.group(2)) if m.group(1) == "<=" else i > int(m.group(2)))]
+        if up.startswith("SELECT COUNT(*)"):
+            return [(len(sel),)]
+        if up.startswith("SELECT CONCAT(COUNT(*)"):
+            return [(f"{len(sel)}:{sum(self.values.get(i, i) for i in sel)}",)]
+        if up.startswith("CHECKSUM TABLE"):
+            return [("shop.orders", sum(self.values.get(i, i) for i in self.ids))]
+        return []
+
+
+class DbConn:
+    def __init__(self, db):
+        self.db = db
+
+    def cursor(self):
+        db = self.db
+
+        class C:
+            description = [("x",)]
+
+            def __enter__(s):
+                return s
+
+            def __exit__(s, *a):
+                return False
+
+            def execute(s, sql, params=None):
+                s._rows = db.answer(sql)
+
+            def fetchall(s):
+                return s._rows
+        return C()
+
+    def close(self):
+        pass
+
+
+WM_CFG = {"source_engine": "mysql", "target_engine": "mysql", "tables": ["shop.orders"],
+          "checksum_tables": ["shop.orders"], "watermark": {"pk_margin": 1000}}
+
+
+class WatermarkLambdaTests(unittest.TestCase):
+    def run_day(self, src, tgt, **over):
+        cfg = {**WM_CFG, **over}
+        return L.run_day(cfg, DbConn(src), DbConn(tgt))
+
+    def test_live_tail_is_informational_not_red(self):
+        # Target lags 50 rows behind: whole-table compare would be RED every day.
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 99951)))
+        self.assertIs(day["checks"]["row_count"], True)
+        self.assertIs(day["checks"]["checksum"], True)
+        d = day["detail"]["row_count"]["shop.orders"]
+        self.assertEqual(d["mode"], "pk_watermark")
+        self.assertEqual(d["watermark"], 99950 - 1000)
+        self.assertEqual(d["tail_rows"], {"source": 1050, "target": 1000})
+        self.assertEqual((d["source"], d["target"]), (98950, 98950))
+        self.assertEqual(day["detail"]["checksum"]["shop.orders"]["mode"], "pk_watermark")
+
+    def test_whole_table_when_disabled_keeps_old_behaviour(self):
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 99951)),
+                           watermark={"enabled": False})
+        self.assertIs(day["checks"]["row_count"], False)
+        self.assertEqual(day["detail"]["row_count"]["shop.orders"]["mode"], "whole_table")
+        self.assertIn("disabled", day["detail"]["row_count"]["shop.orders"]["note"])
+
+    def test_no_integer_pk_falls_back_and_says_so(self):
+        day = self.run_day(FakeTableDb(range(1, 101), pk=("code", "varchar")),
+                           FakeTableDb(range(1, 101), pk=("code", "varchar")))
+        d = day["detail"]["row_count"]["shop.orders"]
+        self.assertEqual(d["mode"], "whole_table")
+        self.assertIn("no single-column integer primary key", d["note"])
+        self.assertIs(day["checks"]["row_count"], True)
+
+    def test_mismatch_below_watermark_is_red(self):
+        src = FakeTableDb(range(1, 100001))
+        tgt = FakeTableDb([i for i in range(1, 100001) if i != 500])   # a lost old row
+        day = self.run_day(src, tgt)
+        self.assertIs(day["checks"]["row_count"], False)
+        self.assertEqual(day["overall"], "red")
+        self.assertTrue(day["needs_agent_review"])
+
+    def test_changed_old_row_fails_bounded_checksum(self):
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 100001), values={10: 99}))
+        self.assertIs(day["checks"]["row_count"], True)
+        self.assertIs(day["checks"]["checksum"], False)
+
+    def test_small_table_below_margin_uses_whole_table(self):
+        day = self.run_day(FakeTableDb(range(1, 51)), FakeTableDb(range(1, 51)))
+        d = day["detail"]["row_count"]["shop.orders"]
+        self.assertEqual(d["mode"], "whole_table")
+        self.assertIn("margin", d["note"])
+        self.assertIs(day["checks"]["row_count"], True)
+
+    def test_bounded_verdict_inconclusive_is_none(self):
+        self.assertIsNone(L.bounded_verdict(0, 0, 5, 3))
+        self.assertIs(L.bounded_verdict(10, 10, 0, 0), True)
+        self.assertIsNone(L.combine_checks([True, None]))
+        self.assertIs(L.combine_checks([None, False]), False)
+
+    def test_env_config(self):
+        env = {**ENV, "WATERMARK_PK_MARGIN": "50", "WATERMARK_TIMESTAMP_COLUMNS": '{"shop.orders": "created_at"}',
+               "WATERMARK_ENABLED": "", "DB_QUERY_TIMEOUT_SECONDS": ""}
+        with mock.patch.dict(os.environ, env):
+            cfg = L._load_config()
+        self.assertEqual(cfg["watermark"]["pk_margin"], 50)
+        self.assertTrue(cfg["watermark"]["enabled"])
+        self.assertEqual(cfg["watermark"]["timestamp_columns"], {"shop.orders": "created_at"})
+        self.assertEqual(cfg["db_query_timeout_seconds"], 300)
+
+
+class WatermarkStandaloneTests(unittest.TestCase):
+    @staticmethod
+    def fake_batch(_self, dbs):
+        def run_batch(family, conn, sqls, headers=False, timeout=None):
+            db = dbs[conn["host"]]
+            return [["\t".join("NULL" if v is None else str(v) for v in row) for row in db.answer(q)] for q in sqls]
+        return run_batch
+
+    def run_day(self, src, tgt, **over):
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "mysql", "host": "t"},
+               "tables": ["shop.orders"], "checksum_tables": ["shop.orders"], "watermark": {"pk_margin": 1000}, **over}
+        with mock.patch.object(soak_check, "run_batch", side_effect=self.fake_batch(None, {"s": src, "t": tgt})):
+            return soak_check.run_day(cfg)
+
+    def test_live_tail_is_informational_not_red(self):
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 99951)))
+        self.assertIs(day["checks"]["row_count"], True)
+        self.assertIs(day["checks"]["checksum"], True)
+        d = day["detail"]["row_count"]["shop.orders"]
+        self.assertEqual((d["mode"], d["watermark"], d["tail_rows"]), ("pk_watermark", 98950, {"source": 1050, "target": 1000}))
+
+    def test_whole_table_fallback_and_red(self):
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 99951)), watermark={"enabled": False})
+        self.assertIs(day["checks"]["row_count"], False)
+        self.assertEqual(day["detail"]["row_count"]["shop.orders"]["mode"], "whole_table")
+
+    def test_mismatch_below_watermark_is_red(self):
+        day = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 100001), values={10: 99}))
+        self.assertIs(day["checks"]["checksum"], False)
+
+    def test_scripts_agree_on_detail(self):
+        a = self.run_day(FakeTableDb(range(1, 100001)), FakeTableDb(range(1, 99951)))
+        b = L.run_day({**WM_CFG}, DbConn(FakeTableDb(range(1, 100001))), DbConn(FakeTableDb(range(1, 99951))))
+        self.assertEqual(a["detail"]["row_count"], b["detail"]["row_count"])
+        self.assertEqual(a["checks"], b["checks"])
+
+    def test_sql_builders_identical(self):
+        for fam in ("mysql", "postgres"):
+            for name in ("_pk_sql",):
+                self.assertEqual(getattr(L, name)(fam, "shop.orders"), getattr(soak_check, name)(fam, "shop.orders"))
+            self.assertEqual(L._max_sql(fam, "shop.orders", "id"), soak_check._max_sql(fam, "shop.orders", "id"))
+            self.assertEqual(L._cutoff_sql(fam, 15), soak_check._cutoff_sql(fam, 15))
+            types = {"id": "bigint", "b": "varbinary(16)", "v": "varchar(5)"}
+            self.assertEqual(L._bounded_checksum_sql(fam, "shop.orders", types, "`id` <= 5"),
+                             soak_check._bounded_checksum_sql(fam, "shop.orders", types, "`id` <= 5"))
+        self.assertIn("HEX(`b`)", L._bounded_checksum_sql("mysql", "shop.orders", {"b": "varbinary(16)"}, "1=0"))
+        self.assertEqual(L.WATERMARK_DEFAULTS, soak_check.WATERMARK_DEFAULTS)
+
 
 
 if __name__ == "__main__":
