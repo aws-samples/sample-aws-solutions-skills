@@ -16,7 +16,10 @@
 > Not every item below needs its own block. Items that just restate a decision already
 > made and dated elsewhere (§1) are pure reference — nothing to confirm twice.
 
-## 1. Engagement scope (reference only — decided and dated in `discovery-questions.md`, not re-confirmed here)
+## 1. Engagement scope (reference only — answers in discovery, decisions and dates in the plan)
+
+The mode is recorded at Phase 0; GATE 1 acceptance stays in the plan's GATE 1 row.
+This table points to those existing decisions and does not require reconfirmation.
 
 | | Value | Source |
 |---|---|---|
@@ -60,13 +63,18 @@ Tags in use, appended as they arise:
 - **A3** — Target/production infrastructure deploy.
 - **GATE 2** — Method, cost, architecture, rollback strategy approved.
 - **GATE 3** — Validation evidence accepted.
-- **Soak-exit** — N consecutive green periods reached; parallel run may end.
+- **Soak-exit** — the approved method's readiness evidence and remaining conditions
+  accepted: observed CDC intervals, or an explicitly accepted static-copy alternative
+  with the final frozen-copy obligation retained (`method-readiness.md`).
 - **A4** — Cutover execution (**Mode 3 only** — window, runbook version).
 - **A4b** — Handover acceptance (**Mode 2 only** — package received, cutover ownership
   transferred).
-- **A5** — Rollback execution (pre-authorized on stated abort criteria, or ad hoc). A live
-  rollback or re-cutover always gets its own A5 block presented and accepted in full — a
-  chat request ("go with B") is the trigger to present it, not the acceptance.
+- **A5** — Rollback execution (pre-authorized on stated abort criteria, or ad hoc).
+  Reuse an already accepted A5 when its exact resource/action scope, script revision,
+  conditions and validity cover the recovery. Do not ask again merely because the
+  approved abort criterion occurred. Changed scope needs a revised A5 accepted before
+  execution; another cutover needs a new A4. Uncertain write state still blocks source
+  release until the rollback runbook's reconciliation conditions pass.
 - **A6** — Decommission (exact resource list).
 - **Approver present at cutover** (**Mode 3 only**) — confirmed present for the window,
   no name — just the confirmation + date.

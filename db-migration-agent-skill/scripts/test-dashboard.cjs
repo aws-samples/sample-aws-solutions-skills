@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // No dependencies. Exercise the shipped IIFE, including both fetch paths and polling.
-// Fixtures are read in place; optional-field cases extend real snapshots in memory.
-// Usage: node scripts/test-dashboard.cjs [/path/to/dryrun3/engagements]
+// Defaults to the public synthetic fixture; supplied engagements are read in place.
+// Optional-field cases always extend the synthetic baseline in memory, never real history.
+// Usage: node scripts/test-dashboard.cjs [/path/to/engagements]
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
-const fixtures = path.resolve(process.argv[2] || path.join(root, '../dryrun3/engagements'));
+const syntheticFixtures = path.join(__dirname, 'fixtures/engagements');
+const fixtures = path.resolve(process.argv[2] || syntheticFixtures);
 const source = fs.readFileSync(path.join(root, 'shared/assets/dashboard.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'shared/templates/dashboard.html'), 'utf8');
 const spec = fs.readFileSync(path.join(root, 'shared/reference/dashboard.md'), 'utf8');
@@ -108,8 +110,10 @@ function optionalPaths(value, prefix = []) {
 async function main() {
   const files = fs.readdirSync(fixtures).map(name => path.join(fixtures, name, 'dashboard/status.json'))
     .filter(file => fs.existsSync(file)).sort();
-  assert(files.length, 'No real engagement fixtures found');
-  let small, smallLog;
+  assert(files.length, `No engagement fixtures found in ${fixtures} (expected */dashboard/status.json)`);
+  const baselineDir = path.join(syntheticFixtures, 'synthetic/dashboard');
+  const small = JSON.parse(fs.readFileSync(path.join(baselineDir, 'status.json'), 'utf8'));
+  const smallLog = fs.readFileSync(path.join(baselineDir, 'activity-log.jsonl'), 'utf8');
   for (const file of files) {
     const status = JSON.parse(fs.readFileSync(file, 'utf8'));
     const logPath = path.join(path.dirname(file), 'activity-log.jsonl');
@@ -133,10 +137,9 @@ async function main() {
       assert.equal(JSON.stringify(status), original, 'Renderer mutated fixture');
       assert.deepEqual(keyShape(page.labels.en), keyShape(page.labels.ko), 'Translation key/type mismatch');
     }
-    if (file.endsWith('/small/dashboard/status.json')) { small = status; smallLog = log; }
     console.log(`PASS local + presigned: ${file}`);
   }
-  assert(small, 'The small real engagement is required for optional-field cases');
+  assert(small, 'The synthetic baseline is required for optional-field cases');
   const enriched = structuredClone(small);
   Object.assign(enriched, actionFields, estimateFields);
   Object.assign(enriched.phases[2], phaseFields);

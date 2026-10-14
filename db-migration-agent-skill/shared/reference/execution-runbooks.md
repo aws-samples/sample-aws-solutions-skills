@@ -6,6 +6,11 @@
 > schema-object migration (DEFINER stripping, logins/Agent jobs, TDE certificates), and
 > the pre-production rehearsal. DMS deep configuration: [dms-best-practices.md](dms-best-practices.md).
 
+Use [execution-control.md](execution-control.md)'s tested local supervisor for reviewed
+operation/verifier scripts, and its adapter contract for remote jobs. Prepare and test
+those scripts before the window; a failed transport response does not prove a remote
+write failed. Match readiness and rehearsal reuse to [method-readiness.md](method-readiness.md).
+
 ## Method-Specific Procedures
 
 Credential-bearing SQL below is a template for **on-host, in-memory execution only**:
@@ -16,7 +21,7 @@ never save the generated login statements in engagement files.
 
 **Offline/full-load-only methods:** Phase 6 copies are rehearsal data, not a current
 production target. Without proven CDC, use the static-validation window in
-`engagement-safety.md`, not a CDC soak. Budget a **final complete export/backup and
+`method-readiness.md`, not a CDC soak. Budget a **final complete export/backup and
 replacement restore inside the Phase 8 write freeze**, followed by final validation
 before repointing clients. Keep every source writer fenced throughout. Mode 3 needs
 A4 first; in Mode 2 the customer's team executes this final-copy procedure after
@@ -1078,17 +1083,23 @@ drill with zero loss). A rehearsal counts as done only when, on the clone/stand-
    AUTO_INCREMENT/sequences → repoint a test client → **bidirectional verification**
    (client healthy *and* visible in the new DB's processlist) — with the **write pause
    measured** from first rejected write to first accepted write on the new side.
-2. **Rollback path actually exercised** — the reverse channel started from the recorded
-   post-cutover position, with an INSERT, an UPDATE and a DELETE on the new side each
-   confirmed on a **source-version stand-in** (e.g. 8.0 for an 8.0 → 8.4 move), then a
-   repoint back; or, for write-log replay, a replay run and verified. **Endpoint
-   test-connection ≠ rollback proven** — it shows reachability and credentials only.
+   Offline methods replace drain/stop with the full replacement copy and complete
+   planned validation while the source remains fenced (`method-readiness.md`).
+2. **Approved rollback path actually exercised** — for supported reverse replication,
+   start at the recorded post-cutover position, confirm INSERT/UPDATE/DELETE on a
+   **source-version stand-in**, and repoint back. For write-log replay, execute and
+   verify the replay. For acknowledged RPO, rehearse containment/failback and record the
+   observed loss against the accepted terms; never label that lossless. Every branch
+   verifies persistent config, runtime and both-side sessions before source release.
+   **Endpoint test-connection ≠ rollback proven** — it shows reachability and credentials only.
 3. **Timings recorded** per step as *measured*; anything reconstructed is labelled
    *estimated*.
 
 Anything skipped (e.g. no stand-in available, reverse task not run) is a **recorded waiver**
 (§Waiver protocol in `engagement-safety.md`) that names the untested step and its risk —
-never "met", and never described to the customer as proven.
+never recorded as performed or described to the customer as proven. The aggregate
+readiness requirement may be satisfied by a confirmed waiver only when its remaining
+conditions pass; the dashboard detail must still label the omitted coverage as waived.
 
 When recording rehearsal results, also refresh the existing phase's findings/work/evidence,
 the `rehearsal` gate's item details, and `estimates.timeline` in the dashboard

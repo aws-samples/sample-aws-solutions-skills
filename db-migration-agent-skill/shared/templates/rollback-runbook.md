@@ -1,38 +1,67 @@
 # Rollback Runbook — fail back {target} → {source}
 
-> Generated alongside the cutover runbook with real values. Assumes the rollback strategy
-> approved at GATE 2/GATE 4: **{reverse-replication (lossless) / write-log replay / acknowledged-RPO}**.
-> Valid until {cutover + 7 days} — after source decommission this runbook is void.
+> Generate with real values and only applicable branches. Strategy approved at GATE 2/
+> GATE 4: **{supported reverse replication / tested write-log replay / acknowledged RPO}**.
+> Valid until {rollback-window end, UTC}; void after source decommission.
+> Follow [cutover-procedures.md §Rollback Procedures](../reference/cutover-procedures.md#rollback-procedures)
+> for containment, write-state classification and release criteria.
 
-**Executed by:** {customer team (Mode 2 — handed over with the cutover runbook) /
-migration agent (Mode 3)} — same owner as the cutover runbook.
+**Executed by:** {customer team in Mode 2 / migration agent in Mode 3}.
+**Trigger and authority:** {abort criterion / decision}; {accepted A5 block, exact scope
+and conditions}. Reuse that approval within scope; changed scope needs acceptance first.
+**Announce on:** {channel}. **Runbook/script revision:** {revision/hash}.
+**Exact source / target / client identities and versions:** {plan evidence reference}.
+**Step budgets:** {per-step measured duration + rehearsal evidence, or estimated basis}.
 
-**Trigger:** one of the abort criteria in cutover-runbook.md, or approver decision.
-**Announce first:** {channel}. Rollback is itself a cutover — same discipline.
+## Capture and contain
 
-## If reverse replication is running (lossless path)
-| ✅ | Step | Command | Verify |
-|---|------|---------|--------|
-| ▢ | 1. Maintenance mode ON | {command} | banner |
-| ▢ | 2. Freeze TARGET | {fence app/job reconnects; stop writers; drain/terminate existing sessions and transactions, including prepared transactions}; MySQL read-only globals / PG read-only default are supplementary | no writable sessions/transactions; reconnect fence tested |
-| ▢ | 3. Drain reverse CDC to 0 | CDCLatencySource=0 ∧ CDCLatencyTarget=0 on {rev-arn} | =0 |
-| ▢ | 4. Stop reverse task | `aws dms stop-replication-task --replication-task-arn {rev-arn}` | `stopped` |
-| ▢ | 5. Reset AUTO_INCREMENT/sequences on SOURCE above new max | {generated statements} | next-val > max |
-| ▢ | 6. Un-freeze source | {undo of cutover step 3 — read_only=OFF or start clients} | writable |
-| ▢ | 7. Revert repoint | {exact revert: secret → source values / DNS swap back / config+unit revert} | — |
-| ▢ | 8. Refresh/restart clients | {per-client commands} | up |
-| ▢ | 9. Bidirectional verify against SOURCE | health UP ∧ source processlist shows {client IPs} | both |
-| ▢ | 10. Maintenance OFF · keep TARGET running read-only (do NOT delete) | | |
+| ✅ | Step | Command / evidence to fill | Verification |
+|---|------|----------------------------|--------------|
+| ▢ | 1. Enter/retain maintenance and source writer fence | {commands; last verified switch step; attempted mutations/results} | source app/jobs cannot write or reconnect |
+| ▢ | 2. Contain target writers | {stop/fence app/jobs and reconnects; drain sessions and transactions, including prepared transactions} | fence effective; no residual writers; unavailable evidence recorded as unknown |
+| ▢ | 3. Classify target writes | {switch journal, reachable target/audit evidence, marker/checkpoint results and UTC interval coverage} | {proven none / confirmed writes / unknown}; failed or absent marker alone is not proof of no writes |
 
-## If reverse replication was NOT possible ({chosen alternative})
-- **Write-log replay:** freeze target (steps 1–2) → export post-cutover writes from
-  {audit table / SQS / Kinesis / request log} since {cutover-ts} → replay against source
-  with {prepared replay script} → verify counts on affected tables → continue steps 6–10.
-- **Acknowledged RPO:** confirm with approver that writes from {cutover-ts}→now on the
-  target are accepted as lost (est. volume: query `{count query}` on target) → steps 6–10.
-  Record the actual loss in migration-plan.md §Rollback record.
+**Unknown target/write state:** keep fences and stop before source release. Use already
+authorized reads to investigate; preserve errors and evidence. An unreachable target,
+failed query or ambiguous write timeout cannot authorize unfencing or a zero-loss claim.
+
+## Reconcile data — choose the evidenced branch
+
+| Branch | Required procedure before client recovery/source release |
+|---|---|
+| Proven no target writes | {evidence covering all writers and the switch interval}; retain source as authoritative, continue below |
+| Supported reverse replication | {final target checkpoint}; fresh post-freeze lag/error evidence + verify final changes applied on source → {stop reverse channel and verify stopped} |
+| Tested write-log replay | {complete log and bounds} → {ordered/idempotent replay procedure} → {reconcile affected rows/aggregates and checkpoint} |
+| Acknowledged RPO | {accepted loss terms} compared with {observed stranded writes and coverage}; record actual loss, preserve target evidence; outside terms or unknown scope blocks release |
+
+**Source high-water marks:** {exact version-specific reset statements and verification,
+or evidenced not applicable}. “Task running” alone is not lossless. Do not use native
+MySQL 8.4 → external 8.0 as a lossless branch; use the approved supported alternative.
+
+## Reconcile every client, then release source writes
+
+Fill one row per client, including any client whose switch failed midway.
+
+| Client | Persistent revert + upstream deploy/reconciler state | Runtime reload/restart + effective endpoint | Source AND target session evidence |
+|---|---|---|---|
+| {service/job} | {original unit/drop-in/env/config/secret/DNS revision; exact revert and read-back} | {daemon-reload/redeploy/pool refresh; PID/start identity, redacted effective args/env} | {source read/auth success; target writers/transactions absent or independently contained with write state reconciled} |
+
+| ✅ | Step | Verification / command |
+|---|------|------------------------|
+| ▢ | 4. Verify persistent source config and deployment origin | {all changed layers match approved originals; automation cannot reapply target config} |
+| ▢ | 5. Reload/redeploy and refresh processes/pools while writes remain fenced | {effective runtime uses source; only read-safe clients/probes started; startup writers remain stopped} |
+| ▢ | 6. Verify data and both-side sessions | {data branch resolved, high-water marks checked, source read/auth healthy, target writers contained, inventory reconciled} |
+| ▢ | 7. Release SOURCE application fence | {exact command}; only after steps 1–6 pass within accepted A5 scope |
+| ▢ | 8. Verify authorized source write/read and clients; exit maintenance | {write probe and session evidence; target stays isolated} |
+
+A source-connected old process with a target-pointing unit file is **not recovered**.
+A reverted file with a target-connected live pool is **not recovered**. Failed checks
+retain fences and maintenance; do not skip to step 7.
 
 ## Afterwards
-- Root-cause in migration-plan.md §Rollback record before any re-attempt.
-- Keep the target + DMS resources; re-sync with `--start-replication-task-type resume-processing` for attempt #2.
-- Re-run the full validation phase before scheduling the next window.
+
+Record times, actual write pause/loss (unknown where unverified), config/process/session
+evidence, root cause and remaining work in the plan and dashboard. Retain target and
+replication resources. Before another window, re-run the full validation phase and
+refresh affected preparation/rehearsal and authorization. Decide reseed/resume from proven
+direction, checkpoint and data history, never an unconditional `resume-processing`.

@@ -2,7 +2,8 @@
 """Offline tests for shared/scripts/dashboard_update.py — temp directories only.
 
 Run: python3 -B scripts/test_dashboard_update.py [ENGAGEMENTS_DIR ...]
-Optional ENGAGEMENTS_DIR args (e.g. a dry-run's engagements/ folder): every
+Defaults to fixtures/engagements, a public synthetic test snapshot (not migration history).
+Optional ENGAGEMENTS_DIR args override that fixture collection: every
 */dashboard/status.json found is COPIED to a temp dir and patched there — the originals
 are never written.
 """
@@ -21,8 +22,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared" / "scripts"))
 import dashboard_update as du  # noqa: E402
 
-EXTRA_DIRS = [Path(a) for a in sys.argv[1:]]
-del sys.argv[1:]
+EXTRA_DIRS = [Path(__file__).resolve().parent / "fixtures" / "engagements"]
+if __name__ == "__main__":
+    EXTRA_DIRS = [Path(a) for a in sys.argv[1:]] or EXTRA_DIRS
+    del sys.argv[1:]
 
 
 def seed_status():
@@ -428,27 +431,285 @@ class FieldValidationTests(Base):
                                                                     "measured_write_pause_seconds": 0}}))
         self.assertEqual(rc, 0, err)
 
+
+class FailureHandlingTests(Base):
+    ARGS = ("--patch", json.dumps({"current_activity": "new"}), "--log-title", "demo",
+            "--plan-section", "Phase 6", "--plan-line", "NEWLINE")
+
+    def paths(self):
+        return self.dash / "status.json", self.dash / "activity-log.jsonl", self.plan
+
+    def snapshot(self):
+        return tuple(p.read_bytes() if p.exists() else None for p in self.paths())
+
+    def assert_failed_unchanged(self, result, before):
+        rc, out, err = result
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(out, "")
+        self.assertIn("FAILED", err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(sorted(p.name for p in self.dash.iterdir()),
+                         [".status.lock", "activity-log.jsonl", "status.json"])
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["dashboard", "migration-plan.md"])
+
+    def test_persistent_read_failure_does_not_prevent_rollback(self):
+        real_write, real_read, real_bytes = du._atomic_write, Path.read_text, Path.read_bytes
+        for target in (self.paths()[0], self.plan):
+            with self.subTest(target=target.name):
+                before = self.snapshot()
+                committed = False
+
+                def write(path, text):
+                    nonlocal committed
+                    real_write(path, text)
+                    if Path(path) == self.paths()[0]:
+                        committed = True
+
+                def read(path, *args, **kwargs):
+                    if committed and path == target:
+                        raise OSError(5, "synthetic persistent read failure")
+                    return real_read(path, *args, **kwargs)
+
+                def read_bytes(path):
+                    if committed and path == target:
+                        raise OSError(5, "synthetic persistent read failure")
+                    return real_bytes(path)
+
+                with mock.patch.object(du, "_atomic_write", side_effect=write), \
+                        mock.patch.object(Path, "read_text", read), \
+                        mock.patch.object(Path, "read_bytes", read_bytes):
+                    result = self.run_du(*self.ARGS)
+                self.assert_failed_unchanged(result, before)
+                self.assertIn("rolled back", result[2])
+                self.assertNotIn("ROLLBACK INCOMPLETE", result[2])
+
+    def test_empty_log_readback_rolls_back(self):
+        before = self.snapshot()
+        real = Path.read_text
+
+        def read(path, *args, **kwargs):
+            return "" if path == self.paths()[1] else real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", read):
+            result = self.run_du(*self.ARGS)
+        self.assert_failed_unchanged(result, before)
+        self.assertIn("read-back", result[2])
+
+    def test_invalid_utf8_in_existing_log_rolls_back(self):
+        self.paths()[1].write_bytes(b"\xff\n")
+        before = self.snapshot()
+        self.assert_failed_unchanged(self.run_du(*self.ARGS), before)
+
+    def test_rollback_restores_original_bytes_including_crlf(self):
+        status, log, plan = self.paths()
+        status.write_bytes((json.dumps(seed_status(), indent=2) + "\n").replace("\n", "\r\n").encode("utf-8"))
+        plan.write_bytes(plan.read_bytes().replace(b"\n", b"\r\n"))
+        log.write_bytes('{"title":"데모"}'.encode("utf-8"))  # byte size, no final newline
+        before = self.snapshot()
+        real = du._load_json
+        calls = 0
+
+        def load(path):
+            nonlocal calls
+            calls += 1
+            value = real(path)
+            return dict(value, current_activity="synthetic mismatch") if calls > 1 else value
+
+        with mock.patch.object(du, "_load_json", side_effect=load):
+            result = self.run_du(*self.ARGS)
+        self.assert_failed_unchanged(result, before)
+
+    def test_failed_restore_still_attempts_other_files(self):
+        real_write, real_load = du._atomic_write, du._load_json
+        for target_index in (0, 2):
+            with self.subTest(target=self.paths()[target_index].name):
+                before = self.snapshot()
+                calls = 0
+
+                def write(path, text):
+                    if Path(path) == self.paths()[target_index] and text.encode("utf-8") == before[target_index]:
+                        raise OSError(5, "synthetic restore failure")
+                    return real_write(path, text)
+
+                def load(path):
+                    nonlocal calls
+                    calls += 1
+                    value = real_load(path)
+                    return dict(value, current_activity="synthetic mismatch") if calls > 1 else value
+
+                with mock.patch.object(du, "_atomic_write", side_effect=write), \
+                        mock.patch.object(du, "_load_json", side_effect=load):
+                    rc, _, err = self.run_du(*self.ARGS)
+                self.assertEqual(rc, 1)
+                self.assertIn("ROLLBACK INCOMPLETE", err)
+                self.assertIn(self.paths()[target_index].name, err)
+                self.assertNotIn("write failed, rolled back", err)
+                after = self.snapshot()
+                for n in range(3):
+                    if n == target_index:
+                        self.assertNotEqual(after[n], before[n])
+                    else:
+                        self.assertEqual(after[n], before[n])
+                for path, data in zip(self.paths(), before):
+                    path.write_bytes(data)
+
+    def test_fsync_failure_at_each_write_rolls_back(self):
+        real = du.os.fsync
+        for fail_at in (1, 2, 3):
+            with self.subTest(fsync=fail_at):
+                before = self.snapshot()
+                calls = 0
+
+                def fsync(fd):
+                    nonlocal calls
+                    calls += 1
+                    if calls == fail_at:
+                        raise OSError(5, "synthetic fsync failure")
+                    return real(fd)
+
+                with mock.patch.object(du.os, "fsync", side_effect=fsync):
+                    result = self.run_du(*self.ARGS)
+                self.assert_failed_unchanged(result, before)
+
+    def test_replace_failure_before_and_after_each_rename_rolls_back(self):
+        real = du.os.replace
+        for target in (self.plan, self.paths()[0]):
+            for after_rename in (False, True):
+                with self.subTest(target=target.name, after_rename=after_rename):
+                    before = self.snapshot()
+                    failed = False
+
+                    def replace(src, dst):
+                        nonlocal failed
+                        if Path(dst) == target and not failed:
+                            failed = True
+                            if after_rename:
+                                real(src, dst)
+                            raise OSError(5, "synthetic rename failure")
+                        return real(src, dst)
+
+                    with mock.patch.object(du.os, "replace", side_effect=replace):
+                        result = self.run_du(*self.ARGS)
+                    self.assert_failed_unchanged(result, before)
+
+    def test_precommit_read_errors_return_failure_without_writes(self):
+        real_text, real_bytes = Path.read_text, Path.read_bytes
+        for target in (self.paths()[0], self.plan):
+            with self.subTest(target=target.name):
+                before = self.snapshot()
+
+                def read_text(path, *args, **kwargs):
+                    if path == target:
+                        raise OSError(5, "synthetic precommit read failure")
+                    return real_text(path, *args, **kwargs)
+
+                def read_bytes(path):
+                    if path == target:
+                        raise OSError(5, "synthetic precommit read failure")
+                    return real_bytes(path)
+
+                with mock.patch.object(Path, "read_text", read_text), \
+                        mock.patch.object(Path, "read_bytes", read_bytes):
+                    result = self.run_du(*self.ARGS)
+                self.assert_failed_unchanged(result, before)
+
+    def test_malformed_payloads_return_failure_without_writes(self):
+        bad_patches = [
+            {"phases": 3}, {"phases": [None]}, {"phases": [{"id": []}]},
+            {"phases": [{"id": "6", "status": []}]},
+            {"phases": [{"id": "6", "steps": [None]}]},
+            {"phases": [{"id": "6", "steps": [{"id": [], "status": "pending"}]}]},
+            {"phases": [{"id": "6", "status": "in_progress", "done": "invalid"}]},
+            {"cutover_gates": [None]}, {"cutover_gates": [{"key": {}}]},
+        ]
+        for patch in bad_patches:
+            with self.subTest(patch=patch):
+                before = self.snapshot()
+                self.assert_failed_unchanged(
+                    self.run_du(*self.ARGS, "--patch", json.dumps(patch)), before)
+
+    def test_malformed_existing_structure_can_be_repaired_with_replace(self):
+        current = seed_status()
+        current["phases"] = 3
+        self.paths()[0].write_text(json.dumps(current))
+        rc, _, err = self.run_du("--replace", "phases", "--patch",
+                                 json.dumps({"phases": seed_status()["phases"]}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning", err)
+        self.assertEqual(self.status()["phases"], seed_status()["phases"])
+
+    def test_malformed_log_json_returns_failure_without_writes(self):
+        for raw in ("{", "[]", '{"title":"demo","result":[]}',
+                    '{"title":"demo","detail":NaN}', '{"title":"demo","detail":Infinity}'):
+            with self.subTest(log_json=raw):
+                before = self.snapshot()
+                self.assert_failed_unchanged(self.run_du(*self.ARGS, "--log-json", raw), before)
+
+    def test_unencodable_payloads_leave_no_partial_checkpoint(self):
+        for args in (("--patch", '{"current_activity":"\\ud800"}'),
+                     ("--log-json", '{"title":"demo","detail":"\\ud800"}'),
+                     ("--plan-line", "\ud800")):
+            with self.subTest(field=args[0]):
+                before = self.snapshot()
+                self.assert_failed_unchanged(self.run_du(*self.ARGS, *args), before)
+
+    def test_unicode_line_separators_in_log_are_valid(self):
+        title = "demo\u2028line\u2029next\u0085line"
+        rc, _, err = self.run_du(*self.ARGS, "--log-title", title)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(self.paths()[1].read_text())["title"], title)
+
+
 class RealDashboardCopyTests(unittest.TestCase):
-    """Patch COPIES of real engagement dashboards (paths given on the command line)."""
+    """Patch temporary COPIES of synthetic or explicitly supplied engagement dashboards."""
 
     def test_real_copies(self):
-        files = [f for d in EXTRA_DIRS for f in sorted(d.glob("*/dashboard/status.json"))]
-        if not files:
-            self.skipTest("no engagement dirs given")
+        files = []
+        for directory in EXTRA_DIRS:
+            found = sorted(directory.glob("*/dashboard/status.json"))
+            self.assertTrue(found, f"No engagement fixtures found in {directory} (expected */dashboard/status.json)")
+            files.extend(found)
         for f in files:
-            with tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(fixture=str(f)), tempfile.TemporaryDirectory() as tmp:
+                original = f.read_bytes()
+                original_status = json.loads(original)
+                source_log = f.with_name("activity-log.jsonl")
+                original_log = source_log.read_bytes() if source_log.exists() else None
+                source_files = sorted(p.name for p in f.parent.iterdir())
                 dash = Path(tmp) / "dashboard"
                 dash.mkdir()
                 shutil.copy(f, dash / "status.json")
-                (dash / "activity-log.jsonl").write_text("")
+                (dash / "activity-log.jsonl").write_bytes(original_log or b"")
                 err = io.StringIO()
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                     rc = du.main(["--dashboard", str(dash), "--patch",
-                                  json.dumps({"current_activity": "copy test"}), "--log-title", "copy test"])
+                                  json.dumps({"current_activity": "copy test"}),
+                                  "--log-title", "Synthetic copy test (temporary dashboard only)",
+                                  "--log-result", "in_progress"])
                 self.assertEqual(rc, 0, f"{f}: {err.getvalue()}")
                 st = json.loads((dash / "status.json").read_text())
                 self.assertEqual(len(st["phases"]), 11, f)
                 self.assertEqual(st["current_activity"], "copy test")
+                self.assertCountEqual([p["id"] for p in st["phases"]], du.PHASE_IDS)
+                self.assertCountEqual([g["key"] for g in st["cutover_gates"]], du.GATE_KEYS)
+                # Only the requested activity and the updater's timestamp/progress may change.
+                changed_fields = {"current_activity", "updated_at", "overall_progress_pct"}
+                self.assertEqual({k: v for k, v in st.items() if k not in changed_fields},
+                                 {k: v for k, v in original_status.items() if k not in changed_fields})
+                copied_log = (dash / "activity-log.jsonl").read_bytes()
+                prefix = original_log or b""
+                if prefix and not prefix.endswith(b"\n"):
+                    prefix += b"\n"
+                self.assertTrue(copied_log.startswith(prefix))
+                appended = copied_log[len(prefix):].splitlines()
+                self.assertEqual(len(appended), 1)
+                event = json.loads(appended[0])
+                self.assertEqual(event["title"], "Synthetic copy test (temporary dashboard only)")
+                self.assertEqual(event["result"], "in_progress")
+                self.assertEqual(event["time"], st["updated_at"])
+                self.assertEqual(f.read_bytes(), original, "Source fixture was modified")
+                self.assertEqual(source_log.read_bytes() if source_log.exists() else None, original_log)
+                self.assertEqual(sorted(p.name for p in f.parent.iterdir()), source_files)
 
 
 if __name__ == "__main__":

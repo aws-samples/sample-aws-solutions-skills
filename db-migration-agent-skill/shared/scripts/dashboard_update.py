@@ -5,8 +5,8 @@ dashboard/activity-log.jsonl in step (hard constraint 1: "one habit, not two").
 WHY: hand-editing a large status.json corrupted it in a live run (a missing `],`), the plan
 lagged the dashboard by 40 minutes in another, and agents went silent for 8-15 minutes
 because a "quick" dashboard edit felt like a separate chore. This helper makes the
-checkpoint one mechanical call that either fully succeeds (all writes persisted and read
-back) or exits non-zero having changed nothing it could not validate.
+checkpoint one mechanical call that succeeds only when all requested writes persist and
+read back, and attempts restoration if a write or read-back fails.
 
 What one invocation does, in this order (all under an exclusive flock on
 dashboard/.status.lock, so concurrent writers using this helper serialize):
@@ -30,13 +30,14 @@ dashboard/.status.lock, so concurrent writers using this helper serialize):
   6. Reads back the complete payload (status.json equals the merged result; the log ends
      with the exact line; the plan equals the staged text).
 GUARANTEE: on any detected failure (validation, permission/I-O error, read-back mismatch)
-it rolls back what it wrote — log truncated to its prior size, plan and status.json
-restored — and exits 1, so the three files stay in step. Each file is individually
-crash-safe (status.json/plan are never half-written), but the three files together are not
-crash-atomic: if the process is killed between steps, a log and/or plan line can exist
-without its status.json update (never the reverse) — re-run the same checkpoint. The lock
-only coordinates writers that use this helper.
-Every step is local-file only and bounded (no network); total run time is milliseconds.
+it attempts to roll back every file it wrote — log truncated to its prior size, plan and
+status.json restored — and exits 1. If I/O errors also prevent restoration, it reports
+ROLLBACK INCOMPLETE and identifies the files needing repair. Plan/status replacements are
+atomic per file; log append and the three-file update are not a crash-safe transaction.
+After process loss, reconcile the files with actual operation evidence before publishing
+again; never replay a mutation to repair a checkpoint. The lock only coordinates writers
+that use this helper. Operations are local-file only; --lock-timeout bounds lock waiting,
+not filesystem I/O. A supervising caller must enforce its own publication time limit.
 During the Phase 7.7 soak the LIVE copy is in S3 — do not run this against a stale local
 copy and upload it over the Lambda's data (dashboard.md §The update rule); exclude
 `.status.lock` when uploading the dashboard folder.
@@ -165,6 +166,15 @@ def _is_utc_timestamp(v):
 
 
 def validate_status(st):
+    # Malformed JSON shapes must be validation failures, including when a --replace
+    # patch is about to repair pre-existing damage. Keep the existing field rules.
+    try:
+        return _validate_status(st)
+    except (TypeError, AttributeError, OverflowError) as e:
+        raise UpdateError(f"malformed status.json: {e}") from e
+
+
+def _validate_status(st):
     if not isinstance(st, dict):
         raise UpdateError("status.json must be a JSON object")
     phases = st.get("phases")
@@ -238,7 +248,7 @@ def _atomic_write(path, text):
     path = Path(path)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -249,6 +259,16 @@ def _atomic_write(path, text):
         except OSError:
             pass
         raise
+
+
+def _restore_text(path, text):
+    """Restore the snapshot even if the failed target can no longer be read."""
+    try:
+        if Path(path).read_bytes() == text.encode("utf-8"):
+            return
+    except OSError:
+        pass
+    _atomic_write(path, text)
 
 
 def _load_json(path):
@@ -290,7 +310,10 @@ def plan_insert(text, section, line):
 
 def build_log_entry(args, status, now):
     if args.log_json:
-        entry = json.loads(args.log_json)
+        try:
+            entry = json.loads(args.log_json)
+        except json.JSONDecodeError as e:
+            raise UpdateError(f"--log-json is not valid JSON: {e}") from e
         if not isinstance(entry, dict):
             raise UpdateError("--log-json must be a JSON object")
     elif args.log_title:
@@ -306,7 +329,7 @@ def build_log_entry(args, status, now):
     entry.setdefault("time", now)
     entry.setdefault("phase", status.get("current_phase", ""))
     entry.setdefault("result", "in_progress")
-    if entry["result"] not in LOG_RESULTS:
+    if not isinstance(entry["result"], str) or entry["result"] not in LOG_RESULTS:
         raise UpdateError(f"log result {entry['result']!r} not in {sorted(LOG_RESULTS)} "
                           "(`done` is a step status, not a log result)")
     if not entry.get("title"):
@@ -409,7 +432,8 @@ def run(args):
 
     with _Lock(dash / ".status.lock", args.lock_timeout):
         # 1. read + validate the current state (refuse a corrupt file)
-        old_status_text = status_path.read_text(encoding="utf-8") if status_path.exists() else None
+        # Decode bytes directly so rollback preserves original line endings.
+        old_status_text = status_path.read_bytes().decode("utf-8") if status_path.exists() else None
         current = _load_json(status_path)
         if not isinstance(current, dict):
             raise UpdateError("status.json must hold a JSON object")
@@ -422,7 +446,10 @@ def run(args):
             if key not in patch:
                 raise UpdateError(f"--replace {key}: the patch has no top-level {key!r}")
         # 2-4. stage everything in memory and validate
-        updated = merge_patch({k: v for k, v in current.items() if k not in (args.replace or [])}, patch)
+        try:
+            updated = merge_patch({k: v for k, v in current.items() if k not in (args.replace or [])}, patch)
+        except TypeError as e:
+            raise UpdateError(f"cannot merge patch: {e}") from e
         if args.seed_soak is not None:
             # Minimal soak block the soak writers need (dashboard.md §Phase 7.7); fills only
             # MISSING fields, never overwrites recorded days or the scheduler's results.
@@ -433,22 +460,28 @@ def run(args):
                                    ("state", "active"), ("started_at", now)):
                 soak.setdefault(field, default)
         updated["updated_at"] = now
-        if not args.keep_progress and isinstance(updated.get("phases"), list):
-            updated["overall_progress_pct"] = progress_pct(updated["phases"])
         validate_status(updated)
+        if not args.keep_progress and isinstance(updated.get("phases"), list):
+            try:
+                updated["overall_progress_pct"] = progress_pct(updated["phases"])
+            except (TypeError, ValueError, OverflowError) as e:
+                raise UpdateError(f"cannot compute phase progress: {e}") from e
         try:
             status_text = json.dumps(updated, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         except ValueError as e:
             raise UpdateError(f"status.json would contain NaN/Infinity, which is not JSON: {e}")
         entry = build_log_entry(args, updated, now)
-        log_line = json.dumps(entry, ensure_ascii=False) if entry is not None else None
+        try:
+            log_line = json.dumps(entry, ensure_ascii=False, allow_nan=False) if entry is not None else None
+        except ValueError as e:
+            raise UpdateError(f"activity-log.jsonl would contain NaN/Infinity, which is not JSON: {e}") from e
         plan_path = Path(args.plan)
         old_plan_text = plan_text = plan_line = None
         if args.plan_section is not None:
             if not plan_path.exists():
                 raise UpdateError(f"{plan_path} does not exist")
             plan_line = args.plan_line if args.plan_line.lstrip().startswith(("-", "|", "*")) else f"- {now} — {args.plan_line}"
-            old_plan_text = plan_path.read_text(encoding="utf-8")
+            old_plan_text = plan_path.read_bytes().decode("utf-8")
             plan_text = plan_insert(old_plan_text, args.plan_section, plan_line)
         # 5. preflight writability of every target before touching any of them
         _writable_file(status_path)
@@ -474,26 +507,27 @@ def run(args):
             # 7. read back the COMPLETE committed payload
             if _load_json(status_path) != updated:
                 raise UpdateError("status.json read-back differs from what was written")
-            if log_line is not None and log_path.read_text(encoding="utf-8").splitlines()[-1] != log_line:
+            if log_line is not None and log_path.read_text(encoding="utf-8").split("\n")[-2:] != [log_line, ""]:
                 raise UpdateError("activity-log.jsonl read-back does not end with the appended line")
             if plan_text is not None and plan_path.read_text(encoding="utf-8") != plan_text:
                 raise UpdateError("migration-plan.md read-back differs from what was written")
-        except (OSError, UpdateError) as e:
+        except (OSError, UnicodeError, UpdateError) as e:
             problems = []
             for done, undo, what in (
-                    (status_done and old_status_text is not None and status_path.read_text(encoding="utf-8") != old_status_text,
-                     lambda: _atomic_write(status_path, old_status_text), "status.json"),
-                    (plan_done and plan_path.read_text(encoding="utf-8") != old_plan_text,
-                     lambda: _atomic_write(plan_path, old_plan_text), "migration-plan.md"),
+                    (status_done and old_status_text is not None,
+                     lambda: _restore_text(status_path, old_status_text), "status.json"),
+                    (plan_done, lambda: _restore_text(plan_path, old_plan_text), "migration-plan.md"),
                     (log_done, lambda: _truncate(log_path, log_prior), "activity-log.jsonl")):
                 if done:
                     try:
                         undo()
-                    except OSError as re:
+                    except (OSError, UnicodeError) as re:
                         problems.append(f"{what}: {re}")
-            msg = f"write failed, rolled back ({type(e).__name__}: {e})"
+            failure = f"{type(e).__name__}: {e}"
             if problems:
-                msg += f"; ROLLBACK INCOMPLETE — fix by hand: {'; '.join(problems)}"
+                msg = f"write failed ({failure}); ROLLBACK INCOMPLETE — fix by hand: {'; '.join(problems)}"
+            else:
+                msg = f"write failed, rolled back ({failure})"
             raise UpdateError(msg)
     print(f"dashboard_update: ok updated_at={now} current_phase={updated.get('current_phase')} "
           f"progress={updated.get('overall_progress_pct')}%"
@@ -534,7 +568,7 @@ def main(argv=None):
     args = parse_args(argv)
     try:
         return run(args)
-    except UpdateError as e:
+    except (UpdateError, OSError, UnicodeError) as e:
         print(f"dashboard_update: FAILED — {e}", file=sys.stderr)
         return 1
 

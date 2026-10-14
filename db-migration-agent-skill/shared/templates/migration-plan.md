@@ -124,14 +124,17 @@ Downstream replication/CDC consumers (Debezium/replicas/ELT — cutover-procedur
 |----------|---------------------------------------------|:---:|:---:|
 | | | ▢ | ▢ |
 
-## Phase 7.7 — Parallel-run soak (cutover readiness locked until green)
-- Soak length: {N} consecutive green days · counter: {k}/{N}
+## Phase 7.7 — Method-specific readiness
+- Approved branch: {CDC observed intervals / offline static validation}; evidence/waiver and expiry: {references}
+- Final switch obligation: {fresh fenced copy + validation / final CDC checkpoint drain}; earlier copy does not prove currentness
+- CDC only — soak length: {N} consecutive green days · counter: {k}/{N}
 - Daily reports: {links to soak-report files}
 | Day | Verdict | Lag max | Spot checks | Notes |
 |-----|---------|---------|-------------|-------|
 | | 🟢/🔴 | | | |
 - Customer test traffic against target: {what they ran}
 - Soak-exit sign-off (authorizations.md §3): ▢
+- Reused lab preparation/rehearsal: {resource/config/version/age bindings, fresh checks, or not reused}
 
 ## Phase 8 — Cutover
 
@@ -139,14 +142,15 @@ Downstream replication/CDC consumers (Debezium/replicas/ELT — cutover-procedur
 - Runbook + rollback runbook generated with real values: ▢ · timings {measured/estimated}: ▢
 - Reverse replication created + connection-tested, NOT started: ▢ (or rollback alternative + RPO ack: ▢)
 - Client-repoint list handed over (per-client exact change + deploy source): ▢
-- Validation + soak evidence attached: ▢
+- Validation + method-specific readiness evidence attached: ▢
+- Reviewed handoff archive + manifest verified: {name/hash; included/external/omitted references; pending artifacts}
 - Runbook walkthrough with the customer completed: ▢
 - **A4b handover acceptance signed** (authorizations.md): ▢ — customer owns the cutover from here
 - Offered read-only observation / post-cutover verification: ▢
 - Customer-reported cutover outcome: {date, result, measured pause if shared}
 
 ### Mode 3 — execution (GATE 4 sign-off: ▢)
-- Runbook generated & rehearsed: ▢ · Reverse replication created+tested: ▢
+- Runbook generated & rehearsed: ▢ · Applicable rollback strategy prepared and verified: ▢
 - Executed {timestamp} · write-pause measured: {s} · bidirectional verify ✅ ▢
 - Rollback decision points reviewed at T+15m ▢ T+1h ▢ T+24h ▢
 
@@ -163,4 +167,14 @@ distinct from closed ones; leave severity/owner unrecorded until assessed/assign
 |---|---|---|---|---|---|
 
 ## Rollback record (only if executed)
-- Trigger: … · executed runbook steps: … · data loss: {none / description}
+- Trigger and accepted A5 scope: … · attempted/executed runbook steps and results: …
+- Target write state: {proven none / confirmed writes / unknown}; data loss: {verified none / description / unknown}
+- Persistent client config, effective runtime and both-side sessions: {evidence}
+- Source-release conditions: {verified data reconciliation, fences and client agreement / blocked with missing evidence}
+- Failed attempts and subsequent recovery: {separate records; no retrospective confirmation}
+
+## Final handoff
+- Reviewed archive: {name, manifest/whole-archive SHA-256, verification result}
+- Reference accounting: {included / external / omitted; reasons and access owner}
+- Actual receipt/acceptance: {separate record linked to frozen archive, or pending}
+- Remaining observations, risks and ownership: {evidence and next action}

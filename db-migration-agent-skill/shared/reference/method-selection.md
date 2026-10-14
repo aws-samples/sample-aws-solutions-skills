@@ -37,7 +37,7 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 9. **Do you have a preferred method?** (User may already know what they want)
 10. **Number of databases on the source host?** (If >1, each migrates independently. Flag schema name collisions.)
 11. **Can the application code be modified?** (Gates: app-side encryption, connection-string change vs Secrets Manager, dual-read capability)
-12. **RPO (Recovery Point Objective)?** (Acceptable data loss if rollback needed. Zero RPO requires reverse replication.)
+12. **RPO (Recovery Point Objective)?** (Acceptable data loss if rollback needed. Zero RPO requires a supported, rehearsed reverse-apply or complete write-log replay path.)
 13. **Downstream CDC consumers?** (Debezium/Kafka, BI replicas, ETL jobs reading binlog — these break at cutover and need re-pointing.)
 14. **Encryption requirement at creation time?** (KMS key type: AWS-managed vs CMK. Cannot change after cluster creation.)
 15. **Cross-region or cross-account?** (Routes to different networking/KMS/DMS setup.)

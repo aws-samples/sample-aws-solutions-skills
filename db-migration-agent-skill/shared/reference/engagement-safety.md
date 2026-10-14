@@ -1,26 +1,28 @@
 # Engagement Modes & Production Safety
 
-> Read this at **Phase 0** — before the first customer question. It defines the single
+> Read this at **Phase 0**, after the canonical SKILL's activation go-ahead and install
+> integrity check, before the mode question. It defines the single
 > decision that shapes the whole engagement (**which mode**), the per-engagement
 > parameters chosen at GATE 1, the Mode-2 handover contract, the waiver protocol, and the
 > IAM guardrails. The failure this file prevents: an agent doing more to a customer's
 > production database than the customer actually asked for.
 
-## The three modes (Mode question is asked FIRST, at Phase 0)
+## The three modes (after activation, at Phase 0)
 
 An engagement is exactly one mode. The number says how far the agent goes; **Mode 2 is
 the default and the recommended posture for customer engagements.**
 
 | | **Mode 1 — analysis-only** | **Mode 2 — migration-ready** (default) | **Mode 3 — full-migration** |
 |---|---|---|---|
-| **The agent does** | Read-only assessment: preflight, discovery, compatibility/blocker scan, sizing, client discovery, third-party sweep, method options, cost | Everything in Mode 1, **plus**: provision the target (CDK), migrate the data, validate with evidence, keep the target current, parallel-run with daily reports, prepare + rehearse the cutover runbook, arm the rollback path | Everything in Mode 2, **plus** executing the production cutover itself |
+| **The agent does** | Read-only assessment: preflight, discovery, compatibility/blocker scan, sizing, client discovery, third-party sweep, method options, cost | Everything in Mode 1, **plus**: provision the target (CDK), migrate and validate the data, establish method-specific readiness, prepare + rehearse the cutover and rollback runbooks | Everything in Mode 2, **plus** executing the production cutover itself |
 | **The customer does** | Reads the report and decides whether to proceed | **Executes the cutover** — their window, their tests, their on-call, their go/no-go | Approves the window, is present during it, accepts the risk |
 | **What limits it** | Read-only DB user + read-only IAM session. Cannot write: a failing trigger is a *finding*, not an action | The **mode boundary** below + IAM guardrail denies the freeze-capable actions | Cutover authorization signed (A4) + approver reachable during the window |
-| **Deliverable** | Assessment report + draft `migration-plan.md` + risk register + cost estimate | A **migrated, validated, soaked target** + the handover package (below) — the customer holds the last step | Migrated database in production + full audit record |
+| **Deliverable** | Assessment report + draft `migration-plan.md` + risk register + cost estimate | A **validated target and method-specific readiness evidence** + the handover package (below) — the customer holds the last step | Migrated database in production + full audit record |
 
 Mode rules:
-- Ask the mode question **before anything else**; record it in the `migration-plan.md`
-  header and `authorizations.md` §1.
+- Follow the canonical SKILL's activation go-ahead and install/resume checks first.
+  For a fresh engagement, then ask the mode question; record it in the `migration-plan.md`
+  header and `authorizations.md` §1. On resume, retain the recorded mode and authorization.
 - **Mode 2 is what you propose by default.** When a customer says "just migrate it,"
   present Mode 2 first and explain the split: the agent does the whole migration and hands
   them a rehearsed cutover they run themselves. Only offer Mode 3 if they explicitly want
@@ -99,19 +101,20 @@ the difference is who operates the replication and how the runbook's timings are
 
 | | **(a) Full preparation** (recommended) | **(b) Light preparation** |
 |---|---|---|
-| What the agent does | Target built + data migrated + **CDC kept current** through the parallel-run period + daily evidence reports + **cutover rehearsed on a clone** | Target built + data loaded + validated once; **no ongoing replication** |
+| What the agent does | Target built + data validated + **method-specific readiness** (CDC kept current with parallel-run evidence, or offline static validation + final-copy procedure) + **cutover rehearsed on a clone** | Target built + data loaded + validated once; **no ongoing replication** |
 | Runbook timings | **Measured** on the rehearsal | **Estimated** — clearly labeled as such |
-| Customer operates | The cutover only | Replication start, parallel-run, and the cutover |
-| Trade-off | Agent touches the source read-path continuously (replication user, binlog reads) | Minimal ongoing agent involvement, but the customer loses the near-zero-downtime path and operates CDC unaided |
+| Customer operates | The cutover, including the final frozen copy for offline methods | Remaining method-specific preparation and the cutover |
+| Trade-off | CDC needs continuous source reads; offline methods put the final copy and validation inside the outage | Minimal ongoing agent involvement; remaining CDC or offline-copy work is explicitly handed over |
 
 Record the choice in the plan. The handover package the customer receives:
 
 1. **`cutover-runbook.md`** — step-by-step with an owner, expected duration, verification,
    and abort action per step; **each timing** marked *measured* with its evidence or
    *estimated* with its basis, including mixed component-test/rehearsal coverage.
-2. **`rollback-runbook.md`** — the exact failback procedure, with the reverse-replication
-   path prepared, connection-tested and rehearsed but not started (a) — "armed" only once
-   it is running and its application is verified — or the snapshot/PITR path documented (b).
+2. **`rollback-runbook.md`** — the exact failback procedure for the approved strategy:
+   reverse replication prepared, connection-tested and rehearsed but not started —
+   "armed" only once running and verified applying — or tested replay / acknowledged
+   RPO terms. Preparation depth alone does not select the rollback strategy.
 3. **The client repoint list** — every client discovered in Phase 7.5 with the *exact*
    change each one needs (file, key, old → new value) and where that config is deployed
    from, so their team can land it in their own repo/pipeline.
@@ -161,6 +164,9 @@ a short parallel run is proportionate."* — that's advice, not a classification
 enforces.
 
 ### Risk-tiered parallel-run (soak) default
+
+Apply this table to **CDC/live replication**. Offline/full-load-only methods follow
+[method-readiness.md](method-readiness.md); they have no live replication pipeline to soak.
 
 A flat default makes every low-risk engagement negotiate the same number down from an
 over-conservative starting point, every time. Propose the tier below instead, from
@@ -266,23 +272,15 @@ constraint 13 immediately, then:
 
 ### Static-validation window (offline/full-load-only alternative)
 
-Without CDC there is no live pipeline to soak. Record a soak waiver specifying this
-alternative and its freshness limitation. Validate the Phase 6 copy in an isolated,
-write-fenced target: full row counts, engine-appropriate content reconciliation, schema
-objects/constraints, read-only app tests, and a timed final-copy rehearsal. For
-heterogeneous copies use the conversion/reconciliation battery, not raw cross-dialect
-checksums. Record evidence and resolve every discrepancy before handover/readiness.
-
-This establishes **rehearsal readiness**, not a current production copy. The Phase 8
-runbook must budget and perform a final full export/backup and replacement restore
-while ALL source writers remain fenced, then repeat final reconciliation and smoke
-tests before repointing. Mode 2 hands that procedure to the customer; Mode 3 requires
-A4 before the freeze. A failed check or an outage budget too short for the final copy
-blocks cutover; reselect CDC rather than silently accepting stale data. No minimum
-static duration substitutes for these acceptance criteria. Close the waiver/soak-exit
-block separately from A4/A4b, with the final-copy obligation explicit.
+Use [method-readiness.md §Offline logical copy](method-readiness.md#offline-logical-copy)
+for the full validation, final frozen-copy obligation, and existing waiver/soak-exit
+record. Static evidence establishes preparation readiness; it cannot prove an online
+copy remained current. No minimum waiting time substitutes for those checks.
 
 ### Soak decision script
+
+Use this explanation only for a CDC/live-replication method; explain the static-copy
+alternative above when no CDC is planned.
 
 Never let the parallel-run parameter arrive as a bare number inside the engagement-parameters
 list. **This is the source text for `discovery-questions.md`'s #16c** when discovery uses
@@ -340,6 +338,10 @@ reverse replication):
    freeze-window command against the real target; see execution-runbooks.md §Rehearsal).
 4. Never silently skip. A waiver the customer doesn't remember confirming is a failure.
 
+Use [method-readiness.md](method-readiness.md) for lab reuse and method applicability.
+A lab label grants no waiver, and a shortened window never turns unobserved time into
+green evidence. Any remaining waiver conditions must be met before closing readiness.
+
 Why this matters: a declined rehearsal plus one untested engine-version-specific command
 is all it takes to turn a 40-second freeze into a 5-minute write pause.
 
@@ -355,22 +357,45 @@ its task had never run.)
 
 ## Approvals of record
 
-Chat approvals drift and scroll away — that's why every gate, action-class authorization,
-and waiver gets its own durable block in **`authorizations.md`** (template in
-`shared/templates/`) instead of living only in scrollback: what was authorized, why, and a
-`**Confirmed:**` date. **No name, no role, no other identifying detail is ever captured,
-by design** — see that template's header note. `migration-plan.md` gate rows point at the
-corresponding block. The customer can hand the file to an auditor as a record of *what*
-was authorized and *when*; it does not answer *who*, and it never will.
+### Four human GATEs, six readiness checks, and operation authorization
+
+| Human decision | Canonical confirmation record |
+|---|---|
+| **GATE 1** — discovery, mode, engagement parameters | **`migration-plan.md`'s GATE 1 row**, agent-dated after the user's acceptance. `discovery-questions.md` holds answers/context; no separate GATE 1 block in `authorizations.md`. |
+| **GATE 2** — method, cost, architecture, rollback terms | GATE 2 block in `authorizations.md`; plan links to it. |
+| **GATE 3** — validation evidence and its limits | GATE 3 block in `authorizations.md`; plan links to it. |
+| **GATE 4** — Mode 3 cutover window, runbook and abort terms | **A4** block in `authorizations.md`. Mode 2 ends instead with **A4b** handover acceptance, which does not authorize agent cutover. |
+
+The dashboard's six **readiness checks** are `client_inventory`, `validation`, `soak`,
+`rehearsal`, `runbook`, and `approvals` (legacy JSON key: `cutover_gates`). They summarize
+evidence and applicable accepted waivers under [dashboard.md](dashboard.md); they are
+not six additional human GATEs. Their boolean AND, `cutover_ready`, is not permission
+to execute. Method applicability comes from [method-readiness.md](method-readiness.md).
+
+**Operation authorization** (A1–A6, with A4b for handover) bounds the actual resources,
+actions and conditions the operator may use. GATE 2 does not authorize source writes;
+GATE 3 does not authorize cutover. Use the existing blocks, not another approval layer.
+An accepted scope remains valid for routine reads, evidence collection and retries
+within its conditions: carry forward the record, including an already accepted A1,
+without asking the user to approve the same reads again. On resume, verify that scope
+still matches. Changed resources/mode/actions, expired conditions, or uncertainty about
+a mutation require stopping that action and resolving its authorization first.
+
+All action authorizations, waivers and GATE 2/3 confirmations live in
+**`authorizations.md`**; GATE 4 uses A4 and **GATE 1 is the exception above**.
+Record what was accepted, why, and its `**Confirmed:**` date. **No name, role or other
+identifying approval detail is captured.** The plan links to the corresponding records;
+the dashboard mirrors them and never supplies acceptance.
 
 **An action executed without its required block is never "Confirmed."** (Live: a source
 `GRANT` ran without an A2, and a live rollback + re-cutover without an A5; both were later
 listed as approvals.) Record it in the template's "NOT pre-approved — recorded after
 execution" form with the reason, tell the customer immediately (hard constraint 13), and
 list it as a **violation** in the final report — this is an extra status for a different
-case; the no-name/date-only model is unchanged. A live rollback or re-cutover always needs
-its A5 (or new A4) block presented and accepted in full, even when the customer asked for
-it in chat.
+case; the no-name/date-only model is unchanged. Rollback requires an accepted A5 covering
+the actual action and conditions; an already accepted pre-authorized abort path does not
+need approval again when those conditions occur. Ad-hoc rollback or re-cutover outside
+that scope needs the applicable A5/new A4 accepted before execution.
 
 **The customer never edits `authorizations.md` themselves.** The agent drafts and appends
 each block; gathering and recording evidence (a green validation battery, a green soak
@@ -461,7 +486,8 @@ that writes and alerts. If there is none, say so plainly — "nothing will notif
 checks; the next check is <UTC time>, run by <who>" — and offer to set one up (A3).
 Agent sessions do not watch anything between turns.
 
-Action classes requiring a confirmed context-and-mark block **before** first execution:
+Action classes requiring a confirmed context-and-mark block **before** first execution
+(reuse an existing accepted block within its scope):
 1. Read-only source access (assessment)
 2. Source writes (blocker fixes, migration user creation — each listed individually)
 3. Target/production infrastructure deploys
@@ -557,9 +583,9 @@ decommission stage is signed:
 
 | Phase | Addition |
 |-------|----------|
-| 0 | **Mode question first** (1/2/3, Mode 2 recommended); mode gates the whole session; guardrail policy generated for that mode |
+| 0 | **Activation go-ahead first**, then install/resume checks and the fresh-engagement mode question (1/2/3, Mode 2 recommended); retain the recorded mode on resume; generate the mode's guardrails |
 | 1 / GATE 1 | Engagement parameters chosen (rehearsal, parallel-run N, validation depth, rollback, approvers) + Mode-2 handover depth (a/b), all in `discovery-questions.md`; GATE 1 confirmed the same way as every other gate (clear go-ahead in chat, agent notes the date), just in `migration-plan.md`'s own row rather than a separate `authorizations.md` §3 block, since this content already lives in `discovery-questions.md` — `authorizations.md` §2 just points there |
 | 6.5 | Rehearsal per the chosen parameter (see execution-runbooks.md §Rehearsal) |
-| 7.7 | **Parallel-run soak**: target stays current; daily `soak-report.md`; customer may point read-only traffic/load tests at the target; cutover readiness requires N consecutive green periods |
+| 7.7 | **Method-specific readiness**: CDC parallel-run evidence + accepted soak-exit, or offline static validation + accepted alternative and final frozen-copy obligation; see `method-readiness.md` |
 | 8 | **Mode 2** → assemble + verify the handover package, walk the customer through the runbook, sign A4b, then stop (offer read-only observation during their cutover). **Mode 3** → execute step-by-step with go/no-go per group, A4 signed first |
 | 9 | Post-migration + confirmed decommission authorization block; guardrail Deny lifted only after it. In Mode 2, Phase 9 runs *after the customer reports a completed cutover* |

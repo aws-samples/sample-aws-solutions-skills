@@ -44,7 +44,9 @@ hard constraint 10.
    and sign-off as it lands. A step without its result written down is not done. **Every
    time you update it, also refresh `dashboard/status.json` and append one line to
    `dashboard/activity-log.jsonl`** (`shared/reference/dashboard.md`) — one habit, not two.
-   `shared/scripts/dashboard_update.py` does all three in one validated, atomic, read-back command — use it instead of hand-editing JSON.
+   `shared/scripts/dashboard_update.py` updates all three with validation, read-back and
+   rollback on failure — use it instead of hand-editing JSON. Plan/status replacement
+   is atomic per file; the log append and three-file update are not a crash-safe transaction.
    Mirror phase outcomes, findings, remaining work and evidence; keep risks, cost/timing
    estimates, architecture rationale, and individual gate requirements current using that
    reference's optional schema and population schedule. Mirror each pending ACTION NEEDED
@@ -77,7 +79,7 @@ hard constraint 10.
    Record every start, progress check, result, and transition in `migration-plan.md` and
    refresh both dashboard files as above — these are plan-update triggers within a phase,
    not just at its boundaries. **For backgrounded work without incremental telemetry,
-   implement the bounded supervisor loop in “Dashboard cadence within a phase” before
+   use the tested helper or supervisor contract in “Dashboard cadence within a phase” before
    launching the job.** That loop owns the job, checks, and writes through completion
    verification; backgrounding a command and remembering to revisit it is insufficient.
    Active work must not leave every step `pending` or `current_activity` unchanged for
@@ -86,9 +88,11 @@ hard constraint 10.
    36-hour-overdue banner; the two-minute/five-minute rules do not apply to soak.**
    Concurrent active work, such as the clone rehearsal, still follows the active-work
    cadence; preserve the live soak snapshot using `dashboard.md`'s S3 write rules.
-2. **Never write to the production source.** Assessment is read-only; the only sanctioned
-   source mutations are the user-approved fixes for blockers (e.g. `ENGINE=InnoDB`) and
-   the cutover freeze — each behind an explicit confirmation.
+2. **Production-source changes require their specific authorization.** Assessment is
+   read-only. Blocker fixes and CDC proof writes require their individual A2 blocks;
+   the cutover freeze requires A4. Recovery replay and source release require the exact
+   accepted A5 scope and verified rollback conditions. Preserve mode boundaries and never
+   infer any of these authorizations from method approval or a green check.
 3. **The user approves the method, the cost, and the cutover** (GATES 2 and 4). Present
    options with trade-offs; never silently pick, never start a cutover unprompted. **Every
    ⛔-marked gate (1, 2, 3, 4) and the soak-exit block is the same kind of stop** — the agent
@@ -138,7 +142,7 @@ hard constraint 10.
     offered on RDS → check `aws rds describe-db-engine-versions`), and note that source → EC2 →
     RDS later means **two cutovers and two client repoints**. Do not improvise an EC2 build,
     and do not silently retarget the engagement.
-11. **Announce activation before touching anything, and keep phase progress visible in
+11. **Announce activation before touching anything in a fresh engagement, and keep phase progress visible in
     chat.** Before Phase 0's first action, announce that the skill is activating and get a
     lightweight go-ahead — exact wording and the dashboard-ready callout are in Phase 0
     below; this is a courtesy check-in, not one of GATES 1–4. Then bracket every phase with
@@ -146,7 +150,8 @@ hard constraint 10.
     once the dashboard exists (end of Phase 0), append `(dashboard: cd dashboard && python3
     -m http.server 8080)` to every completion banner after it. A customer stakeholder
     skimming the chat should be able to tell what's happening — and that a dashboard
-    exists — without reading the whole transcript.
+    exists — without reading the whole transcript. On resume, preserve the earlier
+    activation and scoped approvals; do not ask for the same go-ahead again.
     (The quoted wording below and in Phase 0 is a format template, not a fixed string — translate it into the user's conversation language per the Language rule above; keep the emoji/banner punctuation as-is.)
 12. **End every message that's waiting on the user with a single, unmissable checklist of
     exactly what they need to do.** Long analysis is fine above it, but a user skimming
@@ -178,7 +183,7 @@ over as a single copy-paste block and ask for the output).
 | Preflight checks, read-only assessment queries, sizing math, doc verification via MCP | Anything in GATES 1–4; blocker-fix approval; production writes |
 | `cdk synth`, deploy of the target stacks after GATE 2 | Cutover window scheduling; go/no-go at each cutover step group |
 | Validation queries, evidence collection, plan updates | Accepting a non-lossless rollback (RPO sign-off) |
-| Retrying transient AWS errors (≤3, backoff) | Quota increases, cross-account access, anything needing other teams |
+| Retrying transient read errors or demonstrably idempotent requests (≤3, backoff); reconcile uncertain mutations first | Quota increases, cross-account access, anything needing other teams |
 
 Routine autonomous prep (drafting runbooks, re-syncing the dashboard, evidence collection)
 does not stop for "may I proceed?" — only the right-hand column asks.
@@ -222,95 +227,44 @@ For independent work explicitly planned to overlap, first publish the previous j
 freshly checked running state and keep its supervisor active; do not imply it finished.
 Each concurrent job needs supervision, with coordinated writes per `dashboard.md`.
 
-**Required recipe for a job with no incremental telemetry:** implement a supervisor in
-one shell/Python invocation that launches one step in the background and runs the loop
-below itself. It must keep running if the tool returns a session handle; separate agent
-turns or a sequence of manually scheduled tool calls are not the timer. Before launch,
-implement and check the publisher against the actual plan/dashboard location and record
-a finite monitoring budget. The pseudocode names below are contracts to implement for
-the approved method, not existing repository helpers:
+**Use the tested supervisor for local POSIX jobs:**
+`shared/scripts/execution_step.py` runs a reviewed operation and verifier as one tracked
+attempt. Follow `shared/reference/execution-control.md` for its spec, launch/status and
+recovery commands. Prepare and rehearse the method-specific scripts before the execution
+window; reuse their reviewed revision instead of generating a new polling controller.
+The helper checks bound inputs, declared mode/effect and predecessor checkpoints; it is
+not an authorization service, sandbox, database adapter or remote-job monitor.
 
-- `publish_and_confirm` updates `migration-plan.md`, `status.json`, and the activity log,
-  then reads them back to confirm the checkpoint persisted. Update `current_activity`,
-  the existing step's status/`detail`, `updated_at`, observed/check times and elapsed time,
-  plus the phase-specific fields in the table above. Bound the entire publish/read-back,
-  including retries, to 15 seconds; any failure raises and prevents further launches.
-  Log starts/checks as `result:"in_progress"`, completions as `result:"success"`, and
-  failures as `result:"blocked"` (`done` is a step status, not a log result).
-- The background job covers the operation **and its required completion verification**,
-  records its handle and exit/result evidence, and cannot launch the next step. For a
-  streaming pipe, capture both producer and consumer failures (e.g. `pipefail`); success
-  requires the verified target result as well as successful process exits. Long row-count
-  or checksum queries run under this same supervision: report “load exited; verifying”
-  while they run, without prematurely marking the step `done`.
-- `probe` reads the job state/result within 15 seconds. A timeout or unavailable state
-  returns an observation explicitly marked unverified, which must still be published.
-  Process liveness is evidence of running only; it supplies no invented row count.
-- `require_previous_checkpoint_read_back` requires verified success for sequential work.
-  Only a recovery step may follow its failed step's persisted/read-back `blocked` result.
-  Recovery investigates, fixes, and verifies the fix; it does not retry the failed operation.
-  Its `done` result must persist/read back before a fresh `run_step` retries that operation.
+A step is `done` only after its operation succeeds, its verifier returns observed evidence,
+and the plan/dashboard/log completion checkpoint persists. Publish table-level evidence
+through the verifier's supported `migration_objects` patch where applicable. Never promote
+human gates, readiness or approvals from an exit code. Use the same result/evidence record
+for report summaries; conflicting headers or hashes must be reconciled before handoff.
 
-```text
-run_step(step, previous, monitoring_budget_seconds):
-    require_previous_checkpoint_read_back(previous, next_step=step)  # success, or BLOCKED -> its recovery only
-    publish_and_confirm(step, in_progress, "starting")  # failure => no launch
-    job = launch_operation_and_verification_in_background(step)
-    return supervise(step, job, monotonic_now() + monitoring_budget_seconds)
+A failed/unknown attempt blocks subsequent work. Inspect the same attempt and any local
+or remote jobs before reconciliation; a vanished PID is not proof of completion. Keep
+failure evidence, perform a separate reviewed recovery step, and verify it before a new
+attempt of the failed operation. Existing approval remains usable within its recorded
+scope; changed scope and uncertain mutations require the applicable recovery decision.
+Repairing a checkpoint never retroactively authorizes work or makes a failed attempt
+successful. The helper does not automatically retry, roll back, or kill a database job.
 
-supervise(step, job, deadline):
-    loop:
-        observed = probe(job, timeout_seconds=15)
-        if observed.verified_success:
-            publish_and_confirm(step, done, observed.result_and_evidence)
-            return DONE                         # only after completion is persisted
-        if observed.failed:
-            publish_and_confirm(step, blocked, observed.failure_and_evidence)
-            return BLOCKED
-        capped = monotonic_now() >= deadline
-        publish_and_confirm(step, in_progress,
-                            observed + cap_details(job.handle, "resume supervision") if capped else observed)
-        if capped:
-            return PAUSED_WITH_HANDLE(job)       # never success or permission for N+1
-        sleep(min(60, max(0, deadline - monotonic_now())))
+**For remote jobs or environments the helper does not support**, preserve this contract
+in the reviewed method adapter:
 
-previous = None                                 # no previous checkpoint for the first step
-# Include setup and all unlisted work; insert newly discovered work before executing it.
-for step in planned_sequential_steps:
-    outcome = run_step(step, previous, configured_finite_budget)
-    while outcome == BLOCKED and recovery_planned_within_existing_retry_limits(step):
-        recovery = recovery_step_for(step)       # e.g. recover-load-seed_numbers
-        outcome = run_step(recovery, step, configured_finite_budget)
-        if outcome != DONE:
-            break                               # resolve recovery before any retry
-        outcome = run_step(step, recovery, configured_finite_budget)
-    if outcome != DONE:
-        break                                   # PAUSED: resume same job; BLOCKED: ask user
-    previous = step
-```
-
-The 60-second sleep leaves room within the five-minute limit for the bounded probe,
-publication, retries, and read-back. Measure the limit between persisted checkpoints,
-not sleep calls; five minutes is not a sleep duration to which query/write time may be
-added. Every iteration writes, even when nothing changed. Use monotonic time for the
-deadline and actual UTC times in the records. Completion/failure writes occur on
-detection, before returning or launching anything else. This follows
-`shared/scripts/soak_check_lambda.py`'s bounded CAS-retry
-structure: observe fresh state, attempt the write, return only on confirmed success,
-and surface exhaustion rather than silently continuing.
-
-On `BLOCKED`, either stop and surface the blocker to the user or immediately publish/read
-back recovery as `in_progress` before investigation starts. Recovery uses the same
-`current_activity`, step `detail`, activity log, and supervised check-ins; leaving the load
-step `blocked` does not cover ongoing recovery work or permit silence until the retry.
-
-At the cap, persist the actual state, elapsed time, live job handle, and next action
-before returning control. If the job is still active, immediately call `supervise` with
-that **same** job and a new finite deadline or transfer it to another running supervisor;
-do not leave it unmonitored, relaunch it, or start N+1. A publication failure stops workflow advancement
-and must surface as an error to the agent for repair, including whether the job is still
-running; it is not a successful check-in. Keep the loop active during verification so a
-blocking `COUNT(*)` cannot recreate the silent window.
+- Before launch, persist/read back the preceding verified outcome, then this step's start.
+- Record the actual remote job handle. Probe state within 15 seconds; unavailable state
+  stays unverified. Observe both operation and verification, including every pipeline exit.
+- Publish starts, checks and verified results through `dashboard_update.py`, with the real
+  UTC observation, elapsed time and handle. Bound publication/read-back to 15 seconds;
+  sleep at most 60 seconds between checks. The five-minute limit is between persisted
+  checkpoints, not just sleeps. Publication failure stops advancement and surfaces whether
+  the job may still be running.
+- Set a finite attention budget. At exhaustion retain the handle and observed state,
+  block advancement and transfer/continue observation of that same job until reconciled.
+  Never relaunch an uncertain mutation or leave an active job presented as complete.
+- Cover setup, investigation and recovery with active checkpoints too. Phase 7.7's daily
+  soak schedule remains unchanged; concurrent rehearsal still uses active supervision.
 
 **Worked Phase 6 example (reproduced failure sequence; not seed data or a soak schedule):**
 each row below requires a plan + snapshot + log write and read-back on the same
@@ -344,11 +298,13 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 | `shared/reference/preflight-iam-cost.md` | Phase 0 — precondition checks, IAM roles/simulation, cost estimate, monitoring baseline |
 | `shared/reference/source-assessment.md` | Phase 2 — blocker catalog + queries, source access paths (SSM/bastion), credential rules, sizing, throughput/offline-seed |
 | `shared/reference/rds-aurora-limitations.md` | Phase 2 — full per-limitation detail behind the blocker tables |
+| `shared/reference/method-readiness.md` | After method selection; Phases 6–8 — offline vs CDC evidence, static-copy freshness, lab reuse bounds |
 | `shared/reference/method-selection.md` | Phase 3 — the 19-row decision matrix, binlog gate, multi-DB/cross-region/cross-account edges |
 | `shared/reference/heterogeneous-migration.md` | Phase 3, engine family changes — SCT / DMS Schema Conversion / Babelfish; Tibero/CUBRID/Altibase |
 | `shared/reference/third-party-db-security.md` + `regulatory-compliance.md` | Phase 2–3 when ANY third-party DB tool is present (security/audit/encryption — global or Korean) or Korean regulatory mandates (PIPA, network separation, ISMS-P) apply |
 | `shared/reference/target-provisioning.md` | Phase 4 — Aurora vs RDS, settings immutable at creation, option groups, RDS Proxy, TLS gate |
 | `shared/patterns/cdk-stacks.md` | Phase 5 — the CDK project you generate |
+| `shared/reference/execution-control.md` | Before long-running jobs or resuming failure — tested step supervisor, verification records and recovery |
 | `shared/reference/execution-runbooks.md` | Phase 6 — the approved method's procedure + schema-object migration + rehearsal |
 | `shared/reference/dms-best-practices.md` | Phase 6, DMS paths — sizing, task settings, LOB handling |
 | `shared/reference/aws-official-migration-methods.md` | Phase 6 — long-tail method detail (33 AWS-documented methods) |
@@ -359,6 +315,7 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 | `shared/templates/{migration-plan,authorizations,discovery-questions,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
 | `shared/reference/dashboard.md` | Phase 0 to scaffold; every plan update, including active-work checkpoints under hard constraint 1 (Phase 7.7 soak remains daily) |
 | `shared/reference/post-migration.md` | Phase 9 |
+| `shared/reference/handoff-packaging.md` | Mode 2 handover and final delivery — reviewed file allowlist, snapshot hashes, included/external/omitted evidence |
 | `shared/reference/troubleshooting.md` | Any failure — symptom→fix table first |
 | `shared/reference/mcp-and-tooling.md` | Session start if MCP available; anytime tooling questions arise |
 
@@ -366,8 +323,10 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 
 ### Phase 0: Preflight
 
-1. **Announce activation and wait for a go-ahead — before anything else, before even the
-   mode question below.** Output: "🔧 **DB Migration Agent skill activated.** I'm about to
+1. **For a fresh engagement, announce activation and wait for a go-ahead — before
+   the mode question below.** On resume, use the existing activation and scope; continue
+   with install/record checks without asking again. Fresh-engagement output:
+   "🔧 **DB Migration Agent skill activated.** I'm about to
    run read-only preflight checks (AWS account/region/quota sanity — nothing touches your
    source database) and scaffold engagement tracking files (`migration-plan.md`,
    `authorizations.md`, a local progress dashboard) in this directory. Proceed?" This is a
@@ -376,18 +335,21 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
    (Translate this into the user's conversation language — see the Language rule; the quote above is the English form of the template, not a literal string.)
 2. **Install integrity — before using any `shared/` file:** in the directory this SKILL.md was
    loaded from, test that `shared/reference/version-upgrades.md`, `shared/templates/migration-plan.md`,
-   `shared/assets/dashboard.js` and `shared/scripts/soak_check.py` exist (`test -r`, don't read them).
+   `shared/assets/dashboard.js`, `shared/scripts/soak_check.py`,
+   `shared/scripts/dashboard_update.py`, `shared/scripts/execution_step.py` and
+   `shared/scripts/handoff_bundle.py` exist (`test -r`, don't read them).
    Any missing → STOP: the install is incomplete; show the README `install_skill` command. Never
    substitute web search for a missing reference file.
    **Before creating or updating any engagement record**, check for an existing plan,
-   authorizations, and dashboard. Ask fresh / resume at phase N / failed midway and
-   needs triage. Preserve every existing record; never reseed approval/progress evidence.
+   authorizations, and dashboard. Determine fresh / resume at phase N / failed midway
+   from those records and the user's request; ask only if unclear. Preserve every
+   existing record; never reseed approval/progress evidence.
    On resume, use the recorded mode unless the user explicitly confirms a change.
    For a fresh engagement, ask the **mode question** (`shared/reference/engagement-safety.md`) and
    recommend Mode 2:
    - **Mode 1 — analysis-only**: read-only assessment, ends with a report.
    - **Mode 2 — migration-ready (recommended default)**: the full migration *except* the
-     cutover — target built, data migrated, validated, parallel-run, cutover runbook
+     cutover — target built, data migrated, validated, method-specific readiness established, cutover runbook
      rehearsed and handed over; **the customer executes the cutover** with their own tests
      and window.
    - **Mode 3 — full-migration**: Mode 2 plus the agent executing the production cutover —
@@ -513,7 +475,9 @@ for Blue/Green rollback — `shared/reference/version-upgrades.md` §"MySQL 8.0 
 a contradiction — surface it). Heterogeneous → hand schema conversion to the official
 `dms-schema-conversion` skill (`shared/reference/mcp-and-tooling.md` §Chaining), then
 return here for data movement. Prepare the **cost estimate**
-(`shared/reference/preflight-iam-cost.md` §3).
+(`shared/reference/preflight-iam-cost.md` §3). Map the selected method to
+`shared/reference/method-readiness.md`: offline-copy freshness and final-copy outage, or
+CDC apply proof and observed intervals. Preserve the full validation scope in either path.
 
 ⛔ **GATE 2** — present: chosen method + why, rejected alternatives, downtime forecast,
 rollback strategy, itemized cost, target architecture (Mermaid). Explain the "why" in
@@ -553,12 +517,16 @@ seeing data); replication/DMS alarms must show datapoints right after their task
 
 ### Phase 6: Execute the migration
 
-Follow the approved method's runbook in `shared/reference/execution-runbooks.md` only.
-Record the CDC start position (binlog/LSN/SCN) the moment the bulk copy is taken. For
+Follow the approved method's runbook in `shared/reference/execution-runbooks.md`, with
+`execution-control.md` for supervision and `method-readiness.md` for applicable evidence.
+Record the copy boundary and, when catch-up uses it, the CDC start position (binlog/LSN/SCN)
+the moment the bulk copy is taken. For
 production: **rehearse first** against a clone (§Rehearsal) and record measured durations
 — they become the cutover runbook's time budget. "Rehearsed" requires the minimum contents
-in §Migration Rehearsal (freeze→drain→repoint→verify with a measured pause, rollback actually
-exercised); anything skipped is a waiver, never "met".
+in §Migration Rehearsal (freeze→final-copy/drain→repoint→verify with a measured pause,
+rollback actually exercised). Skipped work is waived, never recorded as performed;
+the aggregate readiness check may be resolved by an accepted waiver only after its
+remaining conditions pass (`method-readiness.md`).
 
 ### Phase 7: Validate
 
@@ -613,8 +581,8 @@ evidence before readiness.
 ### Phase 7.7: Parallel-run soak (cutover readiness stays locked until it passes)
 
 Applies to CDC methods in Mode 2 handover depth (a) and Mode 3. Offline/full-load-only
-methods use the static-validation window and final frozen copy in
-`shared/reference/engagement-safety.md`; an old online copy is never cutover-current.
+methods use the static-validation alternative and final frozen copy in
+`shared/reference/method-readiness.md`; an old online copy is never cutover-current.
 The target runs live and CDC-current
 while production stays on the source, for the parallel-run length chosen at GATE 1
 (risk-tier default: Low 1, Moderate 3, High 7 consecutive green days). The scripts support
@@ -659,7 +627,9 @@ signed (RPO acknowledgment in the plan).
 or *estimated*, rollback runbook, the client-repoint list with exact per-client changes
 and where each config deploys from, validation + soak evidence. Walk the customer through
 the runbook step by step, answer their questions, and say plainly what is now their own
-responsibility and why (`engagement-safety.md` §How to present a gate), then append the
+responsibility and why (`engagement-safety.md` §How to present a gate). Verify the
+reviewed package and its included/external/omitted references using
+`shared/reference/handoff-packaging.md`, then append the
 **A4b handover-acceptance** block to `authorizations.md` and get its `**Confirmed:**` line
 filled in. Then **stop** — do not freeze the source, repoint clients,
 or run the sequence. Offer to observe read-only during their cutover and to run the
@@ -668,9 +638,12 @@ bidirectional verification afterwards. Their reported completion is what trigger
 **Mode 3 only — execute.** ⛔ **GATE 4**: walk the user through the runbook; they approve
 the window, the rollback strategy, and the abort criteria, and the A4 block gets its
 `**Confirmed:**` line filled in. Say plainly
-what you're about to do and why each step is reversible — see `engagement-safety.md` §How
-to present a gate. Then execute
-step-by-step with go/no-go confirmation at each group: freeze source → drain CDC → stop
+what you're about to do and the actual rollback limitations — see `engagement-safety.md`
+§How to present a gate. Instantiate the approved method and rollback branches first:
+offline methods replace CDC drain/stop with the final full copy and validation under
+the continuous source fence; reverse replication is used only where supported and
+approved. Then execute with go/no-go confirmation at each group. The CDC sequence is:
+freeze source → drain CDC → stop
 forward task → spot-validate → reset auto-increment/sequences → start reverse replication
 → repoint → refresh clients → **bidirectional verification** (app health UP *and* new DB's
 processlist shows every inventoried client). Watch the abort criteria at T+15m/T+1h/T+24h
@@ -684,7 +657,10 @@ table, post-migration.md step 2; IaC drift reconciled, step 11), keep the source
 reverse replication through the rollback window, then decommission (with constraint 8's
 confirmation). Hand over the CDK project + plan as the customer's operational record. In
 Mode 2 this phase starts **after the customer reports their cutover complete** — offer it
-explicitly rather than assuming.
+explicitly rather than assuming. Verify the final reviewed handoff snapshot per
+`shared/reference/handoff-packaging.md`; keep later save/acceptance receipts separate
+from the frozen archive. A hash manifest proves the selected files, not complete coverage
+of every evidence reference or a successful customer download.
 
 ## When to call MCP
 
@@ -707,7 +683,8 @@ works. Details + install: `shared/reference/mcp-and-tooling.md`.
 
 By the end of an engagement the working directory contains:
 
-1. **`migration-plan.md`** — complete, every gate confirmed, evidence embedded.
+1. **`migration-plan.md`** — outcomes and applicable gate status; evidence embedded or
+   explicitly referenced. Pending work, waivers and failed attempts remain visible.
 2. **`authorizations.md`** — action-class authorizations (incl. A4b handover acceptance
    in Mode 2), waivers — the audit record.
 3. **`{prefix}-migration/`** — the deployed CDK project (`shared/patterns/cdk-stacks.md`
@@ -721,7 +698,12 @@ By the end of an engagement the working directory contains:
    pending customer requests, detailed cutover requirements, and soak sample trends alongside
    the agent's cutover-readiness verdict (`shared/reference/dashboard.md`). Kept current
    throughout, using local files or the existing presigned URLs during soak.
-(**Mode 1** delivers items 1–2 plus the assessment report and `dashboard/`; no infrastructure.)
+6. **Reviewed handoff ZIP + manifest** — the selected reports, evidence and applicable
+   deliverables, with hashes and explicit included/external/omitted reference accounting
+   (`shared/reference/handoff-packaging.md`). Keep any later acceptance/transfer receipt
+   outside the frozen ZIP. No credentials, raw logs or database dumps included by default.
+(**Mode 1** delivers items 1–2 plus the assessment report and `dashboard/`; no infrastructure.
+Its handoff contains only those applicable, reviewed artifacts.)
 
 ## Common mistakes (learned the hard way)
 

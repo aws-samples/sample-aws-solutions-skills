@@ -1,7 +1,7 @@
 # Progress Dashboard — `dashboard/`
 
 > A local, read-only page the customer opens themselves to see exactly how much of the
-> migration is done and — the reason it exists — **whether every hard cutover gate is
+> migration is done and — the reason it exists — **whether every cutover readiness check is
 > actually met**, before they decide to cut over. It is a rendering of facts already
 > binding elsewhere in this skill (hard constraint 6, GATE 3, the Phase 7.7 soak counter,
 > the rehearsal step, the runbook, `authorizations.md`). It invents no new criteria and
@@ -9,6 +9,12 @@
 > without opening `migration-plan.md`. It also shows what each phase established, the
 > risks still being managed, the cost and timing assumptions, why the approach was
 > chosen, and exactly what the customer needs to provide next.
+
+**Terminology:** the four human **GATEs** and operation authorizations are defined in
+[engagement-safety.md §Approvals of record](engagement-safety.md#approvals-of-record).
+This page has six evidence/readiness checks, stored under the existing `cutover_gates`
+key. They add no approval ceremony and cannot authorize an operation. Apply
+[method-readiness.md](method-readiness.md) when choosing static-copy or live-CDC evidence.
 
 ## Scaffold at Phase 0, alongside `migration-plan.md`/`authorizations.md`
 
@@ -151,13 +157,17 @@ python3 <skill>/shared/scripts/dashboard_update.py --dashboard dashboard \
   gate keys, `cutover_ready` true only with all six gates present and met) and writes
   **nothing** on failure; checks all three files are writable, then appends the log line,
   replaces the plan (temp file + rename) and replaces status.json **last**; reads back the
-  complete payload. On any detected failure it rolls back (log truncated, plan and status
-  restored) and exits 1. Each file is individually crash-safe, but the three are not
-  crash-atomic together: a killed process can leave a log/plan line without its status
-  update (never the reverse) — re-run the checkpoint. Sets `updated_at` and recomputes
+  complete payload. On detected write/read-back failure it attempts each restoration
+  independently (log truncated, original plan/status bytes restored) and exits 1.
+  Restoration failure is reported explicitly; inspect all three files before resuming.
+  Plan/status replacements are atomic per file, but the log append and three-file update
+  are not a crash-safe transaction. A killed process may leave a partial checkpoint:
+  reconcile it with the actual operation result before a new publication; never replay
+  a mutation merely to repair reporting. Sets `updated_at` and recomputes
   `overall_progress_pct` (field notes below; `--keep-progress` to skip). Exit 0 only when
-  every write is read back — a ready-made `publish_and_confirm` for the SKILL.md supervisor
-  recipe (milliseconds plus lock wait, `--lock-timeout` default 10 s, inside its 15-second bound).
+  every write is read back. [execution-control.md](execution-control.md)'s supervisor
+  bounds this command to 15 seconds; the publisher's `--lock-timeout` bounds only lock
+  acquisition, not every filesystem operation.
 - **Soak window:** the live copy is in S3 (below); do not run it on a stale local copy and
   upload that over the Lambda's data. Exclude `.status.lock` from uploads.
 
@@ -291,25 +301,26 @@ Field notes:
   every gate stays `met:false` (there is no target to be ready) and `cutover_ready` stays
   `false` — the dashboard is still valid to show, it just reports nothing is gate-eligible.
 
-**When each gate is allowed to flip to `met:true`** — a gate is a *requirement being resolved*,
-not necessarily *work being performed*: a confirmed, dated waiver for a skipped or
-shortened step satisfies the gate exactly as completing the step would, because
-`engagement-safety.md`'s waiver protocol is itself a valid way to close a requirement. Never
-mark a gate `met:true` for either reason without one of these:
+**When each readiness check may flip to `met:true`:** record the evidence that resolves
+the requirement, or an applicable accepted waiver **whose remaining conditions are met**.
+The detail must distinguish completed work from waived coverage. A waiver is not proof
+that the skipped work ran; compression/reuse alone cannot close the requirement.
 
 | key | `met:true` only when | never mark true just because |
 |---|---|---|
 | `client_inventory` | every client has a reviewed, staged (inactive) repoint/revert plan and pool prep complete; every CDC consumer has a restart plan | clients already repointed — execution/verification belongs to authorized Phase 8, customer-executed in Mode 2 |
 | `validation` | GATE 3 evidence block confirmed **and**, if the chosen validation depth includes a customer test suite (Q18), its final pre-cutover sign-off is also in (`customer-test-integration.md`) | row counts/checksums pass but the customer's own suite hasn't run its final pass |
-| `soak` | the chosen parallel-run parameter is satisfied: N consecutive greens **and** the soak-exit block confirmed (`SKILL.md` Phase 7.7 requires both) — **or** a dated waiver block in `authorizations.md` for skipping/shortening it | N greens reached but soak-exit isn't confirmed yet; also applies to Mode 2 handover depth (b), where the customer runs the soak themselves — stays `false` until they report it done or confirm the skip waiver |
-| `rehearsal` | the chosen rehearsal parameter is satisfied (one clone rehearsal done, or repeat-until-converged reached) **with the minimum contents** of `execution-runbooks.md` §Migration Rehearsal: freeze → drain → repoint → bidirectional verify executed with a measured write pause, **and** the rollback path actually exercised (reverse task run with INSERT/UPDATE/DELETE landing on a source-version stand-in, or write-log replay tested) — **or** a dated waiver for rehearsal `none` or for each skipped element | a rehearsal is scheduled but hasn't produced measured timings yet; micro-timings of individual commands; a reverse endpoint that only passed test-connection (that is not rollback proven) |
+| `soak` | CDC: agreed observed green intervals **and** accepted soak-exit; a skip/compression waiver must have all its remaining conditions resolved. Offline: accepted static-validation alternative and its evidence/exit record under `method-readiness.md`, with final frozen-copy obligation retained | elapsed time, same-day samples counted as days, missing coverage, a waiver with pending conditions, or an old online copy. Mode 2 depth (b) stays false until customer evidence/acceptance resolves the same requirement |
+| `rehearsal` | approved method's end-to-end rehearsal and actual rollback exercise under `execution-runbooks.md` / `method-readiness.md`, with measured timings; or a dated waiver explicitly covering omissions and satisfying its remaining conditions | scheduled work, command micro-timings, test-connection only, or reused lab evidence outside its resource/config/version/age limits |
 | `runbook` | `cutover-runbook.md` + `rollback-runbook.md` exist with zero placeholders **and** (reverse replication created + connection-tested, **or** the alternative rollback strategy + RPO acknowledgment block is confirmed) — hard constraint 6's rollback-path requirement | the runbook file exists but reverse replication hasn't been connection-tested |
-| `approvals` | every applicable `authorizations.md` block for this point is confirmed: GATE 1 (in `discovery-questions.md`), GATE 2, GATE 3, **and** — Mode 2: **A4b** handover acceptance; Mode 3: **A4** cutover authorization | GATE 1/2 are confirmed but A4b/A4 (which happens at Phase 8, near the end) is still pending — this is why `approvals` is usually the last gate to flip, not an early one |
+| `approvals` | GATE 1 confirmed in **`migration-plan.md`'s GATE 1 row**; GATE 2, GATE 3 and every applicable authorization/waiver confirmed in `authorizations.md`; Mode 2: **A4b** handover acceptance; Mode 3: **A4** (GATE 4) cutover authorization | discovery answers alone, green checks, or GATE 1/2 acceptance while A4b/A4 is pending |
 
 - `cutover_ready` — **you compute this** as a plain boolean AND over `cutover_gates[].met`.
   The page never recomputes it and never infers readiness from `overall_progress_pct` — a
   94% progress bar next to one unmet gate must still show "아직 컷오버 불가." Never derive
-  one from the other.
+  one from the other. A true value does not authorize a source write, freeze, rollback
+  or repoint. At execution, recheck current evidence and the operation's accepted scope;
+  stale/contradicted evidence makes the affected checks false until resolved.
 - `overall_progress_pct` is informational only and **deterministic**: each of the 11
   phases weighs 1/11 — a `done` phase counts 1, an `in_progress` phase counts
   `done ÷ total` (capped 0–1; 0 when `total` is 0/absent), a `pending` phase 0 —
@@ -700,10 +711,11 @@ Legacy `migration_objects.*.done` counters (seen in the real `large` fixture) ar
 as recorded completion counts when `validated`/`created`/`loaded` are absent, never relabeled
 as checksum validation. New writers continue using the documented object fields above.
 
-For renderer changes, run `node scripts/test-dashboard.cjs /path/to/dryrun3/engagements`
-from the skill repository. It reads every real `*/dashboard/status.json` and sibling log
-without writing them, tests local and presigned fetch targets, and checks optional-field
-omission cases against this reference's JSON examples. It uses only Node built-ins.
+For renderer changes, run `node scripts/test-dashboard.cjs` from the skill directory.
+It uses checked-in synthetic fixtures by default; optionally pass a reviewed engagement
+directory to also read its `*/dashboard/status.json` and sibling logs without modifying
+them. It tests local and presigned fetch targets and optional-field omissions against
+this reference's JSON examples, using only Node built-ins.
 
 ## `activity-log.jsonl` — JSON Lines, APPEND ONLY, never rewritten
 

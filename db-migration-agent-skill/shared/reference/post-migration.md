@@ -67,3 +67,28 @@
     resources: record them in the README's post-deploy steps.
 12. Mark the plan complete: final costs vs the GATE 2 estimate, lessons-learned notes,
     handover of the CDK project + runbooks to the customer.
+
+## Verify the handoff before delivery
+
+This also applies to the Mode 2 package prepared before customer cutover. Read
+[handoff-packaging.md](handoff-packaging.md) and use `shared/scripts/handoff_bundle.py`.
+
+Build reports and dashboard summaries from the same reviewed operation results and
+evidence references. For supervised steps, use the attempt's `result.json` and bound
+verification evidence; preserve failed attempts and later reconciliation separately.
+Reconcile stale runbook headers, timestamps, resource/version bindings and evidence
+hashes before packaging. Distinguish measured work, accepted waivers, pending observations
+and customer-reported results. Packaging cannot validate those claims for you.
+
+Review an explicit nonsecret allowlist and enumerate known references as included,
+external or intentionally omitted. Pause writers, create and verify a new snapshot,
+then retain the whole-archive digest separately. Inspect the resulting manifest: a
+verified ZIP proves the selected bytes, not that every referenced result was selected.
+Do not call the package complete while required artifacts or reference decisions remain
+unresolved. Raw logs, dumps and credentials are excluded unless separately reviewed and
+explicitly appropriate; credentials must never be part of the delivered report bundle.
+
+Later customer receipt or save confirmation belongs in a separate record referencing
+the frozen archive name/hash, with remaining work and its owner. Do not rebuild the ZIP
+to put its own later receipt inside it or claim a download succeeded merely because
+the archive was generated.

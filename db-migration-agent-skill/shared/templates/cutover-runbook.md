@@ -25,10 +25,10 @@ it estimated and identify its measured component.
 |---|------|------------------|--------|
 | ▢ | Validation green (GATE 3) | see migration-plan.md Phase 7 | all ▢→✅ |
 | ▢ | Production settings effective before validation/soak | {parameter group, reboot/session checks} | durable commits, integrity checks, TLS/timezone, approved backups/availability |
-| ▢ | Parallel run passed: {N} consecutive green periods | migration-plan.md Phase 7.7 tracker | counter {N}/{N}; soak-exit block confirmed |
+| ▢ | Method-specific readiness | {CDC: observed N green periods / offline: accepted static-copy evidence and final-copy obligation}; migration-plan.md Phase 7.7 | applicable evidence/waiver conditions resolved; soak-exit confirmed; no invented green intervals |
 | ▢ | **Mode 3:** cutover authorization confirmed (A4) + abort criteria agreed. **Mode 2:** handover acceptance confirmed (A4b) + abort criteria agreed with the customer's own team | authorizations.md §3 | that block's `**Confirmed:**` date present (no name — this checks the block exists and is marked, not who marked it) |
 | ▢ | Client inventory complete | migration-plan.md Phase 7.5 | every client repoint-ready |
-| ▢ | Reverse replication task exists, endpoints tested, task NEVER RUN | `aws dms describe-replication-tasks --filters Name=replication-task-arn,Values={rev-arn}` | status `ready` (never `stopped` — a run task holds a stale CDC checkpoint; recreate it if rehearsal ran it) |
+| ▢ | Approved rollback path prepared and rehearsed | {supported reverse replication / tested write-log replay / acknowledged RPO}; rollback-runbook.md | applicable evidence and accepted terms; a reverse DMS task for a fresh start must be never-run, not a reused rehearsal checkpoint |
 | ▢ | DNS TTL lowered (if DNS cutover) | `aws route53 change-resource-record-sets …` TTL=60 | dig shows 60 |
 | ▢ | Connection pools pre-tuned | per-client values in migration-plan.md | maxLifetime≈30s |
 | ▢ | Alarms + dashboard on operator screen | CloudWatch dashboard {name} | no active alarms |
@@ -67,6 +67,12 @@ full export/backup and replacement restore under a continuous source-write fence
 then repeat final validation before repointing. The earlier Phase 6 copy is not current.
 Budget the entire copy/validation outage; in Mode 2 the customer executes this branch.
 
+**Abort actions below invoke the approved rollback runbook.** A failed command may
+already have changed a client file, running process or database. Retain fences and
+maintenance while reconciling persistent config, runtime, sessions and target writes;
+do not interpret "rollback" as immediate source unfencing. An unknown write outcome
+blocks source release even when A5 is accepted.
+
 > Steps 3–8 (the freeze window) run as **one pre-staged script per host** (staged and
 > dry-run-tested at T-24h) — the operator issues one command per host, not one per step.
 > Interactive per-step dispatch (e.g. SSM send-command round-trips) adds 30–40 s each and
@@ -89,14 +95,14 @@ Budget the entire copy/validation outage; in Mode 2 the customer executes this b
 |---|------------|-------------------------|------|---------|--------|--------------|
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 1. Confirm CDC caught up | CDCLatencySource=0 ∧ CDCLatencyTarget=0 | metric=0 | wait / abort if climbing |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 2. Maintenance mode ON | {app-specific} | banner up | — |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 3. Freeze source | {fence all app/job reconnects; drain/terminate sessions and transactions; engine read-only controls supplementary} | no writers or prepared write transactions; reconnect fence tested | unfreeze, exit maint |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 4. Final CDC drain | {fresh CloudWatch Source/Target metrics and C1/C2 applied source checkpoint} | post-freeze datapoints =0; missing/stale blocks | resume, abort |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 5. Stop forward task | `aws dms stop-replication-task --replication-task-arn {fwd-arn}` | `stopped` | restart task |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 3. Freeze source | {fence all app/job reconnects; drain/terminate sessions and transactions; engine read-only controls supplementary} | no writers or prepared write transactions; reconnect fence tested | retain maintenance; reconcile actual fences/writers via rollback runbook |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 4. Final CDC drain | {fresh CloudWatch Source/Target metrics and C1/C2 applied source checkpoint} | post-freeze datapoints =0; missing/stale blocks | retain fences; inspect actual apply state; approved recovery only |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 5. Stop forward task | `aws dms stop-replication-task --replication-task-arn {fwd-arn}` | `stopped` | inspect actual task/checkpoint; no blind restart |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 6. Spot-validate {3-5 critical tables} | {C3 — source queries and target queries separately} | match | ROLLBACK |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 7. Reset AUTO_INCREMENT / sequences on target | {C4 — target statements file} | next-val > max | ROLLBACK |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 8. Start REVERSE replication (fresh start from freeze point, never-run task) | {retain source app/job fence; clear read-only controls for ordinary DMS SQL apply}; `aws dms start-replication-task --replication-task-arn {rev-arn} --start-replication-task-type start-replication` | `running`; apply permissions rehearsed; source app writers still blocked | abort unless alternative rollback/RPO explicitly confirmed |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 9. Repoint: {secret update / DNS swap / config+unit change} | {exact command(s) per client} | — | revert repoint |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 10. Refresh/restart clients ({coordinated / rolling-with-frozen-source}) | {per-client commands} | services up | revert + restart |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 9. Repoint: {secret update / DNS swap / config+unit change} | {exact command(s) per client} | persistent highest-priority config matches intended endpoint | retain fences; verify every changed layer under rollback runbook |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 10. Refresh/restart clients ({coordinated / rolling-with-frozen-source}) | {per-client commands} | reload succeeded; effective process/pool endpoint and start identity verified | reconcile persistent config AND running clients; approved recovery only |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 11. **Bidirectional verify** | app health = UP **and** target processlist shows {expected client IPs, ~pool counts} | both | ROLLBACK |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 12. Maintenance mode OFF | {command} | traffic flowing | — |
 
@@ -120,8 +126,9 @@ replication: accounts you create on the source replicate to the target").
 
 ## Deviation rule (any step that cannot run exactly as approved)
 
-STOP and ask — present the deviation as its own block — or execute the abort criteria below.
-Never proceed and record afterwards. Rollback / re-cutover = A5 / new A4 block accepted in full.
+STOP and ask — present the deviation as its own block — or execute the abort criteria below
+within the already accepted A5. Never proceed outside scope and record afterwards.
+Ad-hoc rollback needs the applicable A5; re-cutover needs a new A4 accepted in full.
 
 ## Abort / rollback criteria (from cutover-procedures.md — pre-agreed, not negotiable mid-incident)
 | Signal | Action |

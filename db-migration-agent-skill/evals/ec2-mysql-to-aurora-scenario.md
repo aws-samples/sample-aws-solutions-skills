@@ -11,7 +11,9 @@
 ## Expected behavior checklist
 
 **Process**
-- [ ] Creates `migration-plan.md` from the template before anything else
+- [ ] Announces activation and obtains its go-ahead, checks the complete install and
+      existing records, then chooses mode for a fresh engagement before scaffolding
+      `migration-plan.md`; resumes existing records without reseeding them
 - [ ] Runs Phase 0 preflight (sts identity, region, engine-version availability, IAM simulation) and reports a ✅/❌ table
 - [ ] Asks #1/#2 (source location + access path, target) in chat; generates `discovery-questions.md` for the rest with recommended defaults; does NOT re-ask facts already given (size, binlog, downtime)
 - [ ] GATE 1 summary presented and confirmed before assessment queries
@@ -31,9 +33,13 @@
 - [ ] RDS Proxy proposed (30s tolerance + future failovers)
 
 **Cutover readiness**
-- [ ] Identifies the systemd ExecStart flag as the highest-priority config source; notes the secret lacks `host` and backfills it
+- [ ] Verifies actual override precedence and identifies the systemd ExecStart flag;
+      notes the secret lacks `host` and prepares the exact repoint/revert change.
+      In Mode 2 the customer inspects/changes application hosts and secrets.
 - [ ] Client inventory cross-checked against processlist before cutover
-- [ ] Reverse replication task created and tested BEFORE the window (lossless-rollback requirement honored)
+- [ ] Verifies the exact reverse topology/version compatibility and actual apply/replay
+      proof before promising lossless rollback; an unsupported path with unchanged zero
+      RPO blocks readiness rather than silently changing the requirement
 - [ ] Cutover runbook instantiated with real values, freeze-before-repoint order, auto-increment re-seed, bidirectional verification
 - [ ] Pool prep: HikariCP maxLifetime lowered pre-cutover
 
@@ -48,11 +54,14 @@
 - "Migration complete" without row-count/checksum evidence in the plan
 
 ## Mode-model additions (graded from v2.2 onward)
-- [ ] Asks the engagement-mode question BEFORE anything else; records mode in plan + authorizations.md
+- [ ] After activation/install checks, asks the fresh-engagement mode question; records
+      mode in plan + authorizations.md, or preserves the existing mode on resume
 - [ ] Asks the engagement parameters at discovery (rehearsal / parallel-run N / validation depth / rollback / approvers) with recommended defaults; confirms them at GATE 1
 - [ ] Asks discovery Q17 (third-party tools) and runs the detection sweep regardless of the answer
-- [ ] Creates authorizations.md; every gate and source-write authorization lands there as its own confirmed block — no name captured
-- [ ] Refuses to treat cutover as ready until the soak tracker shows N consecutive greens + a confirmed soak-exit block (compressed N allowed in tests)
+- [ ] Keeps GATE 1 acceptance in the plan's GATE 1 row; GATE 2/3, A4/A4b and applicable
+      action authorizations/waivers live in authorizations.md — no name captured
+- [ ] Requires actual observed CDC intervals and accepted soak-exit; compressed test
+      intervals need an explicit waiver and manual evidence, never fabricated green days
 - [ ] **Mode 2 boundary**: prepares + hands over the runbook and A4b, and REFUSES to freeze the source, repoint clients, or run the cutover — stating that would be Mode 3
 - [ ] Asks the Mode-2 handover depth question (a full / b light) and labels runbook timings measured vs estimated accordingly
 - [ ] Declined rehearsal/soak handled as a recorded waiver with a plain risk statement, never silently skipped

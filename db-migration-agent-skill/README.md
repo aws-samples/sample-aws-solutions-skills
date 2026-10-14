@@ -17,13 +17,14 @@ You start by telling the agent something like *"we run MySQL on an EC2 instance 
 to move to Aurora — we can tolerate about a minute of downtime and can't lose data."*
 From there:
 
-1. **The mode question comes first — how far should the agent go?**
+1. **A brief activation check-in, then the mode choice — how far should the agent go?**
+   On resume, it keeps the existing records and accepted scope.
    - **Mode 1 — analysis only**: it inspects and recommends, guaranteed read-only, and
      hands you a report.
    - **Mode 2 — migration-ready (the default, and what we recommend)**: the agent does the
      entire migration *except the cutover* — builds the new database, moves and validates
-     the data, runs it in parallel with your production database, rehearses the cutover to
-     get real timings, arms the rollback path, and hands you a runbook. **Your team
+     the data, establishes readiness for the selected method, rehearses the cutover to
+     get real timings, verifies the approved rollback path, and hands you a runbook. **Your team
      executes the cutover**, in your window, with your tests. The agent will not freeze
      your source or repoint your applications in this mode.
    - **Mode 3 — full migration**: Mode 2 plus the agent executing the cutover itself. Only
@@ -54,12 +55,13 @@ From there:
    moves by the fastest safe method for your case (often native tools, not DMS), while
    your application keeps running on the old database.
 
-6. **It proves the copy is right.** Row counts on every table, checksums on critical
-   ones, your stored procedures executed on the target, and a **parallel-run period**: the
-   new database runs alongside production, kept current in real time, with a daily
-   green/red report. Cutover readiness stays locked until it has been green for N
-   consecutive periods (you pick N) and that soak-exit block gets confirmed. Your own test
-   suite, if you have one, runs against the new database during this window.
+6. **It validates the copy and the application path.** Row counts on every table,
+   checksums on critical ones, schema objects, accounts and real-driver authentication,
+   plus the agreed application/version checks. For CDC, the target stays current through
+   an observed parallel-run period, with the agreed green intervals and exit acceptance.
+   An offline copy instead needs accepted static-validation evidence and a final full
+   copy and validation while source writes are fenced. An earlier online copy is stale;
+   a lab label never silently waives validation, rehearsal or unobserved time.
 
 7. **Cutover — handed to you (Mode 2) or executed for you (Mode 3).** Either way you get a
    runbook rehearsed on a clone with **measured** timings, a rollback runbook, and the
@@ -67,8 +69,9 @@ From there:
    you confirm the handover, and *your team* runs the freeze-and-flip in your window — with
    the agent available to watch read-only and verify afterwards. In **Mode 3** the agent
    executes it step by step with go/no-go checks and reports the measured pause straight,
-   whatever it is. Reverse replication is armed **before** the flip, so for the whole
-   rollback window the old server stays a live, current standby — failback loses nothing.
+   whatever it is. A lossless rollback requires a supported and rehearsed reverse-apply
+   or write-log replay path. Where that is unavailable, the plan must explicitly state
+   the accepted potential data loss; it never promises lossless failback from a stale source.
 
 8. **Nothing is deleted without your confirmation.** The old server is only decommissioned
    after the rollback window closes and you've confirmed the exact teardown list — the
@@ -97,8 +100,9 @@ every production write is itemized), or to trust "it worked" without evidence.
 | `migration-plan.md` | The running record — every decision and why, every result, every gate |
 | `authorizations.md` | What was authorized and when — including any waivers (no names) |
 | `{prefix}-migration/` | A deployable CDK (TypeScript) project for the new database — yours to keep |
-| `cutover-runbook.md` / `rollback-runbook.md` | The scripts as executed, with measured timings |
-| Soak reports | Daily green/red evidence from the parallel-run period |
+| `cutover-runbook.md` / `rollback-runbook.md` | Prepared/as-executed procedures, with measured versus estimated timings and recovery evidence |
+| Readiness evidence | Observed CDC reports or the approved static-copy alternative, including remaining final-copy obligations |
+| Reviewed handoff ZIP + manifest | Selected report/evidence bytes and hashes, with included/external/omitted references; later receipt kept separately |
 
 ## What this skill is NOT — read before setting expectations
 
@@ -202,6 +206,9 @@ db-migration-agent-skill/
 │   │   ├── validation-patterns.md          Phase 7 — counts/checksums/app-level/version-gap
 │   │   ├── version-upgrades.md             Major-version-gap behavioral changes
 │   │   ├── cutover-procedures.md           Phases 7.5–8 — client discovery, freeze, reverse replication, rollback
+│   │   ├── method-readiness.md             Offline/CDC evidence and bounded lab reuse
+│   │   ├── execution-control.md            Reviewed step supervision and recovery
+│   │   ├── handoff-packaging.md            Allowlist snapshot and reference accounting
 │   │   ├── post-migration.md               Phase 9
 │   │   ├── troubleshooting.md              Symptom → fix
 │   │   ├── mcp-and-tooling.md              AWS MCP Server / Agent Toolkit / companion MCP servers
@@ -210,7 +217,7 @@ db-migration-agent-skill/
 │   │   └── regulatory-compliance.md        Korean regulatory mandates (PIPA, network separation, ISMS-P)
 │   ├── patterns/
 │   │   └── cdk-stacks.md                   The CDK project the skill generates
-│   ├── scripts/                            soak_check(.py|_lambda.py), generate_presigned_urls.py
+│   ├── scripts/                            Dashboard publisher, step supervisor, handoff packager, soak helpers
 │   ├── assets/                             dashboard.css/.js, rds-global-bundle.pem
 │   └── templates/
 │       ├── migration-plan.md               Working artifact (source of truth per engagement)
@@ -221,8 +228,9 @@ db-migration-agent-skill/
 │       └── rollback-runbook.md
 ├── evals/                                  Black-box eval scenarios (expected-behavior checklists)
 │   ├── ec2-mysql-to-aurora-scenario.md
-│   └── sqlserver-to-aurora-pg-scenario.md
-└── scripts/sync-skills.sh                  Sync canonical → variants + verify md5 + link check
+│   ├── sqlserver-to-aurora-pg-scenario.md
+│   └── recovery-and-readiness-scenario.md
+└── scripts/                               Offline Python/Node regression tests and synthetic fixtures
 ```
 
 ## Install
@@ -230,14 +238,14 @@ db-migration-agent-skill/
 `shared/` (reference, patterns, templates, scripts, assets) **must** be installed next to
 `SKILL.md` — every `shared/...` path in SKILL.md resolves relative to the installed skill
 directory, and the skill stops at Phase 0 if `shared/reference/` is unreadable. Copying
-only `SKILL.md` is the classic incomplete install (the agent then has no reference
-material and falls back to web search). Run from the repo root:
+only `SKILL.md` leaves the install incomplete. From the repository root, first run
+`cd db-migration-agent-skill`, then:
 
 ```bash
 install_skill() {  # $1 = variant dir (claude-code | kiro | codex), $2 = destination skill dir
   local src="$1/skills/db-migration-agent/SKILL.md" dest="$2" parent stage f
   [ -n "$dest" ] && [ -f "$src" ] && [ -d shared ] && [ -d evals ] ||
-    { echo "install_skill: run from the repo root with a valid variant and destination" >&2; return 1; }
+    { echo "install_skill: run from db-migration-agent-skill with a valid variant and destination" >&2; return 1; }
   parent=$(dirname "$dest"); mkdir -p "$parent" || return 1
   stage=$(mktemp -d "$parent/.db-migration-agent.XXXXXX") || return 1   # same filesystem as dest
   chmod 755 "$stage"
@@ -245,7 +253,8 @@ install_skill() {  # $1 = variant dir (claude-code | kiro | codex), $2 = destina
     rm -rf "$stage"; echo "INSTALL FAILED: copy into staging" >&2; return 1
   fi
   for f in SKILL.md shared/reference/version-upgrades.md shared/templates/migration-plan.md \
-           shared/assets/dashboard.js shared/scripts/soak_check.py shared/scripts/soak_check_lambda.py; do
+           shared/assets/dashboard.js shared/scripts/soak_check.py shared/scripts/soak_check_lambda.py \
+           shared/scripts/dashboard_update.py shared/scripts/execution_step.py shared/scripts/handoff_bundle.py; do
     [ -r "$stage/$f" ] || { rm -rf "$stage"; echo "INSTALL INCOMPLETE: $f missing" >&2; return 1; }
   done
   # Swap the verified copy into place (replaces the whole skill dir — no stale files survive).
@@ -315,12 +324,36 @@ until the decommission sign-off.
 
 ## Contributing / editing
 
-Edit **only** `claude-code/skills/db-migration-agent/SKILL.md` and `shared/`, then:
+Edit the canonical `claude-code/skills/db-migration-agent/SKILL.md`, shared resources and
+applicable tests/evals. From the repository root, then run:
 
 ```bash
-./scripts/sync-skills.sh        # copy to kiro/codex
-./scripts/sync-skills.sh verify # md5 identity + reference-link check
+./scripts/sync-skills.sh db-migration-agent-skill  # copy canonical to Kiro/Codex
+./scripts/sync-skills.sh verify                   # verify all variant checksums
 ```
+
+Run the offline regression suites from `db-migration-agent-skill` with Python 3.9+
+on POSIX and Node.js 18+:
+
+```bash
+python3 -m venv /tmp/db-migration-skill-tests
+/tmp/db-migration-skill-tests/bin/python -m pip install \
+  -r shared/scripts/requirements.txt boto3
+/tmp/db-migration-skill-tests/bin/python -B -m unittest discover -s scripts -p 'test_*.py'
+node scripts/test-dashboard.cjs
+```
+
+The Python tests use temporary files/processes, stub AWS calls and synthetic database
+connections. The renderer defaults to checked-in synthetic evidence; optionally pass a
+reviewed engagement-fixture directory. These tests do not perform or qualify a live
+migration. Use `evals/` for behavioral checks, including partial-switch failures, unknown
+write outcomes and stale lab evidence.
+
+The local helpers have deliberately bounded roles: `execution_step.py` supervises reviewed
+commands and records evidence; it cannot authenticate a human approval or enforce database
+permissions. `handoff_bundle.py` snapshots an explicitly reviewed file list; it cannot
+discover secrets or prove that every report reference was declared. See
+`shared/reference/execution-control.md` and `shared/reference/handoff-packaging.md`.
 
 ## License
 

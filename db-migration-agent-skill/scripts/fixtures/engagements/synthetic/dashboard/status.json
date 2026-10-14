@@ -1,0 +1,53 @@
+{
+  "_fixture": "Synthetic test data only. All events, counts and evidence are invented for offline tests; never use as real migration history or approvals.",
+  "engagement": "synthetic-dashboard-test",
+  "updated_at": "2026-01-02T12:00:00Z",
+  "mode": "3",
+  "lang": "en",
+  "overall_progress_pct": 64,
+  "current_phase": "7",
+  "current_activity": "Synthetic fixture: review a deliberately mismatched table",
+  "phases": [
+    {"id": "0", "name": "Preflight", "status": "done", "done": 1, "total": 1},
+    {"id": "1", "name": "Discovery inputs", "status": "done", "done": 1, "total": 1},
+    {"id": "2", "name": "Assessment", "status": "done", "done": 1, "total": 1,
+     "summary": "Synthetic inventory contains two tiny tables.",
+     "findings": ["Invented source contains three widget rows and an empty table."],
+     "evidence": ["synthetic:inventory (test data only)"]},
+    {"id": "3", "name": "Method selection", "status": "done", "done": 1, "total": 1},
+    {"id": "4-5", "name": "Target setup", "status": "done", "done": 1, "total": 1},
+    {"id": "6", "name": "Data migration", "status": "done", "done": 2, "total": 2,
+     "steps": [{"id": "copy-widgets", "label": "Synthetic widget copy", "status": "done",
+                "detail": "Invented copy count: 3 rows", "evidence": ["synthetic:copy-widgets (test data only)"]}]},
+    {"id": "7", "name": "Validation", "status": "in_progress", "done": 1, "total": 2,
+     "steps": [{"id": "verify-widgets", "label": "Synthetic checksum comparison", "status": "blocked",
+                "detail": "Deliberately mismatched fixture", "evidence": ["synthetic:checksum-mismatch (test data only)"]}],
+     "next_step": "Review the synthetic mismatch."},
+    {"id": "7.5", "name": "Client inventory", "status": "in_progress", "done": 1, "total": 2},
+    {"id": "7.7", "name": "Parallel-run soak", "status": "pending", "done": 0, "total": 3},
+    {"id": "8", "name": "Cutover handover", "status": "pending", "done": 0, "total": 1},
+    {"id": "9", "name": "Cleanup", "status": "pending", "done": 0, "total": 1}
+  ],
+  "cutover_gates": [
+    {"key": "client_inventory", "label": "Client inventory", "met": false, "detail": "Synthetic second client still pending",
+     "items": [{"id": "synthetic-reader", "label": "Synthetic reader", "met": true, "detail": "Invented staged plan",
+                "evidence": ["synthetic:reader-plan (test data only)"]},
+               {"id": "synthetic-writer", "label": "Synthetic writer", "met": false, "detail": "No staged plan in fixture"}]},
+    {"key": "validation", "label": "Validation", "met": false, "detail": "Deliberate synthetic checksum mismatch"},
+    {"key": "soak", "label": "Soak evidence", "met": false, "detail": "Observation not started"},
+    {"key": "rehearsal", "label": "Rehearsal", "met": false, "detail": "No rehearsal recorded"},
+    {"key": "runbook", "label": "Runbook and rollback", "met": false, "detail": "No runbooks recorded"},
+    {"key": "approvals", "label": "Approvals", "met": false, "detail": "Test fixture grants no approvals"}
+  ],
+  "cutover_ready": false,
+  "migration_objects": {
+    "tables": {"total": 2, "loaded": 2, "validated": 1, "items": [
+      {"name": "synthetic_widgets", "rows_source": 3, "rows_target": 3, "checksum_match": false, "status": "loaded"},
+      {"name": "synthetic_empty", "rows_source": 0, "rows_target": 0, "checksum_match": true, "status": "validated"}
+    ]},
+    "views": {"total": 1, "created": 1, "items": [{"name": "synthetic_widget_view", "status": "created"}]},
+    "triggers": {"total": 1, "created": 0, "items": [
+      {"name": "synthetic_widget_trigger", "status": "deferred", "note": "Synthetic cutover-only step"}
+    ]}
+  }
+}

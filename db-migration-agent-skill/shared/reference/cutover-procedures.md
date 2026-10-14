@@ -11,6 +11,10 @@ boundary). In **Mode 3** the agent executes these steps itself with a signed A4
 authorization and an approver reachable during the window. The procedures below are written
 for whoever holds the runbook — the mechanics are identical either way.
 
+Load [method-readiness.md](method-readiness.md) for offline-copy versus live-replication
+preconditions. Readiness does not grant execution authority; existing scoped approvals
+remain valid for routine reads and explicitly covered recovery actions.
+
 ---
 
 ## Pre-cutover: Discover DB Clients (MANDATORY — do this first)
@@ -57,7 +61,8 @@ application-host SSM Deny and do not bypass it via SSH/another executor; see
 close the live-config evidence gap. Missing customer evidence keeps the inventory
 incomplete. Production pool/ORM preparation below is likewise customer-executed.
 
-Check all of these in **override order** — a later source overrides an earlier one:
+Check all of these in **override order** — lower priority numbers take precedence;
+verify the application's actual precedence and effective runtime values:
 
 | Priority (highest wins) — Location | How to check |
 |------------------------------------|--------------|
@@ -186,7 +191,11 @@ fence until the target is authoritative or rollback is complete. A read-only def
 alone, an empty active-query sample, or idle pooled connections do not prove quiescence.
 
 For an offline/full-load-only method, replace CDC steps 1/4/5 with the final complete
-copy under this freeze and final validation; never use the Phase 6 online copy as-is.
+copy under this freeze and complete planned final validation per
+[method-readiness.md](method-readiness.md); never use the Phase 6 online copy as-is.
+Before starting, stage the per-client revert and the recovery checks in
+[§Rollback Procedures](#rollback-procedures); a failed repoint can leave changed files
+behind even if the old process still serves the source.
 
 The helper refreshes `LAG_WINDOW_START`/`LAG_WINDOW_END` for each query; use
 the task/instance identifiers from CloudWatch dimensions, not ARNs. At final drain,
@@ -371,8 +380,8 @@ aws dms create-replication-task \
 - **MySQL/MariaDB**: Aurora's cluster parameter group needs `binlog_format=ROW` so the
   source can consume Aurora's binlog as a replica.
 - **PostgreSQL**: Aurora needs `rds.logical_replication=1` and the source needs a free slot.
-- Native binlog/logical replication is an alternative to a reverse DMS task — pick whichever
-  matches the forward method.
+- Native binlog/logical replication is an alternative only when the **reverse**
+  topology and exact versions support it; the forward method is not proof.
 
 #### Reverse-CDC prerequisites — a GATE 4 precondition (MySQL family, DMS reverse task)
 
@@ -405,8 +414,8 @@ several real conditions. Do not require it as the only rollback path:
 
 | Condition | Why it fails |
 |-----------|--------------|
-| Source `log_bin=OFF` (not enabled) | No binlog for a reverse CDC channel to consume/target. |
-| Major version **downgrade** (target newer, e.g. 10.11 → 10.5) | Replicating back from newer to older major is unsupported/unreliable. |
+| New target cannot emit/retain the required binlog/WAL | Reverse CDC cannot capture its writes. The old source's `log_bin=OFF` alone does not establish whether it can receive reverse SQL apply. |
+| Native major-version **downgrade** (e.g. external MySQL 8.0 source ← 8.4 target) | Forward compatibility does not make native 8.4 → 8.0 a supported lossless rollback. Check exact topology/version rules in `version-upgrades.md`; a service-specific exception does not cover an external source. |
 | Insufficient privileges | No `REPLICATION SLAVE`/`SUPER` (or PG replication role) to establish the channel. |
 
 **Alternatives (pick per RPO):**
@@ -418,6 +427,10 @@ several real conditions. Do not require it as the only rollback path:
 3. **Accept the risk with explicit RPO acknowledgment** (low-traffic/non-critical only) — state
    plainly that rollback loses post-cutover Aurora writes, get explicit sign-off, keep the window
    short. Record the acknowledgment in `migration-plan.md`.
+
+Reverse DMS or write-log replay needs its own compatibility and rehearsed apply proof;
+do not silently substitute it for an unsupported native reverse path. A shortened
+window limits exposure, not losslessness.
 
 ### Connection Pool Settings for Fast Refresh
 
@@ -557,32 +570,66 @@ dig db.internal.example.com CNAME
 
 ## Rollback Procedures
 
-### Quick Rollback (< 5 minutes) — Lossless when reverse replication is running
+### Contain and classify before failback
 
-Because reverse replication (Aurora → source) has been running since cutover, the source is
-current and failback loses no data. Rollback sequence:
+Use the instantiated [rollback runbook](../templates/rollback-runbook.md) for the
+approved recovery scope. Keep the source app/job fence in place; preserve or establish
+the approved target fence, stop writers and drain sessions/transactions, including
+prepared transactions. Engine read-only defaults alone are insufficient. If containment
+cannot be verified, keep recovery blocked and report the uncertainty immediately.
 
-1. Set Aurora read-only: `SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;`
-   (PostgreSQL: `ALTER DATABASE your_db SET default_transaction_read_only=on;` is only
-   supplementary). Fence reconnects, stop all app/jobs, and drain/terminate existing
-   writable sessions and transactions, including prepared transactions, before draining
-   reverse CDC. A new-session default alone does not freeze PostgreSQL.
-2. Confirm reverse CDC drained to zero lag (`CdcLatencySource`/`CdcLatencyTarget` = 0), then
-   stop the reverse task.
-3. Reset AUTO_INCREMENT / sequences on the **source** above its new max (same query as
-   cutover step 7, run against the source) so resumed writes don't collide.
-4. Revert the secret / DNS to the source endpoint and refresh the app's connections.
+Record the last **verified** step, every attempted mutation and exit/result, and the
+current persistent config, process and session state. A timeout or failed multi-command
+script can leave earlier mutations applied. Do not re-run it blindly.
 
-| Method | Rollback Action | Time |
-|--------|----------------|------|
-| Secrets Manager | Freeze Aurora → drain reverse CDC → revert secret to source | < 2 min + pool refresh |
-| Blue/Green | Create new B/G deployment to switch back | 5-10 min |
-| DNS CNAME | Freeze Aurora → drain reverse CDC → swap CNAME back | TTL (60s) |
-| DMS | Reverse task already running — just stop, then repoint app | < 2 min |
+| Observed state | Recovery path |
+|---|---|
+| No target writes, proven across the switch interval | Restore/verify every changed client config and runtime, reconcile sessions, then perform the source-release checks below. A failed restart alone is not proof of no writes. |
+| Target writes confirmed | While fenced, drain and verify the supported reverse path or replay the complete durable write log; otherwise use the explicitly accepted RPO path and document loss. Then reconcile clients and perform source-release checks. |
+| Target unavailable, marker lookup failed/missing, write outcome uncertain, or incomplete interval coverage | **Unknown.** Keep source writes fenced and target containment active; use authorized reads/recovery evidence to resolve it. Do not interpret lack of evidence as no target writes or permit unfencing. |
 
-> **If reverse replication was NOT set up**, rollback is lossy: every write Aurora accepted
-> after cutover is stranded on Aurora. Only acceptable if you can replay those writes from an
-> application-side log. This is exactly why reverse replication is mandatory above.
+For a “no target writes” finding, correlate the switch journal, writer fence/session
+coverage, database/audit evidence and any planned write marker over the whole interval.
+A marker absent on a reachable target proves only its absence, not absence of all writes;
+an unqueryable marker proves nothing. An absent marker on the source can instead mean
+reverse apply is incomplete. Never report zero loss from any of these observations alone.
+
+### Reconcile persistent config, processes and sessions
+
+For **every** client, including ones whose switch command failed:
+
+1. Restore the exact approved source endpoint at each changed persistent layer:
+   deployment repo/pipeline revision, systemd unit/drop-in/EnvironmentFile, app config,
+   secret version, DNS, task/Deployment revision. Reconcile or pause the deploy controller
+   as already authorized so it cannot reapply a target endpoint later. Compare the saved
+   original and the effective highest-priority override; redact credentials.
+2. Apply the required reload/redeploy and controlled process/pool refresh. For systemd,
+   verify the unit reload, then the running process's actual args/environment and
+   start identity. An old PID pointing to the source does not undo a changed unit;
+   a successful file revert does not refresh a target-connected process.
+3. Verify sessions on **both** databases against the full inventory, not just `/health`.
+   No target app/job writer or prepared transaction may remain. Start only read-safe
+   probes/clients while fences hold; keep clients whose startup writes stopped.
+   An unreachable target stays unknown until independent containment and write-state
+   evidence resolves it.
+
+### Release source writes only after reconciliation
+
+For reverse CDC, require fresh post-target-freeze lag/error evidence for that mechanism
+(DMS: `CDCLatencySource` and `CDCLatencyTarget`), no apply errors, and proof that the
+target's final checkpoint/known writes reached the source; `running` or a zero sample
+alone is not losslessness. Stop the reverse channel only after that proof. For replay, verify its
+coverage, ordering and completion. For acknowledged RPO, establish and record the
+actual loss scope against the accepted terms; unknown loss stays unknown and blocked.
+
+Before removing the **source application** fence, verify all of these in the plan:
+data reconciled (or loss within accepted RPO), high-water marks reset where applicable,
+persistent source config and running clients agree, source-side read/auth checks pass,
+target writers are contained, and the applied/remaining recovery steps fit A5. Then
+release source writers, verify the authorized source write/read and client sessions,
+and exit maintenance. Keep the target isolated and retain evidence/resources.
+If a check fails, retain fences; recovery timing comes from the rehearsal, not a generic
+“under five minutes” promise.
 
 ### Deviation from an approved block = stop and ask (or abort)
 
@@ -592,8 +639,12 @@ instead of the approved Proxy because the app could not do TLS), a skipped check
 grant, a changed order — **stop and ask** (present the deviation as its own block), or
 execute the pre-agreed abort/rollback criteria. Never proceed and record the deviation
 afterwards; an after-the-fact record is a violation (engagement-safety.md §Approvals of
-record), not an approval. A live rollback or re-cutover always needs its A5 (or new A4)
-block presented and accepted in full, even if the customer asked for it in chat.
+record), not an approval. An already accepted A5 covers recovery within its exact
+pre-authorized criteria without another approval request. Uncertain mutations need
+reconciliation before dependent writes, not a repeat approval for covered containment
+or reads. Changed recovery scope needs the applicable A5; a new cutover attempt needs
+a new A4 accepted first. Continue routine reads already authorized by the current mode
+and scope.
 
 ### Rollback Decision Criteria
 
@@ -605,13 +656,18 @@ block presented and accepted in full, even if the customer asked for it in chat.
 | Data integrity concerns | Critical | Immediate rollback, investigate |
 | Single slow query | Low | Investigate — likely missing ANALYZE TABLE |
 
+“Immediate rollback” triggers the authorized containment/recovery path above; it never
+means blindly reopening source writes while target write state or client config is unknown.
+
 ### Post-Rollback Actions
 
-1. Keep Aurora cluster running (do NOT delete)
-2. Investigate root cause
-3. Fix the issue
-4. Re-plan cutover window
-5. Re-sync DMS (restart task with `--start-replication-task-type resume-processing`)
+1. Retain the isolated target, task/checkpoint evidence and the rollback record.
+2. Investigate root cause and repair within the accepted scope. Re-run the full
+   validation phase before another window; refresh affected preparation/rehearsal
+   evidence under [method-readiness.md](method-readiness.md).
+3. Re-plan the window and applicable authorization. Choose reseed/resume only after
+   proving task identity/direction, checkpoint validity, retained logs and data history;
+   rollback is not permission to blindly `resume-processing` against divergent data.
 
 ---
 
