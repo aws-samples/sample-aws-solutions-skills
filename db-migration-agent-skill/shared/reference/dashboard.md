@@ -400,6 +400,36 @@ that the skipped work ran; compression/reuse alone cannot close the requirement.
     guidance. Only flip to `"created"` as part of the cutover sequence itself.
   - This section updates on the same "whenever `migration-plan.md` changes" trigger as
     everything else on this page — no separate habit to remember.
+- `migration_objects.keyspaces` — **cache engagements only** (Redis OSS / Valkey →
+  ElastiCache; additive, omit it for SQL engagements). One item per logical database,
+  written by `shared/scripts/cache_compare.py --dashboard dashboard --record validation`
+  (items merge by `name`, like tables). `sample_match` is the four-state sampled
+  TYPE/TTL/value comparison and `comparison` the per-db four-state result as a word
+  (`match`/`mismatch`/`unknown`/`not_applicable` — a word, because merge-patch drops
+  nulls); `status:"validated"` only when `comparison` is `match`. Uncompared contents
+  (module types, keys over `max_elements`, an unselectable cluster db, an exhausted time
+  budget) are `unknown`, never validated. A `false` in either is a failed validation that blocks the `validation`
+  gate, exactly like `checksum_match:false`. Memcached has no keyspace inventory — its
+  stats comparison is recorded in the step `detail` only (it is not a data comparison).
+
+```json
+{"migration_objects": {"keyspaces": {"total": 2, "validated": 1, "items": [
+  {"name": "db0", "keys_source": 1204332, "keys_target": 1204332, "sampled": 1000, "mismatches": 0,
+   "key_count_match": true, "sample_match": true, "comparison": "match", "status": "validated"},
+  {"name": "db2", "keys_source": 5120, "keys_target": 5120, "sampled": 1000, "mismatches": 3,
+   "key_count_match": true, "sample_match": false, "comparison": "mismatch", "status": "loaded"}]}}}
+```
+
+- **Cache soak days** (`cache_compare.py --record soak`) carry their own check keys —
+  `key_count`, `sample_match`, `replication_link`, `alarms`, `headroom`,
+  `customer_test_suite`, `period_evidence` — plus `detail.sampler: "cache_compare"`. Same
+  four states, same streak rule, same `period_evidence: null` until the full-period
+  CloudWatch review is done. The day is published with `dashboard_update.py
+  --soak-day-file`, which replaces that date's entry verbatim (literal nulls kept) and
+  recomputes `consecutive_green`/`state`/`last_checked_at` inside the lock from the
+  current file — never from the writer's earlier read; the page renders the cache rows for such a day and the
+  original nine rows for every SQL day. Reference:
+  [elasticache-migration.md](elasticache-migration.md) §Soak.
 
 ## Optional insight fields — additive to the snapshot above
 

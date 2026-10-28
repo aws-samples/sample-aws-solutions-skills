@@ -15,12 +15,17 @@ RETRY/RE-RUN SAFETY: running this twice for the same calendar day (e.g. cron fir
 or you re-ran it by hand) overwrites that day's entry in status.json/activity-log.jsonl in
 place — it never appends a duplicate or double-counts the green streak.
 
-SCOPE: homogeneous MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family
-(postgres/postgresql/aurora-postgresql) only — source and target must be the same family.
-Heterogeneous soak-checking is not yet supported by this script; a family mismatch (or an
-engine string outside both families) raises ValueError with no dashboard/log/report writes
-attempted, and this script exits with a clean one-line message (no Python traceback) and
-exit code 1 for that case.
+SCOPE: MySQL-family (mysql/mariadb/aurora-mysql) and PostgreSQL-family
+(postgres/postgresql/aurora-postgresql). Same-family pairs use the `mysql`/`psql` CLIs and
+one SQL dialect on both sides (unchanged). A CROSS-FAMILY pair (MySQL-family <->
+PostgreSQL-family, e.g. MySQL -> Aurora PostgreSQL via DMS) uses
+cross_engine_compare.py (same directory) instead: Python drivers (pymysql + pg8000/psycopg),
+the same watermark concept, and a normalized per-row comparison, because the two engines
+render the same data differently (shared/reference/mysql-postgresql.md §Validation).
+Options for that path live under "cross_engine" in soak-config.json. An engine string
+outside both families (Oracle, SQL Server, ...) still raises ValueError with no
+dashboard/log/report writes attempted, and this script exits with a clean one-line message
+(no Python traceback) and exit code 1 for that case.
 """
 import argparse
 import datetime
@@ -72,8 +77,8 @@ def _engine_family(engine):
     describe-db-clusters`), so a family missing "aurora-postgresql" here previously made a
     real Aurora PostgreSQL target look "unsupported" instead of naming the actual problem
     (heterogeneous mismatch) when checked against a non-Postgres-family source. Raises for
-    anything outside both families; heterogeneous soak-checking (different SQL dialects on
-    each side) is out of scope for this script."""
+    anything outside both families; a MySQL-family <-> PostgreSQL-family pair is handled by
+    the cross-family path (run_day -> _run_day_cross_family), other engines are out of scope."""
     e = (engine or "").strip().lower()
     if e in MYSQL_FAMILY:
         return "mysql"
@@ -82,8 +87,8 @@ def _engine_family(engine):
     raise ValueError(
         f"Unsupported engine '{engine}' — this script only supports homogeneous "
         "MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family "
-        "(postgres/postgresql/aurora-postgresql) checks. Heterogeneous soak-checking is "
-        "not yet supported."
+        "(postgres/postgresql/aurora-postgresql) checks (same family, or MySQL <-> PostgreSQL "
+        "cross-family). Other heterogeneous soak-checking is not supported."
     )
 
 
@@ -808,11 +813,7 @@ def run_day(cfg, run_date=None):
     source_family = _engine_family(cfg["source"]["engine"])
     target_family = _engine_family(cfg["target"]["engine"])
     if source_family != target_family:
-        raise ValueError(
-            f"source engine={cfg['source']['engine']!r} and target engine="
-            f"{cfg['target']['engine']!r} normalize to different SQL families — "
-            "heterogeneous soak-checking is not yet supported by this script."
-        )
+        return _run_day_cross_family(cfg, run_date, source_family, target_family)
     family = source_family
     tables = cfg["tables"]
     if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
@@ -975,6 +976,79 @@ def run_day(cfg, run_date=None):
             }
 
     lag_seconds, lag_mechanism = measure_replication_lag(cfg, family, cfg["source"], cfg["target"], aws_errors)
+    return _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, drift_check,
+                       lag_seconds, lag_mechanism)
+
+
+def _load_cross_engine():
+    """cross_engine_compare.py lives next to this script (shared/scripts/)."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import cross_engine_compare
+    except ImportError as e:
+        raise ValueError(f"cross-family soak needs shared/scripts/cross_engine_compare.py next to this script ({e})") from e
+    return cross_engine_compare
+
+
+def _cross_family_lag(cfg, family, aws_errors):
+    """DMS metrics are engine-agnostic. Native replication cannot cross families, so a
+    configured replica-status/pg side is a config problem -> needs review, never a pass."""
+    problem = _load_cross_engine().cross_family_lag_problem(cfg)   # shared with the Lambda preflight
+    if problem:
+        aws_errors.append({"check": "replication_lag", "iam_action": "n/a (config)",
+                           "resource": "mysql_replica_status_side/pg_replication_lag_side", "result": "Error", "message": problem})
+        return None, "native_replication_not_possible_cross_family"
+    return measure_replication_lag(cfg, family, cfg["source"], cfg["target"], aws_errors)
+
+
+def _run_day_cross_family(cfg, run_date, source_family, target_family):
+    """MySQL-family <-> PostgreSQL-family day: row counts (watermark-bounded), the normalized
+    cross-engine comparison for checksum_tables, and a mapping-based schema-drift check,
+    all from cross_engine_compare.soak_checks — the same function the Lambda calls."""
+    cec = _load_cross_engine()
+    tables = cfg["tables"]
+    if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
+        raise ValueError("tables must be a nonempty list of table identifiers")
+    checksum_tables = cfg.get("checksum_tables") or tables[:2]
+    region = aws_region(cfg) if _needs_aws(cfg) else None
+    aws_errors = []
+    options = cfg.get("cross_engine") or {}
+    cec.merge_options(options)   # config errors before any connection
+    timeout = int(cfg.get("batch_timeout_seconds") or BATCH_TIMEOUT_S)
+    src = _cross_connect(cec, cfg["source"], "source", options, timeout)
+    try:
+        tgt = _cross_connect(cec, cfg["target"], "target", options, timeout)
+        try:
+            row_check, checksum_check, drift_check = cec.soak_checks(
+                src, tgt, tables, checksum_tables, watermark_config(cfg), options)
+        finally:
+            _cross_close(tgt)
+    finally:
+        _cross_close(src)
+    lag_seconds, lag_mechanism = _cross_family_lag(cfg, source_family, aws_errors)
+    return _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, drift_check,
+                       lag_seconds, lag_mechanism)
+
+
+def _cross_connect(cec, side_cfg, label, options, timeout):
+    if "password" in side_cfg:
+        raise ValueError("Use password_env, not a password in soak-config.json")
+    return cec.connect_side(side_cfg, label, options.get("pg_driver"), read_timeout=timeout)
+
+
+def _cross_close(side):
+    try:
+        side.conn.close()
+    except Exception:
+        pass
+
+
+def _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, drift_check,
+                lag_seconds, lag_mechanism):
+    """AWS-side checks + the four-state verdict — shared by the same-family and the
+    cross-family paths so both produce the identical day-record shape."""
     firing_alarms, unknown_alarms, alarms_check = cloudwatch_alarms(cfg.get("alarm_names", []), region, aws_errors)
 
     target_db_instance_id = cfg.get("target_db_instance_id")

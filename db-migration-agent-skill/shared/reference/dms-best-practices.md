@@ -182,6 +182,13 @@ schema, `ControlTablesSettings.ControlSchema`). Full checklist and GATE 4 rule:
 
 ## Engine-Specific Gotchas
 
+### MySQL ↔ PostgreSQL (heterogeneous)
+- Pre-create the converted schema and load with `TargetTablePrepMode` `DO_NOTHING` /
+  `TRUNCATE_BEFORE_LOAD` — the `DROP_AND_CREATE` default above maps TINYINT(1) → SMALLINT,
+  BIGINT UNSIGNED → BIGINT, JSON → TEXT, PG BOOLEAN → VARCHAR(5), unbounded NUMERIC →
+  NUMERIC(28,6). Endpoint/task settings, reverse task and validation:
+  [mysql-postgresql.md](mysql-postgresql.md) §4–§10.
+
 ### MySQL → Aurora MySQL
 - `DEFINER` clauses in views/procedures may fail if the user doesn't exist on Aurora
 - `SUPER` privilege not available on Aurora — use `rds_superuser_role` or remove DEFINER

@@ -62,7 +62,8 @@
       checksumMatch: '✓ match',
       checksumMismatch: '✗ mismatch',
       objTableCol: { name: 'Table', src: 'Source rows', tgt: 'Target rows', cs: 'Checksum', status: 'Status' },
-      objTypeLabel: { tables: 'Tables', views: 'Views', procedures: 'Procedures', functions: 'Functions', triggers: 'Triggers', events: 'Events' },
+      objTypeLabel: { tables: 'Tables', keyspaces: 'Keyspaces (cache)', views: 'Views', procedures: 'Procedures', functions: 'Functions', triggers: 'Triggers', events: 'Events' },
+      objKeyspaceCol: { name: 'Keyspace', src: 'Source keys', tgt: 'Target keys', sampled: 'Keys compared', match: 'Sample', status: 'Status' },
       objStatusBadge: { pending: 'pending', loading: 'loading', loaded: 'loaded', validated: 'validated', created: 'created', deferred: 'deferred to cutover' },
       phaseBadge: { done: 'done', in_progress: 'in progress', pending: 'pending', blocked: 'blocked' },
       objectsCountSuffix: 'validated',
@@ -76,6 +77,7 @@
       soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
       soakEmpty: 'Not started yet — begins once the target is current and validation is green.',
       soakCheckLabel: { row_count: 'Row count', checksum: 'Checksum', alarms: 'Alarms', headroom: 'Headroom', schema_drift: 'Schema drift', replication_lag: 'Replication lag', replication_errors: 'Replication errors', customer_test_suite: 'Customer test suite', period_evidence: 'Full-period evidence' },
+      soakCacheCheckLabel: { key_count: 'Key count', sample_match: 'Sampled keys (type/TTL/value)', replication_link: 'Replication link', alarms: 'Alarms', headroom: 'Memory headroom', customer_test_suite: 'Customer test suite', period_evidence: 'Full-period evidence' },
       soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
       actionsH2: 'What needs your attention',
       actionsUnknown: 'Customer actions have not been recorded in this snapshot.',
@@ -165,7 +167,8 @@
       checksumMatch: '✓ 일치',
       checksumMismatch: '✗ 불일치',
       objTableCol: { name: '테이블', src: '소스 행 수', tgt: '타깃 행 수', cs: '체크섬', status: '상태' },
-      objTypeLabel: { tables: '테이블', views: '뷰', procedures: '프로시저', functions: '함수', triggers: '트리거', events: '이벤트' },
+      objTypeLabel: { tables: '테이블', keyspaces: '키스페이스 (캐시)', views: '뷰', procedures: '프로시저', functions: '함수', triggers: '트리거', events: '이벤트' },
+      objKeyspaceCol: { name: '키스페이스', src: '소스 키 수', tgt: '타깃 키 수', sampled: '비교한 키', match: '표본 비교', status: '상태' },
       objStatusBadge: { pending: '대기', loading: '적재중', loaded: '적재완료', validated: '검증완료', created: '생성완료', deferred: '컷오버 시 생성' },
       phaseBadge: { done: '완료', in_progress: '진행중', pending: '대기', blocked: '중단' },
       objectsCountSuffix: '검증완료',
@@ -179,6 +182,7 @@
       soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
       soakEmpty: '아직 시작되지 않았습니다 — 타깃이 최신 상태이고 검증이 green이 되면 시작됩니다.',
       soakCheckLabel: { row_count: '행 수', checksum: '체크섬', alarms: '알람', headroom: '여유 용량', schema_drift: '스키마 변경', replication_lag: '복제 지연', replication_errors: '복제 오류', customer_test_suite: '고객 테스트', period_evidence: '전체 기간 증빙' },
+      soakCacheCheckLabel: { key_count: '키 수', sample_match: '표본 키 (타입/TTL/값)', replication_link: '복제 링크', alarms: '알람', headroom: '메모리 여유', customer_test_suite: '고객 테스트', period_evidence: '전체 기간 증빙' },
       soakCheckPass: '✓', soakCheckFail: '✗', soakCheckUnknown: '?', soakCheckNotApplicable: '–',
       actionsH2: '지금 고객 확인이 필요한 사항',
       actionsUnknown: '이 스냅샷에는 고객 요청 사항이 아직 기록되지 않았습니다.',
@@ -480,12 +484,43 @@
     }).join('');
   }
 
+  // Additive cache type (cache_compare.py): one row per logical db; sample_match is the
+  // four-state sampled TYPE/TTL/value comparison, never inferred from the key counts.
+  function renderKeyspaceRows(items) {
+    const l = L();
+    return items.map(it => {
+      const bad = it.sample_match === false || it.key_count_match === false;
+      const sm = it.sample_match === true ? `<span class="cs-ok">${esc(l.checksumMatch)}</span>`
+        : it.sample_match === false ? `<span class="cs-bad">${esc(l.checksumMismatch)}</span>`
+        : '<span class="cs-pending">—</span>';
+      return `<tr class="${bad ? 'row-mismatch' : ''}">
+        <td class="mono">${esc(it.name)}</td>
+        <td class="num mono">${fmtNum(it.keys_source)}</td>
+        <td class="num mono">${fmtNum(it.keys_target)}</td>
+        <td class="num mono">${fmtNum(it.sampled)}</td>
+        <td>${sm}</td>
+        <td><span class="obj-badge ${esc(it.status)}">${l.objStatusBadge[it.status] || esc(it.status)}</span></td>
+      </tr>`;
+    }).join('');
+  }
+
   function renderObjectCard(typeKey, o) {
     const l = L();
     const label = l.objTypeLabel[typeKey] || typeKey;
     const doneCount = (o.validated ?? o.created ?? o.loaded ?? o.done ?? 0);
     const countLabel = o.validated != null ? l.objectsCountSuffix
       : o.loaded != null ? l.objectLoaded : o.done != null ? l.objectRecorded : l.notRecorded;
+    if (typeKey === 'keyspaces') {
+      const c = l.objKeyspaceCol;
+      return `<div class="obj-card obj-card-wide">
+        <div class="obj-card-head"><span class="obj-title">${esc(label)}</span>
+          <span class="obj-count">${esc(doneCount)}/${esc(o.total)} ${esc(countLabel)}</span></div>
+        <div class="table-scroll"><table class="obj-table">
+          <thead><tr><th>${esc(c.name)}</th><th>${esc(c.src)}</th><th>${esc(c.tgt)}</th><th>${esc(c.sampled)}</th><th>${esc(c.match)}</th><th>${esc(c.status)}</th></tr></thead>
+          <tbody>${renderKeyspaceRows(o.items || [])}</tbody>
+        </table></div>
+      </div>`;
+    }
     if (typeKey === 'tables') {
       return `<div class="obj-card obj-card-wide">
         <div class="obj-card-head"><span class="obj-title">${esc(label)}</span>
@@ -517,7 +552,7 @@
     const l = L();
     const mo = s.migration_objects;
     if (!mo || !Object.keys(mo).length) { setHTML('#objects', `<p class="empty">${esc(l.objectsEmpty)}</p>`); return; }
-    const order = ['tables', 'views', 'procedures', 'functions', 'triggers', 'events'];
+    const order = ['tables', 'keyspaces', 'views', 'procedures', 'functions', 'triggers', 'events'];
     const html = order.filter(k => mo[k] && mo[k].total > 0).map(k => renderObjectCard(k, mo[k])).join('');
     setHTML('#objects', html || `<p class="empty">${esc(l.objectsNone)}</p>`);
   }
@@ -602,6 +637,13 @@
       <h4>${esc(l.cwIntervals)}</h4>${rows || `<p class="empty">${esc(l.cwNoIntervals)}</p>`}</div>`;
   }
 
+  // A cache soak day (cache_compare.py) carries its own check keys; SQL days keep the
+  // original nine rows, including "unknown" for any key a legacy writer omitted.
+  function isCacheDay(d) {
+    const c = d && d.checks;
+    return !!c && typeof c === 'object' && ('key_count' in c || 'sample_match' in c);
+  }
+
   function renderSoak(s) {
     const l = L();
     const soak = s.soak;
@@ -627,7 +669,7 @@
     const dayCells = days.map((d, i) => disclosure(`soak-day-${d.date}`,
       `${l.soakDayLabel(i + 1)} · ${d.date || '—'} · ${l.dayVerdict[d.overall] || l.dayUnknown}`,
       `<table class="obj-table"><thead><tr><th>${esc(l.check)}</th><th>${esc(l.result)}</th></tr></thead><tbody>
-      ${Object.entries(l.soakCheckLabel).map(([k, label]) => `<tr><td>${esc(label)}</td><td>${checkMark(d.checks?.[k])}</td></tr>`).join('')}
+      ${Object.entries(isCacheDay(d) ? l.soakCacheCheckLabel : l.soakCheckLabel).map(([k, label]) => `<tr><td>${esc(label)}</td><td>${checkMark(d.checks?.[k])}</td></tr>`).join('')}
       </tbody></table>${d.detail && Object.keys(d.detail).length
         ? disclosure(`soak-evidence-${d.date}`, l.sampleDetail, `<pre>${esc(JSON.stringify(d.detail, null, 2))}</pre>`) : ''}`,
       i === days.length - 1)).join('');

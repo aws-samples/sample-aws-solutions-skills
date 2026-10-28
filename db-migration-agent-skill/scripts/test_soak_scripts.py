@@ -8,6 +8,7 @@ import contextlib
 import datetime
 import io
 import json
+import re
 import os
 import subprocess
 import sys
@@ -29,6 +30,7 @@ import generate_presigned_urls as presign  # noqa: E402
 import soak_check  # noqa: E402
 import pymysql  # noqa: E402
 import soak_check_lambda as L  # noqa: E402
+from decimal import Decimal  # noqa: E402
 
 # A SHOW REPLICA STATUS column list shaped like 8.4 (Seconds_Behind_Source deliberately NOT
 # at index 32) and like an older SHOW SLAVE STATUS.
@@ -1224,6 +1226,196 @@ class WatermarkStandaloneTests(unittest.TestCase):
         self.assertIn("HEX(`b`)", L._bounded_checksum_sql("mysql", "shop.orders", {"b": "varbinary(16)"}, "1=0"))
         self.assertEqual(L.WATERMARK_DEFAULTS, soak_check.WATERMARK_DEFAULTS)
 
+
+
+# ── Cross-family (MySQL <-> PostgreSQL) soak path ───────────────────────────────────────
+_had_skip = "CEC_SKIP_DOCKER" in os.environ
+os.environ.setdefault("CEC_SKIP_DOCKER", "1")   # importing the compare tests' in-memory sides only
+import cross_engine_compare as cec  # noqa: E402
+from test_cross_engine_compare import MemSide, mysql_table, pg_table, src_rows, tgt_rows  # noqa: E402
+if not _had_skip:
+    os.environ.pop("CEC_SKIP_DOCKER", None)
+
+
+class MemConn:
+    """A driver-shaped connection over a MemSide: cursor() for the pymysql path, run() for
+    pg8000.native — so the Lambda's own _query()/preflight code paths are exercised."""
+
+    def __init__(self, side):
+        self.side = side
+
+    def cursor(self):
+        side = self.side
+
+        class C:
+            description = [("x",)]
+
+            def __enter__(s):
+                return s
+
+            def __exit__(s, *a):
+                return False
+
+            def execute(s, sql, params=None):
+                s._rows = side.query(sql)
+
+            def fetchall(s):
+                return s._rows
+
+            def close(s):
+                pass
+        return C()
+
+    def run(self, sql, **kw):
+        return self.side.query(sql)
+
+    def close(self):
+        pass
+
+
+X_CFG = {"source_engine": "mysql", "target_engine": "aurora-postgresql", "tables": ["shop.items"],
+         "checksum_tables": ["shop.items"], "watermark": {"pk_margin": 5}, "cross_engine": {}}
+
+
+def x_sides(src_n=30, tgt_n=28, tgt=None, catalog=None):
+    return (MemSide("mysql", mysql_table(src_rows(src_n)), "source"),
+            MemSide("postgres", pg_table(tgt if tgt is not None else tgt_rows(tgt_n), catalog=catalog), "target"))
+
+
+class CrossFamilySoakTests(unittest.TestCase):
+    def std(self, sides, **over):
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "postgres", "host": "t"},
+               "tables": ["shop.items"], "checksum_tables": ["shop.items"], "watermark": {"pk_margin": 5}, **over}
+        it = iter(sides)
+        with mock.patch.object(soak_check, "_cross_connect", side_effect=lambda *a, **k: next(it)):
+            return soak_check.run_day(cfg, "2026-10-28")
+
+    def test_lambda_cross_family_day_is_green_under_lag(self):
+        s, t = x_sides()
+        day = L.run_day(dict(X_CFG), MemConn(s), MemConn(t), "2026-10-28")
+        self.assertEqual({k: day["checks"][k] for k in ("row_count", "checksum", "schema_drift")},
+                         {"row_count": True, "checksum": True, "schema_drift": True})
+        d = day["detail"]["row_count"]["shop.items"]
+        self.assertEqual((d["mode"], d["watermark"], d["comparison"]), ("pk_watermark", 23, "cross_engine_normalized"))
+        self.assertEqual(day["checks"]["period_evidence"], None)          # unchanged four-state model
+        self.assertTrue(day["needs_agent_review"])
+
+    def test_scripts_agree_cross_family(self):
+        lam = L.run_day(dict(X_CFG), *map(MemConn, x_sides()), "2026-10-28")
+        std = self.std(x_sides())
+        self.assertEqual(lam["checks"], std["checks"])
+        self.assertEqual(lam["detail"]["row_count"], std["detail"]["row_count"])
+        self.assertEqual(lam["detail"]["checksum"], std["detail"]["checksum"])
+
+    def test_cross_family_mismatch_is_red_with_pinpointed_key(self):
+        t = tgt_rows(30)
+        t[2]["price"] = Decimal("3.1")
+        for day in (L.run_day(dict(X_CFG), *map(MemConn, x_sides(tgt=t)), "2026-10-28"), self.std(x_sides(tgt=t))):
+            self.assertIs(day["checks"]["checksum"], False)
+            self.assertEqual(day["overall"], "red")
+            ex = day["detail"]["checksum"]["shop.items"]["mismatches"]["examples"]["different"]
+            self.assertEqual(ex[0]["key"], ["3"])
+
+    def test_native_replica_side_cross_family_needs_review(self):
+        for day in (L.run_day({**X_CFG, "mysql_replica_status_side": "target"}, *map(MemConn, x_sides()), "2026-10-28"),
+                    self.std(x_sides(), mysql_replica_status_side="target")):
+            self.assertIsNone(day["checks"]["replication_lag"])
+            self.assertEqual(day["detail"]["replication_lag_mechanism"], "native_replication_not_possible_cross_family")
+            self.assertIn("DMS", day["detail"]["aws_errors"][0]["message"])
+
+    def test_homogeneous_still_uses_the_single_dialect_path(self):
+        with mock.patch.object(L, "_run_day_cross_family") as cross:
+            L.run_day({**WM_CFG}, DbConn(FakeTableDb(range(1, 100))), DbConn(FakeTableDb(range(1, 100))))
+        cross.assert_not_called()
+
+    def test_load_config_cross_pair_and_unsupported_engines(self):
+        env = {**ENV, "SOURCE_ENGINE": "mysql", "TARGET_ENGINE": "aurora-postgresql",
+               "CROSS_ENGINE_OPTIONS": '{"naive_timezone": "+09:00"}'}
+        with mock.patch.dict(os.environ, env):
+            cfg = L._load_config()
+        self.assertEqual((cfg["family"], cfg["target_family"], cfg["cross_engine"]["naive_timezone"]),
+                         ("mysql", "postgres", "+09:00"))
+        with mock.patch.dict(os.environ, {**env, "CROSS_ENGINE_OPTIONS": '{"naive_tz": "x"}'}):
+            with self.assertRaises(ValueError):
+                L._load_config()
+        with mock.patch.dict(os.environ, {**ENV, "TARGET_ENGINE": "oracle"}), self.assertRaises(ValueError) as e:
+            L._load_config()
+        self.assertIn("Unsupported engine", str(e.exception))
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "cec", None), self.assertRaises(ValueError) as e:
+            L._load_config()
+        self.assertIn("not bundled", str(e.exception))
+        self.assertIn("No secret was read", str(e.exception))
+
+    def test_standalone_unsupported_engine_message_unchanged(self):
+        cfg = {"source": {"engine": "mysql"}, "target": {"engine": "sqlserver"}, "tables": ["t"]}
+        with self.assertRaises(ValueError) as e:
+            soak_check.run_day(cfg)
+        self.assertIn("Unsupported engine", str(e.exception))
+
+
+class CrossFamilyPreflightTests(Stubbed):
+    def run_pf(self, catalog=None, **env_over):
+        env = {"SOURCE_ENGINE": "mysql", "TARGET_ENGINE": "postgres", "TABLES": '["shop.items"]',
+               "MYSQL_REPLICA_STATUS_SIDE": "", **env_over}
+        self.secret_ok(SRC_ARN)
+        self.secret_ok(TGT_ARN)
+        self.pf_aws_ok()
+        self.s3_get("status.json")
+        self.s3_put_probe("status.json", "PreconditionFailed", 412)
+        self.s3_get("activity-log.jsonl", b"", '"e2"')
+        self.s3_put_probe("activity-log.jsonl", "PreconditionFailed", 412, b"", "application/x-ndjson")
+        self.reports_probe()
+        s, t = x_sides(catalog=catalog, tgt=[{**r, "flag": int(r["flag"])} for r in tgt_rows()] if catalog else None)
+        with mock.patch.dict(os.environ, env), mock.patch.object(L, "_connect", side_effect=[MemConn(s), MemConn(t)]) as c, \
+                mock.patch("builtins.print"):
+            out = L.handler({"mode": "preflight"}, None)
+        self.assertEqual([call.args[0] for call in c.call_args_list], ["mysql", "postgres"])   # per-side driver
+        return out, {r["check"]: r for r in out["checks"]}, s, t
+
+    def test_cross_family_probes_pass_and_stay_zero_row(self):
+        out, rows, s, t = self.run_pf()
+        self.assertTrue(out["ok"], [r for r in out["checks"] if r["result"] != "PASS"])
+        for side in ("source", "target"):
+            self.assertIn("cross-engine normalized", rows[f"{side}_db_watermark shop.items"]["message"])
+            self.assertIn("pk_watermark", rows[f"{side}_db_watermark shop.items"]["message"])
+            self.assertEqual(rows[f"{side}_db_checksum shop.items"]["result"], "PASS")
+        # The run's own watermark endpoint reads (MAX/MIN, source clock) — collected from a real
+        # normal run on identical sides; preflight must issue exactly these, and every OTHER data
+        # statement must be zero-row (only the shared `SELECT 1 … LIMIT 1` privilege probe reads a constant).
+        rs, rt = x_sides()
+        L.run_day({**X_CFG, "tables": ["shop.items"]}, MemConn(rs), MemConn(rt), "2026-10-28")
+        wm = lambda log: {q for q in log if q.startswith(("SELECT MAX(", "SELECT MIN(", "SELECT UTC_TIMESTAMP", "SELECT (now()"))}
+        for side, run_side in ((s, rs), (t, rt)):
+            run_wm = wm(run_side.log)
+            self.assertTrue(run_wm, "the run resolved no watermark")
+            self.assertEqual(wm(side.log), run_wm)          # incl. MAX() on the target's NUMERIC key
+            data = [q for q in side.log if q.lstrip().upper().startswith("SELECT") and " FROM " in q
+                    and "information_schema" not in q and "pg_catalog" not in q]
+            others = [q for q in data if q not in run_wm and not re.match(r"SELECT 1 FROM \S+ LIMIT 1$", q)]
+            self.assertTrue(others and all("1=0" in q for q in others), others)
+        self.assertIn('SELECT MAX("id") FROM "shop"."items"', wm(t.log))
+
+    def test_pg_lag_side_without_dms_fails_preflight_like_the_run(self):
+        no_dms = {"DMS_TASK_ID": "", "DMS_REPLICATION_INSTANCE_ID": "", "DMS_TASK_ARN": ""}
+        out, rows, _, _ = self.run_pf(PG_REPLICATION_LAG_SIDE="target", **no_dms)
+        self.assertFalse(out["ok"])
+        self.assertEqual(rows["replication_lag_config"]["result"], "Error")
+        day = L.run_day({**X_CFG, "pg_replication_lag_side": "target"}, *map(MemConn, x_sides()), "2026-10-28")
+        self.assertEqual(rows["replication_lag_config"]["message"], day["detail"]["aws_errors"][0]["message"])
+        out, rows, _, _ = self.run_pf(MYSQL_REPLICA_STATUS_SIDE="target", **no_dms)
+        self.assertEqual(rows["replication_lag_config"]["result"], "Error")
+
+    def test_native_lag_side_with_dms_is_accepted_like_the_run(self):
+        out, rows, _, _ = self.run_pf(PG_REPLICATION_LAG_SIDE="target")    # ENV configures the DMS task
+        self.assertNotIn("replication_lag_config", rows)
+        self.assertTrue(out["ok"], [r for r in out["checks"] if r["result"] != "PASS"])
+
+    def test_type_mapping_defect_is_an_error_row(self):
+        cat = [("flag", "smallint", "b", "N", "NO", None) if c[0] == "flag" else c for c in pg_table([])[("shop", "items")]["catalog"]]
+        out, rows, _, _ = self.run_pf(catalog=cat)
+        self.assertFalse(out["ok"])
+        self.assertEqual(rows["target_db_watermark shop.items"]["result"], "Error")
+        self.assertIn("every day RED", rows["target_db_watermark shop.items"]["message"])
 
 
 if __name__ == "__main__":

@@ -13,14 +13,15 @@ subprocess — connect over the wire with pymysql/pg8000, call boto3 directly; (
 filesystem — status.json/activity-log.jsonl/soak-report-*.md live in S3, which has no native
 append, so "append a line to activity-log.jsonl" is GET-modify-PUT under the hood.
 
-SCOPE: homogeneous MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family
-(postgres/postgresql/aurora-postgresql) only — source and target must normalize to the
-SAME family. Heterogeneous soak-checking (e.g. MySQL source, PostgreSQL target) is not
-yet supported by this script; `handler()` checks this FIRST, from the SOURCE_ENGINE/
-TARGET_ENGINE environment variables alone, and raises a clear error before reading either
-secret or opening either database connection — rather than silently running the wrong SQL
-dialect against one side, or spending a live Secrets Manager read + DB connection on an
-invocation that was already going to fail.
+SCOPE: MySQL-family (mysql/mariadb/aurora-mysql) and PostgreSQL-family
+(postgres/postgresql/aurora-postgresql). Same-family pairs run one SQL dialect on both
+sides (unchanged). A CROSS-FAMILY MySQL <-> PostgreSQL pair (e.g. MySQL -> Aurora
+PostgreSQL via DMS) uses cross_engine_compare.py — bundled as a sibling file of this
+handler (cdk-stacks.md §soak-stack.ts) — for watermark-bounded counts, a normalized per-row
+comparison and a mapping-based drift check; options arrive as CROSS_ENGINE_OPTIONS (JSON).
+Any engine outside both families, or a cross-family pair without cross_engine_compare.py in
+the asset, is rejected FIRST by `handler()` from the environment variables alone, before
+reading either secret or opening either database connection.
 
 RETRY SAFETY: EventBridge Scheduler's retry policy is at-least-once, not exactly-once — a
 retried invocation for a day already recorded in status.json/activity-log.jsonl overwrites
@@ -78,6 +79,11 @@ try:
     import pg8000.native as pg8000
 except ImportError:  # not needed for a MySQL-only deployment; kept optional to match
     pg8000 = None      # soak_check.py's engine-agnostic shape without forcing the dependency.
+
+try:  # cross-family (MySQL <-> PostgreSQL) comparison; a sibling file in the Lambda asset
+    import cross_engine_compare as cec
+except ImportError:
+    cec = None
 
 # Matches the CDCLatencySource/Target warning threshold used elsewhere in this skill.
 # AWS gives no CDC latency SLA (see dms-best-practices.md) — this is a soft, tunable
@@ -209,9 +215,8 @@ def _engine_family(engine):
     """Normalizes an engine string to 'mysql' or 'postgres' so MariaDB routes to the
     MySQL client path instead of silently falling through to Postgres (the confirmed
     bug: anything other than the exact string "mysql" used to fall to the pg8000 path).
-    Raises rather than guessing for anything outside the two supported families —
-    heterogeneous soak-checking (different SQL dialects on each side) is out of scope
-    for this script; see the module docstring."""
+    Raises rather than guessing for anything outside the two supported families; a
+    MySQL-family <-> PostgreSQL-family pair takes the cross-family path (module docstring)."""
     e = (engine or "").strip().lower()
     if e in MYSQL_FAMILY:
         return "mysql"
@@ -220,8 +225,8 @@ def _engine_family(engine):
     raise ValueError(
         f"Unsupported engine '{engine}' for soak automation — this script only supports "
         "homogeneous MySQL-family (mysql/mariadb/aurora-mysql) or PostgreSQL-family "
-        "(postgres/postgresql/aurora-postgresql) checks. Heterogeneous soak-checking "
-        "(different SQL dialects on each side) is not yet supported."
+        "(postgres/postgresql/aurora-postgresql) checks (same family, or MySQL <-> PostgreSQL "
+        "cross-family). Other heterogeneous soak-checking is not supported."
     )
 
 
@@ -976,11 +981,7 @@ def run_day(cfg, source_conn, target_conn, run_date=None):
     source_family = _engine_family(cfg["source_engine"])
     target_family = _engine_family(cfg["target_engine"])
     if source_family != target_family:
-        raise ValueError(
-            f"source_engine={cfg['source_engine']!r} and target_engine={cfg['target_engine']!r} "
-            "normalize to different SQL families — heterogeneous soak-checking is not yet "
-            "supported by this script (see module docstring)."
-        )
+        return _run_day_cross_family(cfg, source_conn, target_conn, run_date, source_family, target_family)
     family = source_family
     tables = cfg["tables"]
     if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
@@ -1026,7 +1027,41 @@ def run_day(cfg, source_conn, target_conn, run_date=None):
     finally:
         _end_consistent_read(family, source_conn)
         _end_consistent_read(family, target_conn)
+    return _finish_day(cfg, run_date, aws_errors, row_check, checksum_check, drift_check, lag_seconds, lag_mechanism)
 
+
+def _cross_family_lag(cfg, aws_errors):
+    """DMS metrics are engine-agnostic; native replication cannot cross families, so a
+    configured replica-status/pg side is a config problem -> needs review. Same as soak_check.py."""
+    problem = cec.cross_family_lag_problem(cfg)   # shared with the Lambda preflight
+    if problem:
+        aws_errors.append({"check": "replication_lag", "iam_action": "n/a (config)",
+                           "resource": "MYSQL_REPLICA_STATUS_SIDE/PG_REPLICATION_LAG_SIDE", "result": "Error", "message": problem})
+        return None, "native_replication_not_possible_cross_family"
+    return measure_replication_lag(cfg, cfg.get("family", "mysql"), None, None, aws_errors)
+
+
+def _run_day_cross_family(cfg, source_conn, target_conn, run_date, source_family, target_family):
+    """MySQL-family <-> PostgreSQL-family day via cross_engine_compare.soak_checks — the same
+    function soak_check.py calls, so both scripts produce identical detail."""
+    if cec is None:
+        raise ValueError("cross-family soak needs cross_engine_compare.py bundled next to this handler "
+                         "(cdk-stacks.md §soak-stack.ts asset step)")
+    tables = cfg["tables"]
+    if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
+        raise ValueError("tables must be a nonempty list of table identifiers")
+    checksum_tables = cfg.get("checksum_tables") or tables[:2]
+    aws_errors = []
+    src = cec.make_side(source_family, source_conn, "source")
+    tgt = cec.make_side(target_family, target_conn, "target")
+    row_check, checksum_check, drift_check = cec.soak_checks(
+        src, tgt, tables, checksum_tables, watermark_config(cfg), cfg.get("cross_engine") or {})
+    lag_seconds, lag_mechanism = _cross_family_lag(cfg, aws_errors)
+    return _finish_day(cfg, run_date, aws_errors, row_check, checksum_check, drift_check, lag_seconds, lag_mechanism)
+
+
+def _finish_day(cfg, run_date, aws_errors, row_check, checksum_check, drift_check, lag_seconds, lag_mechanism):
+    """AWS-side checks + the four-state verdict — shared by the same-family and cross-family paths."""
     firing_alarms, unknown_alarms, alarms_check = cloudwatch_alarms(cfg.get("alarm_names", []), aws_errors)
 
     target_db_instance_id = cfg.get("target_db_instance_id")
@@ -1353,6 +1388,8 @@ def _load_config():
         # Per-statement DB read timeout. A COUNT(*)/checksum over a ~100M-row table needs
         # minutes, not the old fixed 25 s (cdk-stacks.md §soak-stack.ts sizing note).
         "db_query_timeout_seconds": int(_env("DB_QUERY_TIMEOUT_SECONDS") or 300),
+        # Cross-family (MySQL <-> PostgreSQL) comparison options — cross_engine_compare.DEFAULT_OPTIONS.
+        "cross_engine": _env_json("CROSS_ENGINE_OPTIONS", {}),
     }
     # Checked FIRST, before any Secrets Manager read or DB connection attempt — a
     # misconfigured heterogeneous pair (or an engine string outside both supported
@@ -1365,18 +1402,21 @@ def _load_config():
     source_family = _engine_family(cfg["source_engine"])
     target_family = _engine_family(cfg["target_engine"])
     if source_family != target_family:
-        raise ValueError(
-            f"source_engine={cfg['source_engine']!r} and target_engine={cfg['target_engine']!r} "
-            "normalize to different SQL families — heterogeneous soak-checking is not yet "
-            "supported by this script (see module docstring). No secret was read and no "
-            "database connection was attempted for this invocation."
-        )
+        if cec is None:
+            raise ValueError(
+                f"source_engine={cfg['source_engine']!r} and target_engine={cfg['target_engine']!r} "
+                "are a cross-family MySQL <-> PostgreSQL pair, but cross_engine_compare.py is not bundled "
+                "next to this handler (cdk-stacks.md §soak-stack.ts asset step). No secret was read and no "
+                "database connection was attempted for this invocation."
+            )
+        cec.merge_options(cfg["cross_engine"])   # option typos fail here, before any secret read
 
     if not isinstance(cfg["tables"], list) or not cfg["tables"]:
         raise ValueError("TABLES must be a nonempty list of table identifiers")
     for table in cfg["tables"]:
         _table_parts(table)
     cfg["family"] = source_family
+    cfg["target_family"] = target_family
     return cfg
 
 
@@ -1554,6 +1594,61 @@ def _preflight_watermark(pf, family, cfg, conns, tables):
             pf.run(f"{sl}_db_watermark {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe)
 
 
+def _preflight_cross(pf, fams, cfg, conns, tables, side_table_name):
+    """Cross-family parity: the same catalog/plan builders as cross_engine_compare.soak_checks,
+    then — per side — the watermark endpoint reads the run selects (cec.watermark_ops: MAX/MIN
+    of the key or the source clock, run as-is), every count statement under `1=0`
+    (`{side}_db_watermark <t>`), and the keyset SELECT under `1=0` (`{side}_db_checksum <t>`).
+    A strict type-mapping mismatch (e.g. TINYINT(1) -> SMALLINT) is an Error row: every
+    scheduled day would be RED."""
+    opts = cec.merge_options(cfg.get("cross_engine") or {})
+    wcfg = watermark_config(cfg)
+    checksum_tables = cfg.get("checksum_tables") or cfg["tables"][:2]
+    sides = {sl: cec.SqlSide(fams[sl], conn, sl, runner=lambda sql, sl=sl, conn=conn: pf.q(fams[sl], conn, sql))
+             for sl, (conn, _) in conns.items()}
+    for t in tables:
+        catalog = {}
+        for sl, side in sides.items():
+            try:
+                st = cec.side_table(side, side_table_name(sl, t), opts)
+                catalog[sl] = st if st is not None else RuntimeError(f"table {side_table_name(sl, t)!r} not found")
+            except Exception as e:  # incl. _BudgetExhausted — reported by that side's rows below
+                catalog[sl] = e
+        for sl, (conn, endpoint) in conns.items():
+            fam = fams[sl]
+
+            def plan_or_raise():
+                for other in ("source", "target"):
+                    c = catalog.get(other)
+                    if c is None:
+                        raise RuntimeError(f"{other} side not connected — fix its rows first")
+                    if isinstance(c, Exception):
+                        raise c
+                return cec.build_plan(t, catalog["source"], catalog["target"], opts)
+
+            def probe_wm(sl=sl, conn=conn, fam=fam):
+                plan = plan_or_raise()
+                bound, msg, ops = cec.soak_probe_bound(plan, wcfg)
+                for sql in ops[sl]:     # exactly the watermark reads the run issues on this side
+                    pf.q(fam, conn, sql)
+                sqls = cec.probe_sqls(plan, sl, fam, bound)
+                for i, sql in enumerate(sqls):
+                    if i != 1:          # index 1 is the keyset SELECT, probed by the checksum row
+                        pf.q(fam, conn, sql)
+                bad = [f"{fd.get('column')}: {fd['message']}" for fd in plan.findings
+                       if fd["severity"] == "mismatch" and opts["strict_types"]]
+                if bad:
+                    raise RuntimeError("type mapping would make every day RED — " + " | ".join(bad))
+                return _Info(f"ok — {msg} (cross-engine normalized)")
+            pf.run(f"{sl}_db_watermark {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe_wm)
+            if t in checksum_tables:
+                def probe_ck(sl=sl, conn=conn, fam=fam):
+                    plan = plan_or_raise()
+                    bound, _msg, _ops = cec.soak_probe_bound(plan, wcfg)
+                    pf.q(fam, conn, cec.probe_sqls(plan, sl, fam, bound)[1])
+                pf.run(f"{sl}_db_checksum {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe_ck)
+
+
 def run_preflight(cfg, bucket, prefix, context=None):
     """Exercise every AWS call + DB access a normal run makes — same table list, same SQL
     builders (_select_probe_sql/_columns_sql/_checksum_sql), both DMS metrics, all alarms,
@@ -1561,12 +1656,19 @@ def run_preflight(cfg, bucket, prefix, context=None):
     PUT (412 = allowed). KMS: reads exercise kms:Decrypt; a non-mutating preflight cannot
     exercise kms:GenerateDataKey for writes — that row says so when the bucket is SSE-KMS."""
     family = cfg["family"]
+    fams = {"source": family, "target": cfg.get("target_family", family)}
+    cross = fams["source"] != fams["target"]
     pf_clients = _preflight_clients()
     pf = _Preflight(context)
     not_configured = []
     tables = cfg["tables"]
     checksum_tables = cfg.get("checksum_tables") or tables[:2]
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    def side_table_name(sl, t):   # cross-family runs may map a table to another target name
+        if sl != "target" or not cross:
+            return t
+        return (((cfg.get("cross_engine") or {}).get("tables") or {}).get(t) or {}).get("target") or t
 
     conns = {}
     for side in ("SOURCE", "TARGET"):
@@ -1580,24 +1682,28 @@ def run_preflight(cfg, bucket, prefix, context=None):
                      "resource": endpoint, "result": "SKIPPED",
                      "message": "secret could not be read — fix the row above first"})
             continue
+        fam = fams[sl]
         ok, conn = pf.run(f"{sl}_db_connect", "n/a (DB login + TLS; network: SG/route to DB)", endpoint,
-                          lambda st=st, creds=creds: _connect(family, st["host"], st["port"], creds, st["database"],
-                                                              st["ssl_ca_path"], st["ssl_insecure"],
-                                                              connect_timeout=5, read_timeout=10))
+                          lambda st=st, creds=creds, fam=fam: _connect(fam, st["host"], st["port"], creds, st["database"],
+                                                                       st["ssl_ca_path"], st["ssl_insecure"],
+                                                                       connect_timeout=5, read_timeout=10))
         if not ok:
             continue
         try:
             for t in tables:
-                def probe_table(t=t, conn=conn):
-                    pf.q(family, conn, _select_probe_sql(family, t))
-                    if not pf.q(family, conn, _columns_sql(family, t)):
+                def probe_table(t=t, conn=conn, fam=fam, name=side_table_name(sl, t)):
+                    pf.q(fam, conn, _select_probe_sql(fam, name))
+                    if not pf.q(fam, conn, _columns_sql(fam, name)):
                         raise RuntimeError("no columns visible in the catalog — table missing or no "
                                            "privilege on it (schema-drift check would fail)")
                 pf.run(f"{sl}_db_select {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}", probe_table)
-            for t in checksum_tables:
-                pf.run(f"{sl}_db_checksum {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}",
-                       lambda t=t, conn=conn: pf.q(family, conn, _checksum_sql(family, t, probe=True)))
-            if family == "mysql" and cfg.get("mysql_replica_status_side") == sl:
+            if not cross:   # cross-family: the normalized-comparison probes run jointly below
+                for t in checksum_tables:
+                    pf.run(f"{sl}_db_checksum {t}", "n/a (DB grant: SELECT)", f"{endpoint} {t}",
+                           lambda t=t, conn=conn: pf.q(family, conn, _checksum_sql(family, t, probe=True)))
+            if cross:
+                pass   # lag config is validated once below, by the same rule the normal run applies
+            elif family == "mysql" and cfg.get("mysql_replica_status_side") == sl:
                 def probe_replica(conn=conn):
                     try:
                         cols, rrows = pf.qn(conn, "SHOW REPLICA STATUS")
@@ -1612,8 +1718,18 @@ def run_preflight(cfg, bucket, prefix, context=None):
         finally:
             conns[sl] = (conn, endpoint)   # kept open for the joint watermark probes below
 
+    if cross:
+        problem = cec.cross_family_lag_problem(cfg)   # identical to _cross_family_lag in the normal run
+        if problem:
+            pf.emit({"check": "replication_lag_config", "iam_action": "n/a (config)",
+                     "resource": "MYSQL_REPLICA_STATUS_SIDE/PG_REPLICATION_LAG_SIDE/DMS_TASK_ID", "result": "Error",
+                     "message": problem})
     try:
-        _preflight_watermark(pf, family, cfg, conns, list(dict.fromkeys(list(tables) + list(checksum_tables))))
+        union = list(dict.fromkeys(list(tables) + list(checksum_tables)))
+        if cross:
+            _preflight_cross(pf, fams, cfg, conns, union, side_table_name)
+        else:
+            _preflight_watermark(pf, family, cfg, conns, union)
     finally:
         for conn, _ in conns.values():
             try:
@@ -1781,7 +1897,7 @@ def _run_normal(cfg, bucket, prefix, day_date=None):
     qt = cfg.get("db_query_timeout_seconds", 300)
     source_conn = _connect(family, src["host"], src["port"], source_creds, src["database"],
                             src["ssl_ca_path"], src["ssl_insecure"], read_timeout=qt)
-    target_conn = _connect(family, tgt["host"], tgt["port"], target_creds, tgt["database"],
+    target_conn = _connect(cfg.get("target_family", family), tgt["host"], tgt["port"], target_creds, tgt["database"],
                             tgt["ssl_ca_path"], tgt["ssl_insecure"], read_timeout=qt)
     try:
         day_result = run_day(cfg, source_conn, target_conn, day_date)

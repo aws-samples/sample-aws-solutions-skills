@@ -11,6 +11,11 @@ boundary). In **Mode 3** the agent executes these steps itself with a signed A4
 authorization and an approver reachable during the window. The procedures below are written
 for whoever holds the runbook — the mechanics are identical either way.
 
+**Cache engagements (ElastiCache targets):** client discovery uses `CLIENT LIST` on every
+node and the endpoint table, cutover/rollback the cache specifics (ElastiCache cannot
+replicate out; stale-cache caveat) — [elasticache-migration.md](elasticache-migration.md)
+§10–§11. The freeze-before-repoint order and bidirectional verification below still apply.
+
 Load [method-readiness.md](method-readiness.md) for offline-copy versus live-replication
 preconditions. Readiness does not grant execution authority; existing scoped approvals
 remain valid for routine reads and explicitly covered recovery actions.
@@ -402,6 +407,14 @@ or the A4b handover (Mode 2), record each with its evidence:
 | ▢ | Reverse endpoints test-connected, TLS mode per dms-best-practices.md | `aws dms test-connection` | — |
 | ▢ | **Reverse task actually run and applying** on the rehearsal pair (execution-runbooks.md §Migration Rehearsal minimum): an INSERT, UPDATE and DELETE on the new side each confirmed on the source-version stand-in, plus CDC-latency alarms on the reverse task (task dimension = ARN suffix) seeing data | row-level evidence + alarm state | — |
 
+**Engine-family change (MySQL ↔ PostgreSQL):** the reverse task crosses the family and its
+prerequisites differ by direction — a PostgreSQL new side needs `rds.logical_replication=1`
+(static; set at creation), `REPLICA IDENTITY FULL` on key-less tables and a logical slot +
+LSN captured at the freeze (PostgreSQL sources cannot start CDC from a timestamp); a MySQL
+new side needs the rows above. Rollback-side tables keep their original DDL
+(`DO_NOTHING`), with `change-data-type` rules for booleans. Checklists:
+[mysql-postgresql.md](mysql-postgresql.md) §10 — same GATE 4 rule.
+
 Endpoint test-connection alone proves reachability, not apply permission or binlog
 availability. Any unchecked row blocks GATE 4 unless a waiver with an explicit RPO
 acknowledgment is confirmed. At cutover step 8, confirm the task is `running` **and** that a
@@ -417,6 +430,8 @@ several real conditions. Do not require it as the only rollback path:
 | New target cannot emit/retain the required binlog/WAL | Reverse CDC cannot capture its writes. The old source's `log_bin=OFF` alone does not establish whether it can receive reverse SQL apply. |
 | Native major-version **downgrade** (e.g. external MySQL 8.0 source ← 8.4 target) | Forward compatibility does not make native 8.4 → 8.0 a supported lossless rollback. Check exact topology/version rules in `version-upgrades.md`; a service-specific exception does not cover an external source. |
 | Insufficient privileges | No `REPLICATION SLAVE`/`SUPER` (or PG replication role) to establish the channel. |
+| Target is ElastiCache (any engine) | `replicaof`/`sync`/`psync`/`migrate`/`bgsave` are restricted — ElastiCache cannot replicate to a self-managed node. Options: [elasticache-migration.md](elasticache-migration.md) §11. |
+| Engine-family change without reverse-DMS prerequisites (MySQL ↔ PostgreSQL) | No native path exists; a PostgreSQL new side without `rds.logical_replication=1` or a slot/LSN taken at the freeze cannot feed a reverse task ([mysql-postgresql.md](mysql-postgresql.md) §10). |
 
 **Alternatives (pick per RPO):**
 1. **Application-level write logging** — append every post-cutover write to a durable log

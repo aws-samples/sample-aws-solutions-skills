@@ -2,6 +2,12 @@
 
 > **Scope** — every engine RDS/Aurora supports; **heterogeneous migrations** (Oracle/SQL Server → Aurora, engine family changes); and the **Korean-market source engines** (Tibero, CUBRID, Altibase) that have **no native AWS migration tooling**. For schema/code conversion, prefer chaining the official `dms-schema-conversion` skill ([mcp-and-tooling.md](mcp-and-tooling.md) §Chaining) and use this document for the decision framing, target selection, and the manual-conversion long tail.
 
+> **MySQL ↔ PostgreSQL (either direction)** has its own reference:
+> [mysql-postgresql.md](mysql-postgresql.md) — assessment queries, type-mapping traps (DMS
+> defaults), DMS Schema Conversion limits for this pair, pgloader, cross-engine validation
+> (`cross_engine_compare.py`) and reverse-DMS rollback. This file stays the Oracle / SQL
+> Server / Korean-engine reference; its §7 task additions apply to that pair too.
+
 > **Companion documents**: [rds-aurora-limitations.md](rds-aurora-limitations.md), [aws-official-migration-methods.md](aws-official-migration-methods.md), [third-party-db-security.md](third-party-db-security.md), [regulatory-compliance.md](regulatory-compliance.md).
 
 ---
@@ -62,7 +68,7 @@ Converts schema + code objects across a broad matrix:
 ### 3.3 DMS Schema Conversion (console/managed — "web SCT")
 
 - Narrower scope than SCT (no data-warehouse, big-data, application-SQL, or ETL conversion — use SCT for those).
-- Heterogeneous **Oracle / SQL Server → MySQL / PostgreSQL**; homogeneous MySQL/PostgreSQL.
+- Heterogeneous **Oracle / SQL Server → MySQL / PostgreSQL**, and **MySQL → PostgreSQL / PostgreSQL → MySQL** (MySQL sources ≤ 8.0, MySQL targets 8.0 only — [mysql-postgresql.md](mysql-postgresql.md) §1.3); homogeneous MySQL/PostgreSQL.
 - Targets: Aurora MySQL 8.0.32, Aurora PostgreSQL 14–17, RDS MySQL/PostgreSQL, RDS Db2.
 - Includes **generative-AI-assisted conversion**. Converts tables, views, stored procedures, functions, data types, synonyms; flags unconvertible objects for manual work.
 - **When to use which**: SCT for the broad/complex jobs (DW, app code, ETL); DMS Schema Conversion for straightforward Oracle/SQL Server→PostgreSQL/MySQL schema work inside the console.

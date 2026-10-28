@@ -9,7 +9,20 @@ It moves databases to **Amazon Aurora or Amazon RDS** — sources can be self-ma
 EC2, on-premises, another cloud) or already on RDS. The destination is always a managed
 service; a self-managed target such as "MySQL on EC2" is out of scope (see below). Supported sources: MySQL, MariaDB, PostgreSQL, Oracle, SQL
 Server, Db2 — plus playbooks for heterogeneous moves (e.g. SQL Server → Aurora
-PostgreSQL) and Korean-market engines and security appliances.
+PostgreSQL) and Korean-market engines and security appliances. **MySQL ↔ PostgreSQL in
+either direction** has a dedicated path: read-only assessment queries for the types and
+semantics that convert badly, DMS settings that avoid DMS's default type mappings, pgloader
+for small offline MySQL → PostgreSQL moves, a normalized cross-engine comparison tool
+(`cross_engine_compare.py`) that also drives the parallel-run soak checks, and a
+reverse-DMS rollback with its creation-time prerequisites. Application SQL review is part of
+every such engagement — the skill produces the findings, your team changes the code.
+
+It also moves **caches and in-memory stores to Amazon ElastiCache**: self-managed Redis OSS,
+Valkey or Memcached (EC2, on-premises, another cloud) → ElastiCache for Valkey, Redis OSS or
+Memcached, node-based or Serverless — plus the in-place ElastiCache Redis OSS → Valkey
+engine change. Same phases, gates and safety model; cache-specific discovery, blocker
+catalog, method matrix (online migration node-based/Serverless, RDB → S3 seed, RedisShake,
+warm-up, dual-write), CDK, validation (`cache_compare.py`) and rollback rules.
 
 ## What using it feels like
 
@@ -116,7 +129,8 @@ emits `app-remediation-findings.md` (file:line, offending construct, replacement
 handoff for your dev team — or a second agent session opened in your repo with your
 tests. It never asks for access to your source control.
 
-**2. The target is a managed database — Aurora or RDS.** Sources can be self-managed (EC2,
+**2. The target is a managed database — Aurora or RDS — or a managed cache — ElastiCache.**
+Amazon MemoryDB is not a supported target. Sources can be self-managed (EC2,
 on-premises, another cloud) or already on RDS, but the destination is always a managed
 service. "Move our on-prem MySQL onto MySQL on EC2" is **out of scope**: the skill has no
 instance/EBS sizing, engine install and tuning, backup and PITR design, HA topology,
@@ -176,7 +190,9 @@ DMS/SCT support): the skill plans a PoC + JDBC extraction path and says so plain
 rather than implying DMS will "just work".
 
 **8. Not covered at all**: sharded/multi-master topologies as such (Galera,
-Group Replication — flagged as redesigns), NoSQL sources, data-warehouse migrations
+Group Replication — flagged as redesigns), NoSQL sources other than Redis OSS/Valkey/
+Memcached caches (no DynamoDB/MongoDB/Cassandra paths), AWS DMS for caches (Redis is not a
+DMS source), data-warehouse migrations
 (Redshift territory), ongoing post-migration DBA operations (that's the `aws-database`
 skills' ground), and BYO-license procurement decisions (it surfaces the LI/BYOL choice;
 your licensing team owns it).
@@ -197,14 +213,16 @@ db-migration-agent-skill/
 │   │   ├── preflight-iam-cost.md           Phase 0 — preconditions, IAM roles, cost, monitoring baseline
 │   │   ├── source-assessment.md            Phase 2 — blockers, access paths, credential rules, sizing, low-bandwidth branch
 │   │   ├── rds-aurora-limitations.md       Full blocker/adjustment catalog with queries
-│   │   ├── method-selection.md             Phase 3 — 19-row decision matrix, binlog gate, edge cases
+│   │   ├── method-selection.md             Phase 3 — 19-row decision matrix + H1–H5 MySQL ↔ PostgreSQL rows, binlog gate, edge cases
 │   │   ├── heterogeneous-migration.md      SCT / DMS SC / Babelfish; Tibero/CUBRID/Altibase
+│   │   ├── mysql-postgresql.md             MySQL ↔ PostgreSQL — assessment SQL, type traps, DMS/pgloader, validation, reverse-DMS rollback
 │   │   ├── target-provisioning.md          Phase 4 — Aurora vs RDS, immutable settings, RDS Proxy, TLS gate
 │   │   ├── execution-runbooks.md           Phase 6 — per-method procedures, schema objects, rehearsal
 │   │   ├── dms-best-practices.md           DMS sizing, task settings, LOB handling
 │   │   ├── aws-official-migration-methods.md  All 33 AWS-documented methods
 │   │   ├── validation-patterns.md          Phase 7 — counts/checksums/app-level/version-gap
 │   │   ├── version-upgrades.md             Major-version-gap behavioral changes
+│   │   ├── elasticache-migration.md        Redis OSS/Valkey/Memcached → ElastiCache: discovery, blockers, matrix, runbooks, validation, rollback
 │   │   ├── cutover-procedures.md           Phases 7.5–8 — client discovery, freeze, reverse replication, rollback
 │   │   ├── method-readiness.md             Offline/CDC evidence and bounded lab reuse
 │   │   ├── execution-control.md            Reviewed step supervision and recovery
@@ -217,11 +235,14 @@ db-migration-agent-skill/
 │   │   └── regulatory-compliance.md        Korean regulatory mandates (PIPA, network separation, ISMS-P)
 │   ├── patterns/
 │   │   └── cdk-stacks.md                   The CDK project the skill generates
-│   ├── scripts/                            Dashboard publisher, step supervisor, handoff packager, soak helpers
+│   ├── scripts/                            Dashboard publisher, step supervisor, handoff packager, soak helpers,
+│   │                                       cache_compare.py (read-only Redis/Valkey/Memcached source↔target comparison)
+│   │                                       cross_engine_compare.py (normalized MySQL ↔ PostgreSQL comparison)
 │   ├── assets/                             dashboard.css/.js, rds-global-bundle.pem
 │   └── templates/
 │       ├── migration-plan.md               Working artifact (source of truth per engagement)
 │       ├── discovery-questions.md          Bulk Phase 1 Q&A, filled out by the customer
+│       ├── discovery-questions-cache.md    Cache-source template (same #3–#18 numbering; instantiated as discovery-questions.md)
 │       ├── authorizations.md               Approval ledger — marks + dates, no names
 │       ├── soak-report.md                  Daily green/red gate during the parallel run
 │       ├── cutover-runbook.md              Instantiated with real values at Phase 8
@@ -229,8 +250,15 @@ db-migration-agent-skill/
 ├── evals/                                  Black-box eval scenarios (expected-behavior checklists)
 │   ├── ec2-mysql-to-aurora-scenario.md
 │   ├── sqlserver-to-aurora-pg-scenario.md
+│   ├── redis-to-elasticache-scenario.md
+│   ├── memcached-to-elasticache-scenario.md
+│   ├── mysql-to-postgresql-scenario.md
+│   ├── postgresql-to-mysql-scenario.md
 │   └── recovery-and-readiness-scenario.md
-└── scripts/                               Offline Python/Node regression tests and synthetic fixtures
+└── scripts/                               Offline Python/Node regression tests and synthetic fixtures;
+                                           test_cross_engine_compare.py and test_cache_compare.py also run Docker
+                                           MySQL/PostgreSQL/pgloader and Redis/Valkey/Memcached integration
+                                           tests (skipped when Docker is unavailable)
 ```
 
 ## Install
@@ -254,7 +282,9 @@ install_skill() {  # $1 = variant dir (claude-code | kiro | codex), $2 = destina
   fi
   for f in SKILL.md shared/reference/version-upgrades.md shared/templates/migration-plan.md \
            shared/assets/dashboard.js shared/scripts/soak_check.py shared/scripts/soak_check_lambda.py \
-           shared/scripts/dashboard_update.py shared/scripts/execution_step.py shared/scripts/handoff_bundle.py; do
+           shared/scripts/dashboard_update.py shared/scripts/execution_step.py shared/scripts/handoff_bundle.py \
+           shared/scripts/cross_engine_compare.py shared/scripts/cache_compare.py \
+           shared/reference/elasticache-migration.md shared/reference/mysql-postgresql.md; do
     [ -r "$stage/$f" ] || { rm -rf "$stage"; echo "INSTALL INCOMPLETE: $f missing" >&2; return 1; }
   done
   # Swap the verified copy into place (replaces the whole skill dir — no stale files survive).
@@ -290,7 +320,8 @@ migrations. Optional companions: `awslabs.mysql-mcp-server` / `postgres` / `orac
 
 **English**: "migrate database", "move to Aurora", "migrate to RDS", "EC2 MySQL to
 Aurora", "SQL Server to Aurora PostgreSQL", "database cutover", "DMS migration",
-"database modernization".
+"database modernization", "migrate Redis to ElastiCache", "move to Valkey", "Memcached to
+ElastiCache".
 **Other languages**: the skill answers in the customer's language (Korean fully
 supported) — trigger it with the equivalent phrases in that language.
 
@@ -344,7 +375,11 @@ node scripts/test-dashboard.cjs
 ```
 
 The Python tests use temporary files/processes, stub AWS calls and synthetic database
-connections. The renderer defaults to checked-in synthetic evidence; optionally pass a
+connections. `scripts/test_cache_compare.py` adds integration tests against real
+`redis:7.2`, `valkey/valkey:8.1` and `memcached:1.6` containers (Redis → Valkey
+`REPLICAOF`, a 3-node Valkey cluster, Memcached stats); they need Docker, those images
+pulled locally, and `pip install redis` (not in the Lambda `requirements.txt`), and are
+skipped — never failed — when any is missing. The renderer defaults to checked-in synthetic evidence; optionally pass a
 reviewed engagement-fixture directory. These tests do not perform or qualify a live
 migration. Use `evals/` for behavioral checks, including partial-switch failures, unknown
 write outcomes and stale lab evidence.

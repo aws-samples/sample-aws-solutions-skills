@@ -24,7 +24,7 @@ class OperatorCLITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
-        self.cli = [sys.executable, runner.__file__]
+        self.cli = [sys.executable, "-B", runner.__file__]
         self.dash = self.root / "dashboard"
         self.dash.mkdir()
         self.save(self.dash / "status.json", {"mode": "3", "phases": [
@@ -222,7 +222,7 @@ class OperatorCLITests(unittest.TestCase):
             "sys.path.insert(0,sys.argv[1])\nimport execution_step\n"
             "r=Path.cwd()\nexecution_step.reserve(r,r/'.execution','first',"
             "json.loads((r/'first.json').read_text()))\n")
-        reserved = subprocess.run([sys.executable, "-c", script, str(Path(runner.__file__).parent)],
+        reserved = subprocess.run([sys.executable, "-B", "-c", script, str(Path(runner.__file__).parent)],
                                   cwd=self.root, capture_output=True, text=True, timeout=5)
         self.assertEqual(reserved.returncode, 0, reserved.stderr)
 

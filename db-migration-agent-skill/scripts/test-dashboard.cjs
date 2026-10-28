@@ -356,6 +356,32 @@ async function main() {
   const notDone = await mount({ ...small, lang: 'en', cutover: { target_endpoint: 'x' } }, smallLog);
   assert.equal(notDone.get('cutover').className, 'cutover ' + (small.cutover_ready ? 'ready' : 'notready'), 'no completed_at = readiness card');
   console.log('PASS long-log toggle (en/ko, newest-first, state preserved, escaped); cutover-completed card (en/ko, additive)');
+  // Cache engagements (cache_compare.py): additive `keyspaces` object type and cache soak days.
+  const ksExample = examples.find(x => x.migration_objects && x.migration_objects.keyspaces);
+  assert(ksExample, 'dashboard.md must document the keyspaces example');
+  for (const lang of ['en', 'ko']) {
+    const ks = { ...structuredClone(small), lang, migration_objects: {
+      ...structuredClone(small.migration_objects || {}), ...structuredClone(ksExample.migration_objects) } };
+    const ksPage = await mount(ks, smallLog);
+    const objHTML = ksPage.get('objects').innerHTML;
+    for (const it of ksExample.migration_objects.keyspaces.items) assert(objHTML.includes(escapeHTML(it.name)), `keyspace ${it.name} missing`);
+    assert(objHTML.includes(lang === 'en' ? 'Keyspaces (cache)' : '키스페이스 (캐시)'), 'keyspace card label missing');
+    assert((objHTML.match(/row-mismatch/g) || []).length >= 1, 'a false sample_match must be highlighted');
+    if (small.migration_objects && small.migration_objects.tables) assert(objHTML.includes(escapeHTML(small.migration_objects.tables.items[0].name)), 'tables card lost');
+  }
+  const cacheSoak = structuredClone(soakStatus);
+  cacheSoak.soak.days = [{ date: '2026-10-27', overall: 'red', needs_agent_review: true,
+    checks: { key_count: true, sample_match: true, replication_link: 'not_applicable', alarms: true,
+      headroom: 'not_applicable', customer_test_suite: 'not_applicable', period_evidence: null },
+    detail: { sampler: 'cache_compare' } }, structuredClone(soakStatus.soak.days[0])];
+  cacheSoak.soak.days[1].date = '2026-10-28';
+  const cachePage = await mount(cacheSoak, smallLog);
+  const cacheHTML = cachePage.get('soak').innerHTML;
+  assert(cacheHTML.includes('Sampled keys (type/TTL/value)') && cacheHTML.includes('Replication link'), 'cache soak labels missing');
+  assert(cacheHTML.includes('Row count'), 'SQL soak day must keep its original rows');
+  const [cacheDay] = cacheHTML.split('2026-10-28');
+  assert(!cacheDay.includes('Row count') && !cacheDay.includes('Schema drift'), 'cache day rendered SQL-only checks');
+  console.log('PASS cache keyspaces card (en/ko) and cache soak-day check rows (additive)');
   const empty = await mount({ phases: [], cutover_gates: [] }, '');
   assert.equal(empty.document.documentElement.lang, 'en');
   console.log(`PASS ${omissions} optional-field omissions; spec examples; en/ko parity; readiness; four-state soak; gaps; compressed soak window; escaping; fetch recovery; legacy logs; disclosure/focus preservation; zero/range costs`);

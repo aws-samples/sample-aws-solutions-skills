@@ -205,13 +205,20 @@ choice (and mirror it into `customer_actions` until answered):
   UTC daily and writes the S3 dashboard itself.
 - **B — manual `soak_check.py` runs:** name **who** runs it, **from which host**, and
   **when (UTC)** each day (or the bastion cron fallback, if that is what is chosen).
-- A and B exist only when source and target normalize to the **same engine family** (both
-  scripts reject cross-family pairs). For a **heterogeneous** pair offer instead:
+- A and B exist when source and target normalize to the **same engine family**, **or are a
+  MySQL ↔ PostgreSQL pair** — both scripts run the normalized cross-engine comparison for
+  that pair (`mysql-postgresql.md` §9; DMS task metrics for lag). For any **other
+  heterogeneous** pair (Oracle/SQL Server/… → Aurora) offer instead:
   **C — manual reconciliation** per `execution-runbooks.md` §Soak automation's heterogeneous
   callout: DMS task CloudWatch metrics/alarms plus agent-run dual-read spot checks with
   per-side queries — name **who** runs them, **when (UTC)**, and **what evidence** each
   period records (queries, row counts/aggregates compared, DMS validation status). A
   full-load-only heterogeneous move has no soak at all (static-validation window, waiver).
+- **Cache engagements (Redis OSS / Valkey → ElastiCache):** A and B don't apply (both
+  scripts are SQL-only). Offer **D — daily `cache_compare.py --record soak` runs** with
+  who/host/UTC time (or a cron on the migration host, verified by its first run) plus the
+  cache's CloudWatch alarms, per [elasticache-migration.md](elasticache-migration.md) §9;
+  offline cache methods (RDB seed, warm-up, Memcached) have no soak.
 
 Record the choice, reason and date in the plan's Phase 7.7 row. State the notification
 path for RED/needs-review days (SNS topic with a confirmed subscription for a named person,
@@ -323,8 +330,9 @@ something the customer has to think to ask for.
 `execution-runbooks.md` §Soak automation's heterogeneous callout — the "checks run
 automatically" logistics note above assumes the automated Lambda/`soak_check.py` checklist
 applies, and for a heterogeneous pair it may not (no CDC at all → no soak, propose the
-static-validation-window alternative instead; CDC in play → propose a manual/agent-reviewed
-process, not the automated checklist). Say which of the three applies before quoting [N].
+static-validation-window alternative instead; CDC in play → MySQL ↔ PostgreSQL gets the
+automated checklist in cross-family mode, other pairs a manual/agent-reviewed process).
+Say which applies before quoting [N].
 
 ## Waiver protocol
 

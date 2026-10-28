@@ -9,6 +9,11 @@ Validation happens at three points:
 
 ---
 
+> **Cache targets (ElastiCache):** row counts/checksums become per-db key counts and a
+> deterministic sampled TYPE/TTL/value comparison — `shared/scripts/cache_compare.py`, scope
+> and limits in [elasticache-migration.md](elasticache-migration.md) §8. §2.6's
+> per-application-account login proof and §2.7's alarm review apply unchanged.
+
 ## 1. DMS Built-in Validation
 
 ### Enable Validation in Task Settings
@@ -117,6 +122,13 @@ done
 ```
 
 ### 2.2 Checksum Verification
+
+**MySQL ↔ PostgreSQL (heterogeneous):** engine-native checksums (`CHECKSUM TABLE`,
+`md5(string_agg(...))`) never match across the families even for perfect data. Use
+`shared/scripts/cross_engine_compare.py` (normalized per-row hash, PK-ordered chunks,
+MATCH/MISMATCH/NEEDS_REVIEW per table, pinpointed keys) plus DMS data validation —
+[mysql-postgresql.md](mysql-postgresql.md) §9. The per-engine queries below are for
+same-family pairs.
 
 **MySQL — read-only comparison first.** `pt-table-checksum` writes checksum tables on
 the source; it is not part of this read-only battery and GATE 3 does not authorize it.

@@ -4,6 +4,10 @@
 > Performance Insights were enabled at provisioning ([preflight-iam-cost.md](preflight-iam-cost.md) §4);
 > this phase is stabilization, tuning back to steady state, and the controlled teardown.
 
+> **Cache targets:** baseline (ops/s, hit ratio, latency), snapshot retention (node-based
+> default 0 = no automatic backups), TLS/RBAC drift from the post-`complete-migration`
+> change, source migration users and S3 seed cleanup — [elasticache-migration.md](elasticache-migration.md) §11.4.
+
 ## Immediately after cutover stabilizes (T+1h → T+24h)
 
 1. **Refresh optimizer statistics** — `ANALYZE TABLE` on all tables (MySQL/MariaDB),

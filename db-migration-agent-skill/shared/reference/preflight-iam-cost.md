@@ -172,6 +172,8 @@ the source (no terminate/stop/delete) until the decommission authorization is si
 | **dms-vpc-role** + **dms-cloudwatch-logs-role** | DMS paths | Exact-name service roles DMS requires in the account (create once per account) |
 | **rds-proxy-secrets-role** | RDS Proxy | `secretsmanager:GetSecretValue` on the DB secret; trust `rds.amazonaws.com` |
 | **rds-monitoring-role** | Enhanced Monitoring | Managed policy `AmazonRDSEnhancedMonitoringRole`; trust `monitoring.rds.amazonaws.com` |
+| **migration-operator — cache engagements** ([elasticache-migration.md](elasticache-migration.md)) | All phases | `elasticache:Describe*`/`List*`, `Create/Modify/DeleteReplicationGroup`, `Create/Modify/DeleteServerlessCache`, `Create/ModifyCacheCluster` (Memcached), `Create/ModifyCacheParameterGroup`, `CreateCacheSubnetGroup`, `Create/ModifyUser`, `Create/ModifyUserGroup`, `CreateSnapshot`, `TestMigration`/`StartMigration`/`CompleteMigration` (node-based), `PrepareMigration`/`StartMigration`/`CompleteMigration`/`StopMigration` (Serverless), `AddTagsToResource`; `iam:CreateServiceLinkedRole` for `elasticache.amazonaws.com` on first use; `s3:PutObject` on the seed bucket; Serverless online migration: `secretsmanager:GetSecretValue` + `kms:Decrypt` on the source-credential secret/CMK. Scope to the engagement's ids. Mode 2's guardrail adds a Deny on `elasticache:CompleteMigration` (both paths — it *is* the cutover; Serverless `--auto-cutover` must not be used) alongside the existing app-secret/DNS/app-host Denies |
+| **ElastiCache service grants** (not IAM roles) | C5 seed / C2 | Seed bucket policy: `<region>.elasticache-snapshot.amazonaws.com` → `s3:GetObject`, `s3:ListBucket`, `s3:GetBucketAcl` (+ `kms:Decrypt`/`kms:DescribeKey`, Bucket Keys off for SSE-KMS). Source-credential secret: resource policy `secretsmanager:GetSecretValue` for `elasticache.amazonaws.com`, CMK key-policy grant (the AWS-managed SM key cannot be granted) |
 
 ```bash
 # Verify before starting, e.g.:
@@ -256,6 +258,14 @@ On the target, enable at provisioning time (all are in the CDK stacks —
   `0, 0, -1, 0` breaches the stall rule (do not average away or clamp negative values).
   DMS paths retain their CDC-latency and task/error-state monitoring separately.
 - **Log exports** to CloudWatch (error/slowquery/audit as the engine provides).
+- **ElastiCache targets** (namespace `AWS/ElastiCache`; node-based dimension
+  `CacheClusterId` = member cluster id, Serverless `clusterId` = cache name):
+  `EngineCPUUtilization` > 80%, `DatabaseMemoryUsagePercentage` > 80%, `Evictions` > 0,
+  `CurrConnections` vs the source baseline, `ReplicationLag` on replicas,
+  `MasterLinkHealthStatus` < 1 during node-based online migration; Serverless
+  `ThrottledCmds` > 0, `BytesUsedForCache` vs the usage limit, `ElastiCacheProcessingUnits`;
+  Memcached `CPUUtilization`, `Evictions`, `CurrItems`. Source baseline: `INFO stats`/
+  `INFO commandstats`, hit ratio, `LATENCY LATEST`, `SLOWLOG` ([cdk-stacks.md](../patterns/cdk-stacks.md) §cache-stack.ts).
 
 ### 4a. Alarm readiness — ONE rule, two checkpoints
 

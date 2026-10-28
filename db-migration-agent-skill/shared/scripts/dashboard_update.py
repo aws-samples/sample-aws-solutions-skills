@@ -51,6 +51,14 @@ Usage (typical in-progress checkpoint; the patch can also come from --patch-file
     --log-detail "running, 4m elapsed" \
     --plan migration-plan.md --plan-section "Phase 6" --plan-line "17:58Z load-orders running (4m)"
 
+Soak-day replacement (`--soak-day-file FILE|-`, additive): inside the same lock, replaces
+(or inserts) one `soak.days[]` entry by its UTC `date` VERBATIM — literal nulls such as
+`period_evidence: null` are kept, unlike merge-patch — then recomputes the derived
+`soak.consecutive_green` (trailing run of consecutive, reviewed-green days ending at the
+latest recorded day), `soak.state` (complete/active; untouched when waived) and
+`soak.last_checked_at` from the CURRENT file. Requires a seeded `soak.n_total`. Used by
+cache_compare.py so a soak writer never computes the streak from a stale read.
+
 Exit status: 0 = everything written and read back; 1 = validation/IO failure (message on
 stderr, nothing written past the failing step); 2 = bad arguments.
 """
@@ -163,6 +171,46 @@ def _is_utc_timestamp(v):
     except ValueError:
         return False
     return ts.utcoffset() == datetime.timedelta(0)
+
+
+def green_streak(days, current_date):
+    """Consecutive green UTC days ending at current_date — same rule as the soak scripts:
+    a gap, a non-green day, a review flag, or any check not true/"not_applicable" ends it."""
+    expected = datetime.date.fromisoformat(current_date)
+    n = 0
+    for day in sorted(days, key=lambda d: d["date"], reverse=True):
+        if (datetime.date.fromisoformat(day["date"]) != expected or day.get("overall") != "green"
+                or day.get("needs_agent_review")
+                or any(v is not True and v != "not_applicable" for v in (day.get("checks") or {}).values())):
+            break
+        n += 1
+        expected -= datetime.timedelta(days=1)
+    return n
+
+
+def replace_soak_day(status, day, now):
+    """Replace/insert one soak day verbatim and recompute the derived soak fields."""
+    if not isinstance(day, dict) or not _is_calendar_date(day.get("date")):
+        raise UpdateError("--soak-day-file: the day must be an object with a real YYYY-MM-DD 'date'")
+    if not isinstance(day.get("checks"), dict) or not isinstance(day.get("overall"), str) \
+            or not isinstance(day.get("needs_agent_review"), bool):
+        raise UpdateError("--soak-day-file: the day needs 'checks' (object), 'overall' (string) and "
+                          "'needs_agent_review' (boolean)")
+    soak = status.get("soak")
+    if not isinstance(soak, dict) or not isinstance(soak.get("n_total"), int) or soak["n_total"] < 1:
+        raise UpdateError("--soak-day-file: soak.n_total is not seeded (use --seed-soak N)")
+    days = soak.get("days") if soak.get("days") is not None else []
+    if not isinstance(days, list) or not all(isinstance(d, dict) and _is_calendar_date(d.get("date")) for d in days):
+        raise UpdateError("--soak-day-file: existing soak.days is malformed — repair it with --replace soak")
+    days = [d for d in days if d["date"] != day["date"]] + [day]
+    days.sort(key=lambda d: d["date"])
+    soak["days"] = days
+    soak["consecutive_green"] = green_streak(days, days[-1]["date"])
+    if not soak.get("waived"):
+        soak["state"] = "complete" if soak["consecutive_green"] >= soak["n_total"] else "active"
+    soak["last_checked_at"] = now
+    soak.setdefault("started_at", now)
+    return status
 
 
 def validate_status(st):
@@ -429,6 +477,15 @@ def run(args):
         raise UpdateError("--plan-section and --plan-line go together")
     if not dash.is_dir():
         raise UpdateError(f"{dash} is not a directory — scaffold the dashboard first (dashboard.md)")
+    soak_day = None
+    if args.soak_day_file:
+        if args.soak_day_file == "-" and args.patch_file == "-":
+            raise UpdateError("--soak-day-file - and --patch-file - cannot both read stdin")
+        raw_day = sys.stdin.read() if args.soak_day_file == "-" else Path(args.soak_day_file).read_text(encoding="utf-8")
+        try:
+            soak_day = json.loads(raw_day)
+        except json.JSONDecodeError as e:
+            raise UpdateError(f"--soak-day-file is not valid JSON: {e}")
 
     with _Lock(dash / ".status.lock", args.lock_timeout):
         # 1. read + validate the current state (refuse a corrupt file)
@@ -459,6 +516,8 @@ def run(args):
             for field, default in (("days", []), ("n_total", args.seed_soak), ("consecutive_green", 0),
                                    ("state", "active"), ("started_at", now)):
                 soak.setdefault(field, default)
+        if soak_day is not None:
+            replace_soak_day(updated, soak_day, now)
         updated["updated_at"] = now
         validate_status(updated)
         if not args.keep_progress and isinstance(updated.get("phases"), list):
@@ -548,6 +607,9 @@ def parse_args(argv=None):
     ap.add_argument("--seed-soak", type=int, metavar="N_TOTAL",
                     help="add the minimal soak block (days [], n_total, consecutive_green 0, state active, "
                          "started_at now) — only missing fields are filled")
+    ap.add_argument("--soak-day-file", metavar="FILE",
+                    help="replace one soak.days[] entry (by date) verbatim from this JSON file (or - for "
+                         "stdin) and recompute consecutive_green/state/last_checked_at under the lock")
     ap.add_argument("--keep-progress", action="store_true",
                     help="do not recompute overall_progress_pct from phases[]")
     ap.add_argument("--log-json", help="full activity-log entry as JSON (time/phase defaulted)")

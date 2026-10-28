@@ -328,6 +328,50 @@ class SoakAndCutoverBlockTests(Base):
         self.assertEqual(days, [{"date": "2026-10-06", "overall": "red", "period_evidence": True},
                                 {"date": "2026-10-07", "overall": "green"}])
 
+    def _day(self, date, green, **checks):
+        return {"date": date, "overall": "green" if green else "red", "needs_agent_review": not green,
+                "checks": {"key_count": True, "period_evidence": True if green else None, **checks}}
+
+    def _write_day(self, day):
+        f = self.tmp / "day.json"
+        f.write_text(json.dumps(day))
+        return self.run_du("--soak-day-file", str(f))
+
+    def test_soak_day_replacement_preserves_nulls_and_recomputes_streak(self):
+        self.assertEqual(self._write_day(self._day("2026-10-06", True))[0], 1, "n_total must be seeded first")
+        self.run_du("--seed-soak", "2")
+        rc, _, err = self._write_day(self._day("2026-10-06", False))
+        self.assertEqual(rc, 0, err)
+        soak = self.status()["soak"]
+        self.assertIsNone(soak["days"][0]["checks"]["period_evidence"], "literal null must persist")
+        self.assertEqual((soak["consecutive_green"], soak["state"]), (0, "active"))
+        self._write_day(self._day("2026-10-06", False))          # re-run of the same day
+        soak = self.status()["soak"]
+        self.assertEqual(len(soak["days"]), 1)
+        self.assertIn("period_evidence", soak["days"][0]["checks"])
+        self._write_day(self._day("2026-10-06", True))
+        self._write_day(self._day("2026-10-07", True))
+        soak = self.status()["soak"]
+        self.assertEqual((soak["consecutive_green"], soak["state"]), (2, "complete"))
+        self.assertTrue(soak["last_checked_at"])
+
+    def test_delayed_historical_day_cannot_complete_over_a_red_latest_day(self):
+        self.run_du("--seed-soak", "2")
+        self._write_day(self._day("2026-10-08", False))        # latest day is red
+        self._write_day(self._day("2026-10-06", True))          # delayed older samples arrive later
+        self._write_day(self._day("2026-10-07", True))
+        soak = self.status()["soak"]
+        self.assertEqual((soak["consecutive_green"], soak["state"]), (0, "active"))
+        self.assertEqual([d["date"] for d in soak["days"]], ["2026-10-06", "2026-10-07", "2026-10-08"])
+
+    def test_soak_day_shape_is_validated(self):
+        self.run_du("--seed-soak", "2")
+        for bad in ({"date": "2026-02-30", "checks": {}, "overall": "red", "needs_agent_review": True},
+                    {"date": "2026-10-06", "overall": "red", "needs_agent_review": True},
+                    {"date": "2026-10-06", "checks": {}, "overall": "red", "needs_agent_review": "yes"}):
+            self.assertEqual(self._write_day(bad)[0], 1, bad)
+        self.assertEqual(self.status()["soak"]["days"], [])
+
     def test_malformed_soak_rejected(self):
         for patch in ({"soak": []}, {"soak": {"days": {}}}, {"soak": {"days": [{"overall": "green"}]}},
                       {"soak": {"n_total": 0}}, {"cutover": "done"}):

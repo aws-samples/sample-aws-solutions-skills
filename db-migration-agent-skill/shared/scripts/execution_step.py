@@ -20,7 +20,8 @@ import tempfile
 import time
 import uuid
 
-import dashboard_update as dashboard
+sys.dont_write_bytecode = True  # never write __pycache__ into an installed skill directory
+import dashboard_update as dashboard  # noqa: E402
 
 
 class StepError(Exception):
@@ -162,7 +163,7 @@ def publish(root, attempt, spec, status, detail, patch=None):
     patch_path = attempt / "checkpoint-patch.json"
     write(patch_path, body)
     result = {"done": "success", "blocked": "blocked", "in_progress": "in_progress"}[status]
-    args = [sys.executable, str(Path(dashboard.__file__).resolve()),
+    args = [sys.executable, "-B", str(Path(dashboard.__file__).resolve()),
             "--dashboard", str(local(root, spec["dashboard"])),
             "--plan", str(local(root, spec["plan"])), "--plan-section", spec["plan_section"],
             "--plan-line", f"{marker} {detail}", "--patch-file", str(patch_path),
@@ -454,7 +455,7 @@ def main(argv=None):
         attempt = reserve(root, state_root, args.attempt, load(args.spec))
         with open(attempt / "worker.log", "xb") as log:
             os.chmod(log.name, 0o600)
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_worker",
+            subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_worker",
                               "--attempt-dir", str(attempt)], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                              env=dict(os.environ, MIGRATION_ATTEMPT_DIR=str(attempt)))

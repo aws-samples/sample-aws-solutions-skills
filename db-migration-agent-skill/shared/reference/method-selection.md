@@ -26,7 +26,7 @@ tables, no schema objects — is a reasonable line for "not worth a separate PoC
 
 ### Decision Input — Ask the User
 
-1. **Homogeneous or heterogeneous?** Same engine family (MySQL→MySQL/Aurora MySQL, PostgreSQL→PostgreSQL/Aurora PG, MariaDB→MariaDB, **Oracle→RDS Oracle, SQL Server→RDS SQL Server**) = **homogeneous**, stay in this skill (homogeneous path). Engine family *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL, MySQL→PostgreSQL) = **heterogeneous**, go to [heterogeneous-migration.md](heterogeneous-migration.md) first (schema/code conversion), then return for cutover.
+1. **Homogeneous or heterogeneous?** Same engine family (MySQL→MySQL/Aurora MySQL, PostgreSQL→PostgreSQL/Aurora PG, MariaDB→MariaDB, **Oracle→RDS Oracle, SQL Server→RDS SQL Server**) = **homogeneous**, stay in this skill (homogeneous path). Engine family *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL, MySQL→PostgreSQL) = **heterogeneous**, go to [heterogeneous-migration.md](heterogeneous-migration.md) first (schema/code conversion), then return for cutover. **MySQL ↔ PostgreSQL** (either direction): load [mysql-postgresql.md](mysql-postgresql.md) now and use rows **H1–H5** below; application SQL review is mandatory.
 2. **What is your source?** EC2 MySQL / EC2 MariaDB / EC2 PostgreSQL / EC2/on-prem Oracle / EC2/on-prem SQL Server / RDS MySQL / RDS MariaDB / RDS PostgreSQL / On-premises (self-managed, OS access) / Other cloud, self-managed on a VM (OS access — treat as on-premises) / Other cloud, managed DB product (no OS access — e.g. Azure DB, Cloud SQL, NHN Cloud/Naver Cloud managed MySQL)
 3. **What is your target?** Aurora MySQL / Aurora PostgreSQL / RDS MySQL / RDS MariaDB / RDS PostgreSQL / **RDS Oracle** / **RDS SQL Server**
 4. **Downtime tolerance?** Zero / Seconds / Minutes / Hours (maintenance window) — **and is this database production-serving with live write traffic today, or non-production (dev/test/staging) with no live production traffic?** This second half feeds the parallel-run soak default (`engagement-safety.md` §Engagement parameters) — a low-risk non-production case shouldn't inherit the same default calendar time as a revenue-facing one.
@@ -52,6 +52,12 @@ engagement, load `version-upgrades.md` §"MySQL 8.0 → 8.4 (latest LTS)" and it
 (renamed RDS procedures, per-side replication syntax, no native reverse replication to an
 external 8.0 source — DMS reverse or RPO acceptance, client login proof).
 
+0. **Engine-family gate:** if source and target engine families differ (MySQL-family ↔
+   PostgreSQL-family), disqualify every native method — physical (XtraBackup, snapshot,
+   Read Replica, Blue/Green), dump/restore (`mysqldump`/`pg_dump` files do not load across
+   the family) and native binlog/logical replication. Only **AWS DMS** (full load / full load
+   + CDC) and, for MySQL → PostgreSQL offline, **pgloader** remain: rows H1–H5. Rollback by
+   reverse replication then means a **reverse DMS CDC task** only (gate 2 below).
 1. **Physical-method gate:** if target major > source major, disqualify XtraBackup,
    native backup/restore, snapshot, and transportable tablespaces from this skill's
    one-hop migration selection, even when their size/downtime row matches. Select a
@@ -77,14 +83,26 @@ external 8.0 source — DMS reverse or RPO acceptance, client login proof).
    Update #16d and the plan after the customer's explicit chat reconfirmation; record
    any non-lossless choice through the existing waiver/RPO acknowledgment protocol.
    Then present the revised rollback terms in the full GATE 2 block.
+   **Engine-family change (H-rows):** the only reverse-replication path is a reverse DMS
+   CDC task (PostgreSQL → MySQL or MySQL → PostgreSQL) whose prerequisites must exist
+   before cutover — for a PostgreSQL target `rds.logical_replication=1` (static, set at
+   creation) and a logical slot + LSN captured at the freeze (PostgreSQL sources cannot
+   start CDC from a timestamp); for a MySQL target binlog ROW/FULL + `binlog retention
+   hours` (mysql-postgresql.md §10). It carries DML only (no DDL, no sequences) and only the
+   type fidelity the rollback-side DDL preserves — present that RPO statement, not "RPO 0",
+   unless the reverse task has been rehearsed applying INSERT/UPDATE/DELETE. Full-load-only
+   rows (H1, H2, H4) have no reverse channel unless a reverse task is added: rollback =
+   repoint to the untouched source and lose post-cutover writes (explicit RPO acknowledgment).
 
 ### Method Decision Matrix
 
 > **Homogeneous only.** This matrix is for same-engine-family migrations, including **Oracle → RDS
 > Oracle** (rows 13–15) and **SQL Server → RDS SQL Server** (rows 16–18). If the engine family
-> *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL, or MySQL ↔ PostgreSQL), stop
+> *changes* (Oracle/SQL Server/Tibero/CUBRID → Aurora/PostgreSQL/MySQL), stop
 > and use [heterogeneous-migration.md](heterogeneous-migration.md) — you need
 > schema/code conversion (SCT / DMS Schema Conversion / Babelfish) before any data move.
+> **MySQL ↔ PostgreSQL** uses rows **H1–H5** below the matrix
+> ([mysql-postgresql.md](mysql-postgresql.md)).
 >
 > **Deterministic read order.** Rows are evaluated **top to bottom; take the FIRST row whose
 > Source + Target + Size + Downtime + Bandwidth all match AND the front-gates allow.** Conditions are mutually exclusive
@@ -126,6 +144,27 @@ engine.
 | 16 | EC2/on-prem **SQL Server** | **RDS SQL Server** | Any | Yes (hours) | Yes | **Native backup/restore** (.bak via S3, `rds_restore_database`) | AWS-recommended lift-and-shift; migrates the user DB. Logins/jobs separate (execution-runbooks.md §schema objects). For tiny DBs (< ~5 GB) a scripted schema+`bcp` copy is an acceptable substitute when the S3/option-group setup outweighs it — but .bak is the default: it preserves everything in-DB (permissions, defaults, computed cols) with no per-object scripting risk. |
 | 17 | EC2/on-prem **SQL Server** | **RDS SQL Server** | > 1 TB | Minimal (minutes) | Yes | **Native FULL + DIFFERENTIAL + LOG** (restore WITH NORECOVERY, final log WITH RECOVERY at cutover) | Shrinks cutover to tail-log restore. Source must be FULL recovery model. |
 | 18 | EC2/on-prem **SQL Server** | **RDS SQL Server** | Any | No (zero/near-zero) | Yes | **AWS DMS Full Load + CDC** | Near-zero downtime; DMS moves data only — migrate logins/jobs/perms separately. |
+
+#### Heterogeneous MySQL ↔ PostgreSQL rows (H1–H5)
+
+Evaluated instead of rows 1–18 when the engine-family gate (0) fires; same top-to-bottom,
+first-match rule. Schema conversion and app SQL review come first
+([mysql-postgresql.md](mysql-postgresql.md) §1–§4, §8); DMS loads into the pre-created
+schema (`TargetTablePrepMode` `DO_NOTHING`/`TRUNCATE_BEFORE_LOAD`, never `DROP_AND_CREATE`).
+
+| # | Source | Target | Size | Downtime tolerance | Bulk transfer fits window? | **Recommended Method** | Rollback implication |
+|---|--------|--------|------|--------------------|----------------------------|------------------------|----------------------|
+| H1 | EC2/on-prem/RDS/other-cloud MySQL (pgloader v3.6.9 source build can reach it; load login on the server's default auth plugin) | Aurora PostgreSQL / RDS PostgreSQL | Small (whole load fits the frozen window, measured in a rehearsal) | Yes (hours, source frozen for the load) | Yes | **pgloader one-shot** with explicit CAST rules (§11) — or DMS full load if pgloader can't authenticate/reach | No CDC: rollback = repoint to the untouched source; post-cutover PG writes lost unless a reverse DMS task (§10.1) is added — RPO acknowledgment |
+| H2 | Any MySQL-family | Aurora PostgreSQL / RDS PostgreSQL | Any | Yes (hours) | Yes | **DMS Full Load** into the pre-created schema | Same as H1 |
+| H3 | Any MySQL-family (`log_bin=ON`, ROW/FULL — Binlog State Gate) | Aurora PostgreSQL / RDS PostgreSQL | Any | No (minutes / near-zero) | per estimate | **DMS Full Load + CDC** | Reverse DMS PostgreSQL → MySQL CDC-only from a slot LSN captured at the freeze; `rds.logical_replication=1` set at target creation |
+| H4 | Any PostgreSQL-family | Aurora MySQL / RDS MySQL | Any | Yes (hours) | Yes | **DMS Full Load** (no pgloader equivalent; MySQL Workbench Migration Wizard only for small offline copies) | Same as H1 (reverse = MySQL → PostgreSQL, §10.2) |
+| H5 | Any PostgreSQL-family (`wal_level=logical`, slot capacity) | Aurora MySQL / RDS MySQL | Any | No (minutes / near-zero) | per estimate | **DMS Full Load + CDC** | Reverse DMS MySQL → PostgreSQL CDC-only from the binlog position at the freeze; `binlog retention hours` ≥ 24 on the new MySQL |
+
+Bandwidth-bound (> 1 TB over a thin link): there is no file-seed path across the family
+(row 8's DataSync seed restores native files) — DMS must carry the bulk; size the
+replication instance (C-family for conversion CPU, `dms-best-practices.md`) and use
+parallel full-load segmentation, or treat it as a bandwidth blocker. MySQL 8.4 / PostgreSQL
+17–18 endpoints need DMS 3.5.4+.
 
 **Notes on overlap resolution:**
 - Rows 13–15 (Oracle): prefer **Data Pump** (row 13) for the common downtime-OK case; **XTTS** (row 14) only when EE + very large + no encrypted tablespaces + source ≥ 12c; **DMS/GoldenGate CDC** (row 15) when downtime must be near-zero. RMAN whole-DB physical restore is **NOT** supported into managed RDS Oracle (EC2/RDS Custom only).
@@ -207,3 +246,15 @@ When consolidating or moving more than one database:
 **Cross-Account**: Source and target in different AWS accounts. DMS endpoints use cross-account VPC peering plus IAM roles for access. KMS key policy must grant the target account access for encrypted snapshots. Snapshot sharing requires explicit account grant via modify-db-snapshot-attribute.
 
 **>10 TB or Low Bandwidth (on-prem)**: If estimated transfer time exceeds 7 days, use AWS DataSync for the baseline data instead of a raw dump/copy. Critical: capture the binlog position or PostgreSQL LSN at the exact point of data export, so CDC replication can catch up from that exact position once the DataSync-seeded restore lands in Aurora. If DataSync's own transfer time still exceeds the required window, that is a hard bandwidth blocker, not a method choice — physical device transfer requires logistics coordination outside what this skill or any coding agent can execute; present the real options (more bandwidth, a longer window, or the customer arranging an offline transfer separately through their own AWS account team) rather than picking a method that can't finish in time — see `source-assessment.md` §Low-Bandwidth Branch.
+
+### Cache sources → ElastiCache (separate decision table)
+
+Redis OSS / Valkey / Redis CE / Memcached sources (and ElastiCache Redis OSS → Valkey) do
+**not** use the SQL matrix above, the binlog gate, or DMS — Redis/Valkey is not a DMS
+source. Walk [elasticache-migration.md](elasticache-migration.md) §5 instead: its front
+gates (Redis CE 7.4+/8 RDB incompatibility, pure-cache vs primary-datastore, rollback,
+source-change authorizations) and rows C1 (in-place engine change), M1 (Memcached warm-up),
+C6 (cold start), C2 (Serverless Valkey online migration), C3 (node-based online migration),
+C4 (RedisShake), C5 (RDB → S3 seed), C7 (dual-write overlay), top-down, first match.
+ElastiCache cannot replicate out, so the rollback-direction gate above always resolves to
+§11 of that file (repoint + accepted RPO, or dual-write).

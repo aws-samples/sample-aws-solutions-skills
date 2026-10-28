@@ -8,11 +8,16 @@ description: |
   replication, DMS Full Load + CDC, Read Replica, Blue/Green, Data Pump, native
   backup/restore), target provisioning via CDK, execution, validation, application client
   discovery and repointing (Secrets Manager, DNS, config), cutover with reverse-replication
-  rollback, and decommission. Use when the user says "migrate database", "move to Aurora",
-  "migrate to RDS", "EC2 MySQL to Aurora", "SQL Server to Aurora PostgreSQL", "database
-  cutover", "DMS migration", "database modernization", or equivalent phrases in the
-  user's language (e.g. Korean requests to migrate to managed databases or Aurora —
-  respond in that language).
+  rollback, and decommission. Also self-managed Redis OSS / Valkey / Memcached to Amazon
+  ElastiCache (Valkey, Redis OSS, Memcached; node-based or Serverless) and ElastiCache
+  Redis OSS → Valkey. Use when the user says "migrate database", "move to Aurora",
+  "migrate to RDS", "EC2 MySQL to Aurora", "SQL Server to Aurora PostgreSQL", "MySQL to
+  PostgreSQL", "PostgreSQL to MySQL", "database cutover", "DMS migration", "database
+  modernization", "migrate Redis to ElastiCache", "move to Valkey", "Memcached to
+  ElastiCache", or equivalent phrases in the user's language (e.g. Korean requests to
+  migrate to managed databases, Aurora, ElastiCache or Valkey — "Redis를 ElastiCache로
+  이전", "MySQL에서 PostgreSQL로 전환", "PostgreSQL을 MySQL로 마이그레이션" — respond in that
+  language).
 license: MIT
 metadata:
   version: "2.0"
@@ -29,10 +34,12 @@ application client, cut over with a rehearsed runbook and a working rollback, an
 the customer a CDK project plus a complete written record. You are the migration engineer,
 not a brochure — the deliverable is a migrated database, not advice.
 
-**Scope: the target is a managed database — Amazon Aurora or Amazon RDS.** Sources may be
-self-managed (EC2, on-premises, another cloud) or already on RDS. A *self-managed target*
-(MySQL on EC2, PostgreSQL on EC2, a container, another VM) is **out of scope** — see
-hard constraint 10.
+**Scope: the target is a managed database — Amazon Aurora or Amazon RDS — or a managed
+cache/in-memory store — Amazon ElastiCache.** Sources may be self-managed (EC2,
+on-premises, another cloud) or already on RDS/ElastiCache. A *self-managed target*
+(MySQL on EC2, PostgreSQL on EC2, Redis on EC2, a container, another VM) is **out of
+scope** — see hard constraint 10. Cache engagements run the same phases, gates and
+safety model with the content in `shared/reference/elasticache-migration.md`.
 
 > **Language**: respond in the user's language (Korean → Korean). Code, CLI, CDK, SQL,
 > and resource names stay in English.
@@ -131,8 +138,10 @@ hard constraint 10.
    never a name, never left only in chat scrollback. The customer never edits this file;
    the agent fills in the date once the approver's own clear, specific reply to that exact
    block lands in chat.
-10. **Never build a self-managed target.** If the requested target is not Aurora/RDS (e.g.
-    "on-prem MySQL → MySQL on EC2"), stop at Phase 0 and say so plainly. Then: (a) name what
+10. **Never build a self-managed target.** If the requested target is not Aurora/RDS/
+    ElastiCache (e.g. "on-prem MySQL → MySQL on EC2", "Redis → Redis on EC2"), stop at
+    Phase 0 and say so plainly. **Amazon MemoryDB is also out of scope** (no MemoryDB content
+    here; `elasticache-migration.md` §1 says what still transfers). Then: (a) name what
     this skill *can* still contribute — source assessment and sizing, client discovery,
     validation battery, cutover/rollback mechanics, the gates and audit record; (b) name what
     it does **not** have — instance/EBS sizing, engine install and tuning, backup/PITR design,
@@ -299,7 +308,7 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 | `shared/reference/source-assessment.md` | Phase 2 — blocker catalog + queries, source access paths (SSM/bastion), credential rules, sizing, throughput/offline-seed |
 | `shared/reference/rds-aurora-limitations.md` | Phase 2 — full per-limitation detail behind the blocker tables |
 | `shared/reference/method-readiness.md` | After method selection; Phases 6–8 — offline vs CDC evidence, static-copy freshness, lab reuse bounds |
-| `shared/reference/method-selection.md` | Phase 3 — the 19-row decision matrix, binlog gate, multi-DB/cross-region/cross-account edges |
+| `shared/reference/method-selection.md` | Phase 3 — the 19-row decision matrix + H1–H5 MySQL ↔ PostgreSQL rows, binlog gate, multi-DB/cross-region/cross-account edges |
 | `shared/reference/heterogeneous-migration.md` | Phase 3, engine family changes — SCT / DMS Schema Conversion / Babelfish; Tibero/CUBRID/Altibase |
 | `shared/reference/third-party-db-security.md` + `regulatory-compliance.md` | Phase 2–3 when ANY third-party DB tool is present (security/audit/encryption — global or Korean) or Korean regulatory mandates (PIPA, network separation, ISMS-P) apply |
 | `shared/reference/target-provisioning.md` | Phase 4 — Aurora vs RDS, settings immutable at creation, option groups, RDS Proxy, TLS gate |
@@ -310,9 +319,11 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 | `shared/reference/aws-official-migration-methods.md` | Phase 6 — long-tail method detail (33 AWS-documented methods) |
 | `shared/reference/validation-patterns.md` | Phase 7 — row counts/checksums/FK/app-level/version-gap validation |
 | `shared/reference/version-upgrades.md` | Phase 2–3 as soon as source and target major versions differ (e.g. MySQL 8.0 → 8.4: §"MySQL 8.0 → 8.4"); again at Phases 6–8 |
+| `shared/reference/elasticache-migration.md` | Phase 1–2 as soon as the source is Redis OSS / Valkey / Memcached (§2 discovery deltas, §3–4 assessment + blockers); Phase 3 (§5 matrix); again at Phases 6–8 (§7–11) |
+| `shared/reference/mysql-postgresql.md` | Phase 2–3 as soon as source and target engine families differ between MySQL and PostgreSQL (§MySQL → PostgreSQL / §PostgreSQL → MySQL); again at Phases 6–8 |
 | `shared/reference/customer-test-integration.md` | Phase 6.5/7.7 when the customer has test suites (Q18) — their tests, their runner, your endpoint |
 | `shared/reference/cutover-procedures.md` | Phases 7.5–8 — client discovery, freeze, write-pause minimization, reverse replication, rollback |
-| `shared/templates/{migration-plan,authorizations,discovery-questions,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
+| `shared/templates/{migration-plan,authorizations,discovery-questions,discovery-questions-cache,cutover-runbook,rollback-runbook,soak-report}.md` | Phase 0 / 1 / 7.7 / 8 — instantiate with real values |
 | `shared/reference/dashboard.md` | Phase 0 to scaffold; every plan update, including active-work checkpoints under hard constraint 1 (Phase 7.7 soak remains daily) |
 | `shared/reference/post-migration.md` | Phase 9 |
 | `shared/reference/handoff-packaging.md` | Mode 2 handover and final delivery — reviewed file allowlist, snapshot hashes, included/external/omitted evidence |
@@ -336,8 +347,9 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
 2. **Install integrity — before using any `shared/` file:** in the directory this SKILL.md was
    loaded from, test that `shared/reference/version-upgrades.md`, `shared/templates/migration-plan.md`,
    `shared/assets/dashboard.js`, `shared/scripts/soak_check.py`,
-   `shared/scripts/dashboard_update.py`, `shared/scripts/execution_step.py` and
-   `shared/scripts/handoff_bundle.py` exist (`test -r`, don't read them).
+   `shared/scripts/dashboard_update.py`, `shared/scripts/execution_step.py`,
+   `shared/scripts/handoff_bundle.py`, `shared/scripts/cross_engine_compare.py` and
+   `shared/scripts/cache_compare.py` exist (`test -r`, don't read them).
    Any missing → STOP: the install is incomplete; show the README `install_skill` command. Never
    substitute web search for a missing reference file.
    **Before creating or updating any engagement record**, check for an existing plan,
@@ -414,6 +426,10 @@ else.
   group/security groups/KMS key already exist for this instance to reuse, or is fresh
   networking being provisioned (`target-provisioning.md` §Network Placement)?
 
+**Cache source in #1 (Redis OSS / Valkey / Redis CE / Memcached)?** Load
+`shared/reference/elasticache-migration.md` now and use the cache template
+`shared/templates/discovery-questions-cache.md` (same #3–18 numbering) as the source — the
+generated file is still named `discovery-questions.md`, so everything below applies unchanged.
 **Once #1/#2 land, generate `discovery-questions.md`** from the template
 (`shared/templates/discovery-questions.md`) for items **#3–18**, tailored to the branch
 #1/#2 selected (e.g. drop OS-access-dependent sub-questions for a managed-DB source). Tell
@@ -464,15 +480,24 @@ Any blocker → present resolution options, get approval, verify the fix before 
 `shared/reference/version-upgrades.md` now (§"MySQL 8.0 → 8.4": auth plugin, dump with a
 source-major `mysqldump` but connect with a caching_sha2+TLS-capable client, renamed
 replication commands/RDS procedures, replication direction).
+**Cache source?** Run `elasticache-migration.md` §3 (read-only INFO/CONFIG GET by name,
+`--bigkeys`, `CLIENT LIST`, memcached `stats`) and its §4 blocker catalog instead of the SQL queries.
+**Engine family changes between MySQL and PostgreSQL (either direction)?** Load
+`shared/reference/mysql-postgresql.md` now and run its read-only §2/§3 assessment queries;
+**application SQL review is mandatory** for this pair (§8 → `app-remediation-findings.md`).
 
 ### Phase 3: Select the method
 
 Per `shared/reference/method-selection.md`: apply the **version and rollback front-gates**
 before walking the matrix top-down to the first eligible matching row (MySQL 8.0 → 8.4:
 native 8.4 → 8.0 reverse replication is unsupported upstream; AWS documents it only RDS-to-RDS
-for Blue/Green rollback — `shared/reference/version-upgrades.md` §"MySQL 8.0 → 8.4"); apply the
+for Blue/Green rollback — `shared/reference/version-upgrades.md` §"MySQL 8.0 → 8.4"; MySQL ↔
+PostgreSQL: the engine-family gate leaves only DMS / pgloader rows H1–H5, and reverse rollback
+means a reverse DMS task — `mysql-postgresql.md` §10); apply the
 **binlog state gate** ("zero-downtime" with `log_bin=OFF` is
-a contradiction — surface it). Heterogeneous → hand schema conversion to the official
+a contradiction — surface it). **Cache source:** walk `elasticache-migration.md` §5 (its own
+front gates and C/M rows; ElastiCache can't replicate out — rollback per §11) instead of the
+SQL matrix. Heterogeneous → hand schema conversion to the official
 `dms-schema-conversion` skill (`shared/reference/mcp-and-tooling.md` §Chaining), then
 return here for data movement. Prepare the **cost estimate**
 (`shared/reference/preflight-iam-cost.md` §3). Map the selected method to
@@ -510,6 +535,7 @@ creating anything, then generate and deploy the CDK project per
 `shared/patterns/cdk-stacks.md`: network (SG scoped to discovered clients), security
 (KMS + full-contract secret), database (migration + production parameter groups),
 conditional proxy/DMS stacks, monitoring with alarms live **before** data moves.
+Cache target: `elasticache-migration.md` §6 + `cdk-stacks.md` §cache-stack.ts instead.
 `cdk synth` must pass, then the SG-description charset check (`cdk-stacks.md` §scripts/
 contract — ASCII only, even in a Korean session; synth doesn't catch it); verify volatile facts via MCP.
 Alarms (`preflight-iam-cost.md` §4a): all must EXIST before data moves (already-emitting ones
@@ -526,7 +552,8 @@ production: **rehearse first** against a clone (§Rehearsal) and record measured
 in §Migration Rehearsal (freeze→final-copy/drain→repoint→verify with a measured pause,
 rollback actually exercised). Skipped work is waived, never recorded as performed;
 the aggregate readiness check may be resolved by an accepted waiver only after its
-remaining conditions pass (`method-readiness.md`).
+remaining conditions pass (`method-readiness.md`). Cache method runbooks, supervision and
+the cache rehearsal minimum: `elasticache-migration.md` §7.
 
 ### Phase 7: Validate
 
@@ -540,8 +567,12 @@ Per `shared/reference/validation-patterns.md`: row counts (all tables), checksum
 timezone shift, auto-increment high-water marks, aggregate fidelity), read-only smoke
 test, and **application accounts + effective grants + authentication through the intended
 endpoint** (§2.6, mandatory before GATE 3). Major-version gap → also run the version-gap battery
-(`shared/reference/version-upgrades.md`). Paste evidence into the plan. Before GATE 3, list
+(`shared/reference/version-upgrades.md`). MySQL ↔ PostgreSQL: engine checksums never match
+across the pair — use `shared/scripts/cross_engine_compare.py` + DMS validation
+(`mysql-postgresql.md` §9). Paste evidence into the plan. Before GATE 3, list
 current CloudWatch alarm states (§2.7); any alarm in ALARM is resolved or explained first.
+Cache target: `elasticache-migration.md` §8 — `shared/scripts/cache_compare.py` (key counts,
+sampled TYPE/TTL/value, four-state verdict) plus per-user TLS/auth/cluster-client proof.
 
 ⛔ **GATE 3** — present the validation evidence table and stop with a standalone ACTION
 NEEDED block; say what each check actually proves and what it does NOT prove (see
@@ -575,6 +606,8 @@ access. The agent may inspect permitted control-plane metadata and reconcile it 
 DB processlist; IaC/UserData is a lead, not proof of live config. Do not bypass the
 application-host SSM Deny via SSH or another executor. Customer-applied pool/ORM prep
 must also be reported; missing host evidence keeps the inventory gate blocked.
+Cache source: `CLIENT LIST` on every node over a business cycle, NAT/proxy pitfalls and
+endpoint types — `elasticache-migration.md` §10.
 If new accounts appear here, run Phase 7 §2.6 for them and re-present affected GATE 3
 evidence before readiness.
 
@@ -604,8 +637,9 @@ that reply lands. Shortening or skipping is a waiver
 concurrently with this soak, not after it** — they test different things and don't depend
 on each other; don't serialize two independent waits. **Phase 7.7 entry is an
 explicit chat choice — A: soak Lambda stack (recommended) / B: manual `soak_check.py` runs
-(who/when, UTC), both same-engine-family only; C: manual reconciliation for heterogeneous
-pairs (who/when/evidence) — recorded in the plan; never call sampling automatic unless a deployed,
+(who/when, UTC), both same-engine-family or MySQL ↔ PostgreSQL (cross-family mode); C: manual
+reconciliation for other heterogeneous pairs (who/when/evidence); D: daily `cache_compare.py
+--record soak` for caches (`elasticache-migration.md` §9) — recorded in the plan; never call sampling automatic unless a deployed,
 enabled schedule exists; state the UTC verdict timetable and what wakes the session for each
 verdict — a session cannot self-wake, so never claim a scheduled check-in without a real scheduler** (`engagement-safety.md` §Phase 7.7 entry). Never promise "I'll notify you if
 anything goes wrong" without a confirmed delivery path — name it, or say there is none and
@@ -619,8 +653,11 @@ enable the schedule (`shared/patterns/cdk-stacks.md` §soak-stack.ts) — never 
 Both modes first instantiate `shared/templates/cutover-runbook.md` and
 `rollback-runbook.md` with real values (zero placeholders), with the reverse-replication
 task created and connection-tested and every row of `cutover-procedures.md` §Reverse-CDC
-prerequisites evidenced (a GATE 4 / A4b precondition) — or the alternative rollback strategy
-signed (RPO acknowledgment in the plan).
+prerequisites evidenced (a GATE 4 / A4b precondition; MySQL ↔ PostgreSQL: `mysql-postgresql.md`
+§10 — PG side `rds.logical_replication=1` set at creation, slot + LSN captured at the freeze) —
+or the alternative rollback strategy signed (RPO acknowledgment in the plan). Cache
+cutover/rollback (no reverse replication out of ElastiCache; stale-cache caveat):
+`elasticache-migration.md` §11.
 
 **Mode 2 (default) — hand over, do not execute.** Assemble the handover package
 (engagement-safety.md §Mode 2 handover contract): runbook with timings marked *measured*
@@ -655,8 +692,8 @@ Per `shared/reference/post-migration.md`: refresh statistics, verify production 
 (already applied before Phase 7), scale down, compare against the Phase 2 baseline (required
 table, post-migration.md step 2; IaC drift reconciled, step 11), keep the source +
 reverse replication through the rollback window, then decommission (with constraint 8's
-confirmation). Hand over the CDK project + plan as the customer's operational record. In
-Mode 2 this phase starts **after the customer reports their cutover complete** — offer it
+confirmation); caches: `elasticache-migration.md` §11.4. Hand over the CDK project + plan
+as the customer's operational record. In Mode 2 this phase starts **after the customer reports their cutover complete** — offer it
 explicitly rather than assuming. Verify the final reviewed handoff snapshot per
 `shared/reference/handoff-packaging.md`; keep later save/acceptance receipts separate
 from the frozen archive. A hash manifest proves the selected files, not complete coverage

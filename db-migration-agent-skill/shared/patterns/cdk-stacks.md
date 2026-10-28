@@ -18,6 +18,7 @@
 │       ├── database-stack.ts      ← Aurora/RDS cluster + BOTH parameter groups
 │       ├── proxy-stack.ts         ← RDS Proxy (conditional: minimal-downtime plans)
 │       ├── migration-stack.ts     ← DMS instance/endpoints/tasks (conditional: DMS paths)
+│       ├── cache-stack.ts         ← ElastiCache target (cache engagements, §cache-stack.ts — replaces database/proxy/migration)
 │       └── monitoring-stack.ts    ← Alarms + dashboard + SNS
 ├── scripts/{01-precondition-check,02-deploy,03-execute-migration,
 │           04-validate,05-cutover,06-rollback}.sh
@@ -252,6 +253,52 @@ approval, never default to `none`. Use Secrets Manager references,
 never plaintext passwords in constants or synthesized templates. Test both endpoints post-deploy in
 `scripts/01-precondition-check.sh` via `aws dms test-connection`.
 
+### Heterogeneous targets (MySQL ↔ PostgreSQL) — creation-time settings and endpoints
+
+Details and reasoning: [../reference/mysql-postgresql.md](../reference/mysql-postgresql.md)
+§1.1, §5, §6, §10. Three things must be right **at creation**:
+
+```typescript
+// (1) MySQL -> PostgreSQL: the PG target must be able to SOURCE the reverse (rollback) task.
+//     rds.logical_replication is STATIC (reboot) — put it in the parameter groups now, not
+//     at cutover. Aurora: DB *cluster* parameter group (database-stack's migration/production
+//     pair); RDS for PostgreSQL: DB parameter group (bindToInstance).
+const pgReverseReady = { 'rds.logical_replication': '1' };   // spread into BOTH groups' parameters
+
+// (2) PostgreSQL -> MySQL with SCT/DMS SC conversion: lower_case_table_names=1 is fixed at
+//     Aurora MySQL 3 cluster creation (RDS MySQL 8.0/8.4: can't be modified once associated) —
+//     constants.LOWER_CASE_TABLE_NAMES, confirmed at GATE 2, in the group the cluster is CREATED with.
+const mysqlCaseParams = { lower_case_table_names: constants.LOWER_CASE_TABLE_NAMES };  // '1' or '0'
+
+// (3) Endpoints. PG as a DMS source (forward PG->MySQL, or the reverse task of MySQL->PG):
+const pgSourceEp = new dms.CfnEndpoint(this, 'PgSourceEp', { endpointType: 'source',
+  engineName: 'aurora-postgresql',            // or 'postgres'
+  serverName: constants.PG_HOST, port: 5432, databaseName: constants.PG_DB_NAME,
+  sslMode: 'verify-full', certificateArn: targetCa.ref,
+  postgreSqlSettings: {
+    secretsManagerAccessRoleArn: constants.DMS_SECRET_ACCESS_ROLE_ARN,
+    secretsManagerSecretId: constants.PG_DMS_SECRET_ARN,
+    pluginName: 'test-decoding',               // DMS API enum (no-preference/test-decoding/pglogical); SQL slots use test_decoding
+    heartbeatEnable: true, heartbeatFrequency: 5,   // keeps restart_lsn moving on idle slots
+    captureDdls: false,                        // DDL frozen during migration; no DMS artefacts on the source
+    // slotName: 'dms_rollback',               // REVERSE task only: the slot created at the freeze (LSN start)
+  } });
+// MySQL as a DMS target from PostgreSQL (forward PG->MySQL, or the reverse task of MySQL->PG):
+const mysqlTargetEp = new dms.CfnEndpoint(this, 'MySqlTargetEp', { endpointType: 'target',
+  engineName: 'aurora',                        // or 'mysql'
+  serverName: constants.MYSQL_HOST, port: 3306,
+  sslMode: 'verify-full', certificateArn: targetCa.ref,   // Aurora MySQL 8.4 rejects 'none'
+  mySqlSettings: {
+    secretsManagerAccessRoleArn: constants.DMS_SECRET_ACCESS_ROLE_ARN,
+    secretsManagerSecretId: constants.MYSQL_DMS_SECRET_ARN,
+    afterConnectScript: 'SET FOREIGN_KEY_CHECKS=0',   // full load into the pre-created schema
+  } });
+```
+
+Tasks for this pair use `TargetTablePrepMode: DO_NOTHING` (pre-created schema), never
+`DROP_AND_CREATE`; the reverse task is `migrationType: 'cdc'`, created stopped, with
+`cdcStartPosition` supplied at cutover (an LSN for a PostgreSQL source).
+
 ## proxy-stack.ts (conditional) / monitoring-stack.ts
 
 Proxy: `rds.DatabaseProxy` with `requireTLS: true`, the app SGs allowed in — output the
@@ -328,6 +375,7 @@ this function. Two options per side:
 ```bash
 mkdir -p lambda/soak-check
 cp <skill>/shared/scripts/soak_check_lambda.py lambda/soak-check/
+cp <skill>/shared/scripts/cross_engine_compare.py lambda/soak-check/   # MySQL <-> PostgreSQL pairs
 cp <skill>/shared/scripts/requirements.txt     lambda/soak-check/
 # Tier-1 TLS default trust anchor — mandatory, not optional pinning: the platform
 # trust store does NOT contain the current Amazon RDS root CA (confirmed live).
@@ -428,6 +476,9 @@ export interface SoakStackProps extends StackProps {
    *  pkMargin default 10000 keys; timestampColumns {table: column} bound those tables by
    *  `column <= source NOW() - ageMinutes` (default 15) instead of the PK. */
   watermark?: { enabled?: boolean; pkMargin?: number; timestampColumns?: Record<string, string>; ageMinutes?: number };
+  /** MySQL <-> PostgreSQL pairs only: cross_engine_compare.py options (DEFAULT_OPTIONS), e.g.
+   *  { naive_timezone: '+09:00', tables: { 'shop.orders': { target: 'shop.orders' } } }. */
+  crossEngine?: Record<string, unknown>;
 }
 
 // Same normalization as soak_check_lambda.py's _engine_family() — keep in sync.
@@ -443,10 +494,12 @@ export class SoakStack extends Stack {
     super(scope, id, props);
     const { prefix, source, target, dms = {} } = props;
 
-    // Fail at synth, not at the first scheduled invocation.
-    if (engineFamily(source.engine) !== engineFamily(target.engine)) {
-      throw new Error(`SoakStack: ${source.engine} and ${target.engine} normalize to different SQL ` +
-        'families — heterogeneous soak-checking is not supported (execution-runbooks.md §Soak automation).');
+    // Fail at synth, not at the first scheduled invocation. engineFamily() already rejects any
+    // engine outside MySQL/PostgreSQL; a MySQL <-> PostgreSQL pair runs the cross-family path,
+    // which needs cross_engine_compare.py in the asset (cp step above).
+    const crossFamily = engineFamily(source.engine) !== engineFamily(target.engine);
+    if (!crossFamily && props.crossEngine) {
+      throw new Error('SoakStack: crossEngine options apply only to a MySQL <-> PostgreSQL pair.');
     }
     if (!props.env?.region || !props.env?.account) {
       throw new Error('SoakStack: pass env: { account, region } explicitly — the region is baked into ' +
@@ -549,6 +602,7 @@ export class SoakStack extends Stack {
         WATERMARK_PK_MARGIN: props.watermark?.pkMargin !== undefined ? `${props.watermark.pkMargin}` : '',
         WATERMARK_TIMESTAMP_COLUMNS: props.watermark?.timestampColumns ? JSON.stringify(props.watermark.timestampColumns) : '',
         WATERMARK_AGE_MINUTES: props.watermark?.ageMinutes !== undefined ? `${props.watermark.ageMinutes}` : '',
+        CROSS_ENGINE_OPTIONS: props.crossEngine ? JSON.stringify(props.crossEngine) : '',
         DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
       },
     });
@@ -846,6 +900,377 @@ window, a missed run is invisible unless something else is watching, and the das
 files end up on the bastion's local disk instead of a durable, shareable location. See
 execution-runbooks.md §Soak automation for the one-line cron form if this is the deliberate
 choice for a short, low-stakes engagement.
+
+## cache-stack.ts (conditional — ElastiCache targets for cache engagements)
+
+Generated instead of database/proxy/migration stacks when the source is Redis OSS, Valkey
+or Memcached ([../reference/elasticache-migration.md](../reference/elasticache-migration.md)
+§5–§7). network/security/monitoring conventions are unchanged: imported VPC, the
+security-stack CMK, one SNS topic, ASCII SG descriptions, alarms live before data moves.
+This file is self-contained and was synthesized with aws-cdk-lib 2.275.0 (CLI 2.1146.1) for
+six shapes — node-based CME online-migration target (C3), CMD TLS (`preferred`) + RBAC
+seeded from S3, CME seeded from three per-shard RDBs with `nodeGroups`, Serverless Valkey
+C2 target with RBAC and source egress, Serverless Memcached, node-based Memcached — and
+passes the §scripts/ SG-description check; invalid combinations (C2/C3 without
+`sourceCidr`, C3 with TLS, C2 on Memcached, CME seed without `nodeGroups`, REDIS-engine
+group without `default`) throw at synth.
+
+Decisions it encodes (each from the reference's verified facts):
+
+- **TLS vs node-based online migration (the facts-file conflict).** CloudFormation says
+  `TransitEncryptionEnabled` "is required when creating a new valkey replication group",
+  while node-based online migration (C3) requires a target **without** in-transit
+  encryption. The stack therefore always sets the property **explicitly** — `false` only
+  for a C3 target (`onlineMigration: 'node-based'` enforces it). Whether CloudFormation accepts an
+  explicit `false` for a *new Valkey* group is **UNVERIFIED**: prove it with the first
+  deploy of the rehearsal target; if rejected, C3 is unavailable for Valkey — fall back to a
+  Redis OSS ≥ 5.0.5/5.0.6 target (then C1 in place), or C4/C5. After `complete-migration`,
+  enable TLS without replacement as **cutover steps** (elasticache-migration.md §7.1
+  C3-T1…T4): `transitEncryption: true, transitEncryptionMode: 'preferred'` (both "No
+  interruption"), move and prove clients, then `transitEncryptionMode: 'required'`, then
+  `rbacUsers`; set `onlineMigration` unset in the same change as T1.
+- **C2 vs C3 are separate settings.** `onlineMigration: 'serverless'` (C2) and `'node-based'`
+  (C3) both require `sourceCidr`. For C2, `prepare-migration` creates its own ENIs and
+  security group in the target VPC, so the **source** security group must allow inbound
+  from the target subnets; the egress rule here is harmless for C2 and required for C3.
+- **Ports follow the engine**: Memcached (node-based or Serverless) 11211, no READONLY
+  6380 reader port or reader output; Valkey/Redis 6379 (+6380 on Serverless).
+  Serverless `MajorEngineVersion` is `"8"`-style for Valkey and `"1.6"` for Memcached.
+- **RBAC, not AUTH token.** `UserGroupIds` changes are "No interruption"; **adding**
+  `AuthToken` later is a **replacement**. Passwords are generated into Secrets Manager
+  (CMK) and passed as `{{resolve:secretsmanager:…}}` dynamic references — never literals
+  in the template, never in argv. VALKEY-engine groups need no `default` user; a `redis`
+  engine group must contain one (the stack refuses to synth without it).
+- **Replacement-only settings decided at GATE 2:** `AtRestEncryptionEnabled`, `KmsKeyId`,
+  `SnapshotArns`, `CacheSubnetGroupName`, `Port`, `NetworkType`, `DataTieringEnabled`;
+  Serverless `SubnetIds`, `KmsKeyId`, `SnapshotArnsToRestore`, `ConnectionType`.
+  `MajorEngineVersion` is an integer string (`"8"`, not `"8.1"`).
+- **Parameter group family** from the verified list (`valkey7`/`valkey8`/`valkey9`/`redis7`/
+  `memcached1.6`); carry the source's `maxmemory-policy` (ElastiCache default is
+  `volatile-lru`), `notify-keyspace-events`, `databases`; CME sets `cluster-enabled: yes`.
+- **Metric dimensions:** node-based `CacheClusterId` = the member cluster id
+  (`<rg>-<shard 4 digits>-<node 3 digits>` for CME, `<rg>-<node 3 digits>` for CMD —
+  confirm with `describe-replication-groups --query 'ReplicationGroups[0].MemberClusters'`
+  and prove datapoints per `preflight-iam-cost.md` §4a); Serverless **`clusterId`** = the
+  cache name; Memcached `CacheClusterId` = the cluster id. Metric names are exact
+  (`CurrItems`, `MasterLinkHealthStatus`, `DatabaseMemoryUsagePercentage`,
+  `EngineCPUUtilization`, `ThrottledCmds`, `BytesUsedForCache`).
+- **CME seed needs the shard layout at creation.** `NodeGroupConfiguration` (and
+  `SnapshotArns`) are replacement-only, so a CME target seeded from S3 must carry
+  `nodeGroups` (per-shard `slots`, `replicaCount`; `evenSlots(n, r)` splits 16384 evenly)
+  in its **first** deploy — the stack refuses a CME seed without it. List one RDB per source
+  shard; `NumNodeGroups` follows `nodeGroups.length` and `ReplicasPerNodeGroup` is omitted
+  (combining it with `NodeGroupConfiguration` forces replacement).
+- **S3 seed (C5)** lives in `CacheSeedStack`, deployed and filled **before** the cache stack
+  (an RDB must exist when `SnapshotArns` is created): same Region, region-scoped principal
+  `<region>.elasticache-snapshot.amazonaws.com` with `s3:GetObject`/`s3:ListBucket`/
+  `s3:GetBucketAcl`; SSE-S3 (SSE-KMS needs a key grant and **Bucket Keys off**); 30-day
+  expiry. Opt-in Regions: the documented policy also lists `s3:PutObject`/multipart actions
+  — check the seeding doc for that Region.
+- **RETAIN** on the replication group/serverless cache: it holds production data once
+  replication or dual-write starts. Destroying it is a constraint-8 action.
+
+```typescript
+import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as elasticache from 'aws-cdk-lib/aws-elasticache';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import { Construct } from 'constructs';
+
+// Every value comes from lib/config/constants.ts (CACHE block) and is confirmed at GATE 2.
+// Per-shard layout for CME. REQUIRED (at first deploy — replacement-only) when seeding a CME
+// replication group from S3 RDB files (C5); slots like '0-5460'. evenSlots() splits 16384 evenly.
+export interface CacheNodeGroup {
+  readonly nodeGroupId: string;              // '0001', '0002', ... (also names the member clusters)
+  readonly slots: string;
+  readonly replicaCount: number;
+  readonly primaryAvailabilityZone?: string;
+  readonly replicaAvailabilityZones?: string[];
+}
+
+export function evenSlots(shards: number, replicaCount: number): CacheNodeGroup[] {
+  return Array.from({ length: shards }, (_, i) => ({
+    nodeGroupId: String(i + 1).padStart(4, '0'),
+    slots: `${Math.floor(i * 16384 / shards)}-${Math.floor((i + 1) * 16384 / shards) - 1}`,
+    replicaCount,
+  }));
+}
+
+export interface CacheConfig {
+  // 'memcached' = node-based Memcached (CfnCacheCluster); Serverless Memcached is
+  // kind 'serverless' + engine 'memcached'.
+  readonly kind: 'replication-group' | 'serverless' | 'memcached';
+  readonly id: string;                       // replication group / serverless cache / memcached cluster id (<= 40 chars)
+  readonly engine: 'valkey' | 'redis' | 'memcached';
+  readonly engineVersion: string;            // '8.1' (node-based) | '8' / '1.6' (Serverless MajorEngineVersion Valkey / Memcached) | '1.6.22'
+  readonly parameterGroupFamily?: string;    // valkey7 | valkey8 | valkey9 | redis7 | memcached1.6 (verified 2026-10-28)
+  readonly parameters?: Record<string, string>;  // e.g. maxmemory-policy, notify-keyspace-events, databases
+  readonly nodeType?: string;                // cache.r7g.large
+  readonly clusterMode?: 'enabled' | 'disabled';
+  readonly numNodeGroups?: number;           // shards (CME); online migration (C3): = source shard count
+  readonly nodeGroups?: CacheNodeGroup[];    // explicit CME layout (required for a CME S3 seed)
+  readonly replicasPerNodeGroup?: number;    // >= 1 for Multi-AZ
+  readonly numCacheNodes?: number;           // memcached
+  readonly port?: number;
+  // false ONLY for the node-based online-migration target (C3) until complete-migration; the
+  // cutover runbook then deploys transitEncryption=true with transitEncryptionMode 'preferred'
+  // (C3-T1), moves clients, then 'required' (C3-T3) — all "No interruption".
+  readonly transitEncryption: boolean;
+  readonly transitEncryptionMode?: 'preferred' | 'required';   // default 'required'
+  // 'node-based' = C3 target (TLS off, MasterLinkHealthStatus alarms); 'serverless' = C2 target
+  // (Valkey Serverless). Both need sourceCidr: the source must be reachable from the target VPC.
+  readonly onlineMigration?: 'node-based' | 'serverless';
+  readonly rbacUsers?: { userId: string; userName: string; accessString: string }[];  // needs TLS
+  readonly snapshotArns?: string[];          // C5 S3 seed (replacement-only: first deploy)
+  readonly snapshotRetentionDays: number;
+  readonly serverlessMaxDataGb?: number;
+  readonly serverlessMaxEcpuPerSecond?: number;
+}
+
+export interface CacheStackProps extends StackProps {
+  readonly vpc: ec2.IVpc;
+  readonly subnetIds: string[];              // private subnets; Serverless C2: one in every AZ it uses
+  readonly appClientSgIds: string[];         // discovered clients (Phase 2 / 7.5)
+  readonly sourceCidr?: string;              // online migration (C3/C2): target nodes reach the source
+  readonly sourcePort?: number;
+  readonly key: kms.IKey;                    // security-stack CMK (at rest; replacement to change)
+  readonly alarmTopic: sns.ITopic;
+  readonly cache: CacheConfig;
+}
+
+export class CacheStack extends Stack {
+  constructor(scope: Construct, id: string, props: CacheStackProps) {
+    super(scope, id, props);
+    const { vpc, subnetIds, appClientSgIds, key, alarmTopic, cache } = props;
+    const memcached = cache.engine === 'memcached';   // protocol settings follow the ENGINE, not the kind
+    const port = cache.port ?? (memcached ? 11211 : 6379);
+    if (cache.onlineMigration === 'node-based' && (cache.kind !== 'replication-group' || cache.transitEncryption)) {
+      throw new Error('node-based online migration (C3) needs a replication group with transitEncryption=false');
+    }
+    if (cache.onlineMigration === 'serverless' && (cache.kind !== 'serverless' || cache.engine !== 'valkey')) {
+      throw new Error('Serverless online migration (C2) needs kind=serverless with engine=valkey');
+    }
+    if (cache.onlineMigration && !props.sourceCidr) {
+      throw new Error('online migration (C2/C3) needs sourceCidr: the source must be reachable from the target VPC');
+    }
+    if (memcached && cache.rbacUsers?.length) {
+      throw new Error('RBAC users apply to Valkey/Redis OSS only, not Memcached');
+    }
+    const cme = cache.kind === 'replication-group' && cache.clusterMode === 'enabled';
+    if (cme && cache.snapshotArns?.length && !cache.nodeGroups?.length) {
+      throw new Error('seeding a CME replication group from S3 needs nodeGroups (NodeGroupConfiguration) at creation');
+    }
+
+    // SG/rule descriptions: ASCII from the EC2-allowed set only (cdk-stacks.md network pitfall).
+    const sg = new ec2.SecurityGroup(this, 'CacheSg', { vpc, allowAllOutbound: false,
+      description: `${cache.id} target cache` });
+    for (const sgId of appClientSgIds) {
+      sg.addIngressRule(ec2.Peer.securityGroupId(sgId), ec2.Port.tcp(port), `app client ${sgId}`);
+    }
+    if (cache.kind === 'serverless' && !memcached) {   // 6380 = READONLY reader port (Valkey/Redis only)
+      for (const sgId of appClientSgIds) {
+        sg.addIngressRule(ec2.Peer.securityGroupId(sgId), ec2.Port.tcp(6380), `app client ${sgId} readonly`);
+      }
+    }
+    if (props.sourceCidr) {
+      // C3: the target nodes replicate from the source. C2: prepare-migration creates its own
+      // ENIs + security group in the target VPC; this rule is harmless there, and the SOURCE
+      // security group must allow inbound from the target subnets in both cases (A2 / network team).
+      sg.addEgressRule(ec2.Peer.ipv4(props.sourceCidr), ec2.Port.tcp(props.sourcePort ?? 6379),
+        'online migration to source');
+    }
+
+    const subnetGroup = cache.kind === 'serverless' ? undefined : new elasticache.CfnSubnetGroup(this, 'Subnets', {
+      description: `${cache.id} cache subnets`, subnetIds, cacheSubnetGroupName: `${cache.id}-subnets` });
+
+    const paramGroup = cache.kind === 'serverless' || !cache.parameterGroupFamily ? undefined
+      : new elasticache.CfnParameterGroup(this, 'Params', {
+        cacheParameterGroupFamily: cache.parameterGroupFamily,
+        description: `${cache.id} parameters`,
+        properties: {
+          ...(cache.kind === 'replication-group' && cache.clusterMode === 'enabled' ? { 'cluster-enabled': 'yes' } : {}),
+          ...cache.parameters,
+        },
+      });
+
+    // RBAC: one generated secret per user (Secrets Manager dynamic reference — never a literal in
+    // the template). VALKEY-engine groups need no "default" user; REDIS-engine groups do.
+    let userGroup: elasticache.CfnUserGroup | undefined;
+    if (!memcached && cache.rbacUsers?.length) {
+      const userEngine = cache.engine === 'valkey' ? 'valkey' : 'redis';
+      if (userEngine === 'redis' && !cache.rbacUsers.some(u => u.userName === 'default')) {
+        throw new Error('REDIS-engine user groups must contain a user named "default" (disabled or strong password)');
+      }
+      const users = cache.rbacUsers.map(u => {
+        const secret = new secretsmanager.Secret(this, `Pw-${u.userId}`, {
+          secretName: `${cache.id}/cache-users/${u.userName}`, encryptionKey: key,
+          generateSecretString: { secretStringTemplate: JSON.stringify({ username: u.userName }),
+            generateStringKey: 'password', passwordLength: 40, excludeCharacters: ',"/@\'\\ `' } });
+        return new elasticache.CfnUser(this, `User-${u.userId}`, {
+          userId: u.userId, userName: u.userName, engine: userEngine, accessString: u.accessString,
+          authenticationMode: { Type: 'password',
+            Passwords: [secret.secretValueFromJson('password').unsafeUnwrap()] } });
+      });
+      userGroup = new elasticache.CfnUserGroup(this, 'UserGroup', {
+        userGroupId: `${cache.id}-users`, engine: userEngine, userIds: users.map(u => u.userId) });
+      userGroup.node.addDependency(...users);   // userIds are literals, not Refs
+    }
+
+    const alarm = (name: string, metric: cloudwatch.IMetric, threshold: number,
+      op = cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      missing = cloudwatch.TreatMissingData.BREACHING) => {
+      const a = new cloudwatch.Alarm(this, name, { metric, threshold, comparisonOperator: op,
+        evaluationPeriods: 3, datapointsToAlarm: 2, treatMissingData: missing,
+        alarmName: `${cache.id}-${name}` });
+      a.addAlarmAction(new cwActions.SnsAction(alarmTopic));
+      a.addOkAction(new cwActions.SnsAction(alarmTopic));
+    };
+    const m = (metricName: string, dimensionsMap: Record<string, string>, statistic = 'Average') =>
+      new cloudwatch.Metric({ namespace: 'AWS/ElastiCache', metricName, dimensionsMap, statistic,
+        period: Duration.minutes(1) });
+
+    if (cache.kind === 'replication-group') {
+      const groups = cme ? cache.nodeGroups : undefined;
+      const rg = new elasticache.CfnReplicationGroup(this, 'ReplicationGroup', {
+        replicationGroupId: cache.id, replicationGroupDescription: `${cache.id} migration target`,
+        engine: cache.engine, engineVersion: cache.engineVersion, cacheNodeType: cache.nodeType,
+        clusterMode: cache.clusterMode,
+        numNodeGroups: cme ? (groups?.length ?? cache.numNodeGroups) : undefined,
+        // ReplicasPerNodeGroup together with NodeGroupConfiguration forces replacement — use one.
+        replicasPerNodeGroup: groups ? undefined : cache.replicasPerNodeGroup,
+        nodeGroupConfiguration: groups?.map(g => ({ nodeGroupId: g.nodeGroupId, slots: g.slots,
+          replicaCount: g.replicaCount, primaryAvailabilityZone: g.primaryAvailabilityZone,
+          replicaAvailabilityZones: g.replicaAvailabilityZones })),
+        automaticFailoverEnabled: true, multiAzEnabled: true,   // Multi-AZ is also a C3 prerequisite
+        port, cacheSubnetGroupName: subnetGroup!.ref, securityGroupIds: [sg.securityGroupId],
+        cacheParameterGroupName: paramGroup?.ref,
+        atRestEncryptionEnabled: true, kmsKeyId: key.keyArn,
+        // Explicit either way: CFN documents TransitEncryptionEnabled as required for new valkey RGs.
+        transitEncryptionEnabled: cache.transitEncryption,
+        transitEncryptionMode: cache.transitEncryption ? (cache.transitEncryptionMode ?? 'required') : undefined,
+        userGroupIds: cache.transitEncryption && userGroup ? [userGroup.ref] : undefined,
+        snapshotArns: cache.snapshotArns, snapshotRetentionLimit: cache.snapshotRetentionDays,
+        autoMinorVersionUpgrade: true,
+      });
+      rg.applyRemovalPolicy(RemovalPolicy.RETAIN);   // holds production data once replication starts
+      if (cme) {
+        new CfnOutput(this, 'ConfigurationEndpoint', { value: rg.attrConfigurationEndPointAddress });
+      } else {
+        new CfnOutput(this, 'PrimaryEndpoint', { value: rg.attrPrimaryEndPointAddress });
+        new CfnOutput(this, 'ReaderEndpoint', { value: rg.attrReaderEndPointAddress });
+      }
+      new CfnOutput(this, 'Port', { value: String(port) });
+      // Node metrics use CacheClusterId = member cluster id: <rg>-<shard 4 digits>-<node 3 digits> (CME),
+      // <rg>-<node 3 digits> (CMD). Confirm with describe-replication-groups MemberClusters at Phase 5
+      // and prove datapoints before data moves (preflight-iam-cost.md §4a) — a wrong id = no datapoints.
+      const layout = groups ?? Array.from({ length: cme ? (cache.numNodeGroups ?? 1) : 1 }, (_, i) => ({
+        nodeGroupId: String(i + 1).padStart(4, '0'), replicaCount: cache.replicasPerNodeGroup ?? 0 }));
+      for (const g of layout) {
+        for (let n = 1; n <= 1 + g.replicaCount; n++) {
+          const member = cme ? `${cache.id}-${g.nodeGroupId}-${String(n).padStart(3, '0')}`
+            : `${cache.id}-${String(n).padStart(3, '0')}`;
+          const dims = { CacheClusterId: member };
+          const tag = member.slice(cache.id.length + 1);
+          alarm(`EngineCpu-${tag}`, m('EngineCPUUtilization', dims), 80);
+          alarm(`Memory-${tag}`, m('DatabaseMemoryUsagePercentage', dims), 80);
+          alarm(`Evictions-${tag}`, m('Evictions', dims, 'Sum'), 0, undefined, cloudwatch.TreatMissingData.NOT_BREACHING);
+          if (cache.onlineMigration === 'node-based') {
+            // C3 only: replication link to the source during online migration (1 = in sync). Remove
+            // (onlineMigration=false) in the same change that enables TLS after complete-migration —
+            // the metric stops once the link is gone and missing data is treated as breaching.
+            alarm(`MasterLink-${tag}`, m('MasterLinkHealthStatus', dims, 'Minimum'), 1,
+              cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD);
+          }
+        }
+      }
+    } else if (cache.kind === 'serverless') {
+      const sc = new elasticache.CfnServerlessCache(this, 'Serverless', {
+        serverlessCacheName: cache.id, engine: cache.engine, majorEngineVersion: cache.engineVersion,
+        securityGroupIds: [sg.securityGroupId], subnetIds, kmsKeyId: key.keyArn,
+        userGroupId: userGroup?.ref,    // Valkey/Redis: RBAC is the only access control; TLS always on
+        snapshotArnsToRestore: cache.snapshotArns,
+        snapshotRetentionLimit: cache.snapshotRetentionDays,
+        cacheUsageLimits: {
+          dataStorage: { maximum: cache.serverlessMaxDataGb ?? 10, unit: 'GB' },
+          ecpuPerSecond: { maximum: cache.serverlessMaxEcpuPerSecond ?? 100000 },
+        },
+      });
+      sc.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      new CfnOutput(this, 'Endpoint', { value: sc.attrEndpointAddress });
+      new CfnOutput(this, 'Port', { value: String(port) });
+      if (!memcached) {   // Serverless Memcached has a single endpoint (11211), no READONLY reader port
+        new CfnOutput(this, 'ReaderEndpoint', { value: sc.attrReaderEndpointAddress });
+      }
+      const dims = { clusterId: cache.id };   // Serverless dimension is clusterId, not CacheClusterId
+      alarm('ThrottledCmds', m('ThrottledCmds', dims, 'Sum'), 0, undefined, cloudwatch.TreatMissingData.NOT_BREACHING);
+      alarm('Evictions', m('Evictions', dims, 'Sum'), 0, undefined, cloudwatch.TreatMissingData.NOT_BREACHING);
+      alarm('DataStored', m('BytesUsedForCache', dims, 'Maximum'),
+        (cache.serverlessMaxDataGb ?? 10) * 1024 ** 3 * 0.8);
+    } else {
+      const mc = new elasticache.CfnCacheCluster(this, 'Memcached', {
+        clusterName: cache.id, engine: 'memcached', engineVersion: cache.engineVersion,
+        cacheNodeType: cache.nodeType ?? 'cache.r7g.large', numCacheNodes: cache.numCacheNodes ?? 2,
+        azMode: (cache.numCacheNodes ?? 2) > 1 ? 'cross-az' : 'single-az', port,
+        cacheSubnetGroupName: subnetGroup!.ref, vpcSecurityGroupIds: [sg.securityGroupId],
+        cacheParameterGroupName: paramGroup?.ref,
+        transitEncryptionEnabled: cache.transitEncryption,   // 1.6.12+, creation-time only
+      });
+      new CfnOutput(this, 'ConfigurationEndpoint', { value: mc.attrConfigurationEndpointAddress });
+      const dims = { CacheClusterId: cache.id };
+      alarm('Cpu', m('CPUUtilization', dims), 80);
+      alarm('Evictions', m('Evictions', dims, 'Sum'), 0, undefined, cloudwatch.TreatMissingData.NOT_BREACHING);
+    }
+  }
+}
+
+// C5 only: deploy BEFORE CacheStack, upload the RDB, then set CACHE.snapshotArns and deploy CacheStack.
+export class CacheSeedStack extends Stack {
+  public readonly bucket: s3.Bucket;
+  constructor(scope: Construct, id: string, props: StackProps & { prefix: string }) {
+    super(scope, id, props);
+    // SSE-S3 keeps the grant simple. SSE-KMS instead: grant the same principal kms:Decrypt +
+    // kms:DescribeKey and leave S3 Bucket Keys OFF (ElastiCache cannot read Bucket-Key objects).
+    this.bucket = new s3.Bucket(this, 'SeedBucket', {
+      encryption: s3.BucketEncryption.S3_MANAGED, bucketKeyEnabled: false, enforceSSL: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL, versioned: false,
+      lifecycleRules: [{ expiration: Duration.days(30) }],   // seed copies are transient
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    // Same-Region bucket; principal is region-scoped (opt-in Regions: see elasticache-migration.md).
+    this.bucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'ElastiCacheSnapshotAccess',
+      principals: [new iam.ServicePrincipal(`${this.region}.elasticache-snapshot.amazonaws.com`)],
+      actions: ['s3:GetObject', 's3:ListBucket', 's3:GetBucketAcl'],
+      resources: [this.bucket.bucketArn, this.bucket.arnForObjects('*')],
+    }));
+    new CfnOutput(this, 'SeedBucketName', { value: this.bucket.bucketName });
+  }
+}
+```
+
+Wiring (`bin/app.ts`) — values from `lib/config/constants.ts`:
+
+```typescript
+const cache = new CacheStack(app, `${constants.PREFIX}-cache`, {
+  env, vpc: network.vpc, subnetIds: constants.CACHE_SUBNET_IDS, appClientSgIds: constants.APP_CLIENT_SG_IDS,
+  sourceCidr: constants.CACHE.onlineMigration ? constants.SOURCE_CIDR : undefined,   // C2 and C3
+  key: security.key, alarmTopic: monitoring.topic, cache: constants.CACHE,
+});
+cache.addDependency(security);
+if (constants.CACHE.snapshotArns) cache.addDependency(seed);   // seed stack deployed + RDB uploaded first
+```
+
+For C2/C3 the **source** SG must allow 6379 inbound from the cache subnets (a source-side
+change — A2, or the customer's network team); C3 also needs the target SG egress above. Phase 5 verification: synth, the SG-description check, then after deploy
+`describe-replication-groups` / `describe-serverless-caches` (status, TLS, Multi-AZ,
+parameter group, user group) and `describe-cache-parameters` for the effective values —
+recorded in the plan.
 
 ## scripts/ contract
 

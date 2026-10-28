@@ -234,28 +234,37 @@ change during the migration window needs the same "verify both sides" discipline
 ### Soak automation (Phase 7.7 — optional, offer it, don't set it up silently)
 
 **Phase 7.7 entry is an explicit choice in chat** (A: the soak Lambda stack —
-recommended; B: manual `soak_check.py` runs with who/where/when in UTC — A and B only when
-source and target are the same engine family, which the scripts require; C: for a
-heterogeneous pair, the manual/agent-reviewed reconciliation in the callout below), recorded in the
+recommended; B: manual `soak_check.py` runs with who/where/when in UTC — A and B when
+source and target are the same engine family or a MySQL ↔ PostgreSQL pair (cross-family
+mode below); C: for any other heterogeneous pair, the manual/agent-reviewed reconciliation
+in the callout below), recorded in the
 plan, with the verdict timetable and what wakes the agent for each verdict — see
 [engagement-safety.md](engagement-safety.md) §Phase 7.7 entry. Never call sampling
 automatic unless a deployed, enabled schedule (or a verified cron) exists.
 
 🔴 **Heterogeneous engagement? Decide this BEFORE recommending Lambda or handing over
-`soak_check.py`.** Both scripts below compute row counts/checksums/column fingerprints
-using ONE SQL dialect and diff the two sides' results directly — that comparison is only
-meaningful when source and target normalize to the same family (MySQL-family or
-PostgreSQL-family). For a genuinely heterogeneous pair (e.g. MySQL → Aurora PostgreSQL)
-they raise a clear error rather than run the wrong dialect against one side (see
-`_engine_family` in either script) — but by the time that fires, you've already promised
-the customer automation that doesn't exist for their pair. Check this at Phase 3 method
-selection, not at Phase 7.7 setup:
+`soak_check.py`.** For a same-family pair both scripts below compute row counts/checksums/
+column fingerprints in ONE SQL dialect and diff the results directly. For a **MySQL ↔
+PostgreSQL** pair (e.g. MySQL → Aurora PostgreSQL via DMS) they switch to **cross-family
+mode**: `shared/scripts/cross_engine_compare.py` (a sibling file — the Lambda asset must
+include it, cdk-stacks.md §soak-stack.ts) reads both sides through Python drivers
+(`pymysql` + `pg8000`/`psycopg`; `soak_check.py` needs them on the host too), applies the
+same watermark, compares a **normalized** per-row hash for `checksum_tables`, and checks
+drift as a column mapping (names case-insensitive, type kinds compatible, nullability).
+Options go in a `"cross_engine"` object in `soak-config.json` (`CROSS_ENGINE_OPTIONS` for
+the Lambda) — see `mysql-postgresql.md` §9 (e.g. `naive_timezone`, per-table `target`
+names). Cross-family `replication_lag` comes from the DMS task metrics only (native
+replica status cannot apply across families; configuring it reads as needs-review), and a
+timestamp watermark needs a naive DATETIME/timestamp (or DATE) column on both sides. Any
+other heterogeneous pair (Oracle, SQL Server, …) still raises a clear error rather than run
+the wrong dialect against one side — check this at Phase 3 method selection, not at Phase
+7.7 setup:
 - **Heterogeneous + Full Load only (no CDC)** — there is no continuously-refreshing
   pipeline to soak-check in the first place. Don't propose a soak at all; propose the
   static-validation-window alternative (`engagement-safety.md` §Risk-tiered parallel-run
   default) and record it as a waiver.
-- **Heterogeneous + Full Load + CDC** — the DMS task itself IS translating dialects
-  continuously, but these scripts can't diff the result across dialects. Propose a
+- **Heterogeneous (not MySQL ↔ PostgreSQL) + Full Load + CDC** — the DMS task itself IS
+  translating dialects continuously, but these scripts can't diff the result. Propose a
   manual/agent-reviewed process instead: DMS task-level CloudWatch metrics/alarms (engine-
   agnostic, keep using them) plus periodic agent-run dual-read spot checks with hand-
   written per-side queries — not a diffable checksum. Say this explicitly when you make
@@ -367,8 +376,8 @@ and the check becomes `null` (needs review) — never a pass. Replica lag is rea
 `Seconds_Behind_Master` on older/MariaDB), not by position.
 
 `source.engine`/`target.engine` are independent (they can legitimately differ across a
-version gap; both must still normalize to the same MySQL-family-or-Postgres-family —
-heterogeneous soak-checking across families is not yet supported). Set exactly ONE of
+version gap, or be a MySQL ↔ PostgreSQL pair — cross-family mode above; other engines are
+rejected). Set exactly ONE of
 `dms_task_id`+`dms_replication_instance_id` (DMS CDC in play — `dms_task_id` is the
 CloudWatch dimension value: the task's **resource id**, i.e. the last `:` segment of
 `dms_task_arn`, **not** the friendly task name, which matches zero datapoints;

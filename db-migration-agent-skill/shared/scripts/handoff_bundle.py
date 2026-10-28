@@ -246,6 +246,18 @@ def _capture(fd, before, path, archive):
             dst.write(block)
     _unchanged(fd, before, path)
     _require(size == before.st_size, f"source size changed during snapshot: {path!r}")
+    # Timestamps alone miss a same-size rewrite that lands in the same coarse clock tick
+    # (tmpfs/ext4 stamp ctime from a jiffy-resolution clock), so re-read and compare.
+    verify, offset = hashlib.sha256(), 0
+    while True:
+        block = os.pread(fd, CHUNK_BYTES, offset)
+        if not block:
+            break
+        offset += len(block)
+        verify.update(block)
+    _require(offset == size and verify.digest() == digest.digest(),
+             f"source changed during snapshot: {path!r}")
+    _unchanged(fd, before, path)
     return {"path": path, "size": size, "sha256": digest.hexdigest()}
 
 
