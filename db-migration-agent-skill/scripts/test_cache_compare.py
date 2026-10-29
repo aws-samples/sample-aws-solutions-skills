@@ -537,6 +537,7 @@ class ReviewRegressionTest(unittest.TestCase):
         patch, status, _ = cc.validation_patch(mock.Mock(phase="7", step_id="x"), report)
         item = patch["migration_objects"]["keyspaces"]["items"][0]
         self.assertEqual((item["status"], item["comparison"], status), ("loaded", "unknown", "blocked"))
+        self.assertIn("sampled", item)   # the word survives merge-patch even when sample_match is null
         self.assertEqual(patch["migration_objects"]["keyspaces"]["validated"], 0)
 
     def test_stream_duplicate_fields_are_digested(self):
@@ -641,6 +642,12 @@ class DashboardHookTest(unittest.TestCase):
         ks = st["migration_objects"]["keyspaces"]
         self.assertEqual((ks["total"], ks["validated"]), (2, 2))
         self.assertEqual(ks["items"][0]["name"], "db0")
+        for item in ks["items"]:   # OBS-28: a validated row must carry its sample evidence
+            self.assertEqual(item["status"], "validated")
+            self.assertGreater(item["sampled"], 0)
+            self.assertIs(item["sample_match"], True)
+            self.assertEqual(item["comparison"], "match")
+            self.assertEqual(item["key_count_tolerance"], 0)   # the dashboard checks unequal counts against it
         self.assertIn("tables", st["migration_objects"], "existing object types must be preserved")
         log = (self.dash / "activity-log.jsonl").read_text().strip().splitlines()
         self.assertEqual([json.loads(l)["result"] for l in log[-2:]], ["in_progress", "success"])

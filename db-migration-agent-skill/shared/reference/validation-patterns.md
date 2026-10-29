@@ -472,11 +472,23 @@ plugin (`ALTER USER 'appuser'@'%' IDENTIFIED WITH mysql_native_password BY '…'
 self-managed upstream 8.4 would also need the plugin enabled). Re-run the login test either way —
 see version-upgrades.md MySQL 8.0→8.4.
 
-**3. `sql_mode` strictness — catch queries that worked before but fail now.** A newer major defaults
-to a stricter `sql_mode` (8.0 enables `ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, `NO_ZERO_DATE`,
-`NO_ZERO_IN_DATE`). `SELECT`s and writes that the source tolerated now **error**.
+**3. `sql_mode` strictness — catch queries that worked before but fail now.** Two different
+defaults are in play — don't assume either:
+- **Community MySQL server** 8.0/8.4 defaults to the strict set `ONLY_FULL_GROUP_BY,
+  STRICT_TRANS_TABLES, NO_ZERO_IN_DATE, NO_ZERO_DATE, ERROR_FOR_DIVISION_BY_ZERO,
+  NO_ENGINE_SUBSTITUTION` — a self-managed source upgraded to 8.x got it unless `my.cnf` overrides it.
+- **RDS / Aurora MySQL** take `sql_mode` from the **parameter group**, and the managed engine
+  defaults are **not** strict (RDS MySQL 8.0/8.4 `NO_ENGINE_SUBSTITUTION`; Aurora MySQL instance
+  level `0`; on Aurora it is an instance-level parameter). The target therefore has exactly what
+  the provisioning step set **explicitly** — the source's effective mode for a homogeneous move, or
+  the strict set as a GATE 2 decision (`cdk-stacks.md` `MYSQL_SQL_MODE`, `target-provisioning.md`
+  Carry list, `mysql-postgresql.md` §6) — and nothing else.
+
+Read back the **effective** value on every instance after the parameter group is applied (a
+reboot may be pending) and diff it against the source; where the target is stricter, `SELECT`s
+and writes the source tolerated now **error**:
 ```sql
-SELECT @@GLOBAL.sql_mode;   -- run on SOURCE and TARGET, diff the flag set
+SELECT @@GLOBAL.sql_mode;   -- run on SOURCE and on EVERY TARGET instance, diff the flag set
 ```
 Drive the app's real workload (the regression suite, item 6) under the target `sql_mode`, and probe
 the known-risky shapes directly:

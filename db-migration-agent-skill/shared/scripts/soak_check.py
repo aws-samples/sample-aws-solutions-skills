@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -134,6 +135,19 @@ def _mysql_ssl_args(ssl_ca, ssl_insecure):
     bundle = str(_DEFAULT_CA_BUNDLE)
     return ([f"--ssl-ca={bundle}", "--ssl-verify-server-cert"] if mariadb
             else [f"--ssl-ca={bundle}", "--ssl-mode=VERIFY_IDENTITY"])
+
+
+MYSQL_SNAPSHOT_ISOLATION = "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+
+
+def mysql_snapshot_start():
+    """Statements that open a REAL consistent snapshot on a MySQL-family session. MySQL
+    ignores `WITH CONSISTENT SNAPSHOT` (with only a warning) unless the session isolation is
+    REPEATABLE READ — confirmed live (dry run 5, OBS-29): a target parameter group with
+    transaction_isolation=READ-COMMITTED made the "snapshot" a moving view and produced
+    spurious mismatches on live money rows. Same statement as
+    cross_engine_compare.MYSQL_SNAPSHOT_ISOLATION / soak_check_lambda (tests assert parity)."""
+    return [MYSQL_SNAPSHOT_ISOLATION, "START TRANSACTION WITH CONSISTENT SNAPSHOT"]
 
 
 def run_mysql_batch(host, user, password, database, sqls, ssl_ca=None, ssl_insecure=False, port=None,
@@ -772,6 +786,309 @@ def combine_checks(values):
     return True
 
 
+# ── Re-check of live-table differences (OBS-42) ─────────────────────────────────────────
+# Source and target are read in two separate snapshots (no transaction spans two servers),
+# so a live table can differ for an instant without anything being wrong — an in-flight
+# DELETE/UPDATE of an old row below the watermark, or lag on a whole-table comparison
+# (live: a non-atomic cross-engine count showed "orders -1, target ahead" as RED and cost a
+# soak-window restart). A difference on a LIVE table is therefore a re-check, never RED by
+# itself; only a difference that persists across fresh re-reads is. Static tables
+# (`static_tables`) do not move and are compared exactly — never re-checked, no tolerance.
+# KEEP IN SYNC with the other soak script — scripts/test_soak_scripts.py asserts identical source.
+RECHECK_DEFAULTS = {"attempts": 2, "delay_seconds": 20}
+RECHECK_SLEEP = time.sleep
+
+
+def recheck_config(cfg):
+    """(recheck settings, static table set, row_count_tolerance map) — validated."""
+    rc = dict(RECHECK_DEFAULTS)
+    rc.update({k: v for k, v in (cfg.get("recheck") or {}).items() if v is not None})
+    unknown = sorted(set(rc) - set(RECHECK_DEFAULTS))
+    if unknown:
+        raise ValueError(f"unknown recheck option(s) {unknown}")
+    for key, hi in (("attempts", 5), ("delay_seconds", 600)):
+        v = rc[key]
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= hi:
+            raise ValueError(f"recheck.{key} must be an integer 0-{hi}")
+    static = cfg.get("static_tables") or []
+    if not isinstance(static, list) or not all(isinstance(t, str) and t for t in static):
+        raise ValueError("static_tables must be a list of table identifiers")
+    tol = cfg.get("row_count_tolerance") or {}
+    if not isinstance(tol, dict) or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in tol.values()):
+        raise ValueError("row_count_tolerance must map table -> non-negative integer")
+    both = sorted(set(tol) & set(static))
+    if both:
+        raise ValueError(f"static tables are compared exactly — remove {both} from row_count_tolerance")
+    expected_schema_differences_config(cfg)   # validated with the other soak options, before any connection
+    return rc, set(static), tol
+
+
+def _combine_states(values):
+    values = [v for v in values if v != "not_applicable"]
+    if any(v is False for v in values):
+        return False
+    if any(v is None for v in values):
+        return None
+    return True
+
+
+def _recheck_reading(row_d, ck_d):
+    """One reading of a table: a compact summary (`rows`, `checksum_match`) plus the FULL
+    diagnostic detail of that reading (`row_detail`, `checksum_detail` — digests, mismatches,
+    examples, verdict, coverage, NULL counts…), copied so later readings can't overwrite it."""
+    def full(d):
+        return json.loads(json.dumps({k: v for k, v in d.items() if k != "recheck"}, default=str))
+    reading = {}
+    if row_d is not None:
+        reading["rows"] = {"source": row_d.get("source"), "target": row_d.get("target"), "match": row_d.get("match")}
+        reading["row_detail"] = full(row_d)
+    if ck_d is not None:
+        reading["checksum_match"] = ck_d.get("match")
+        reading["checksum_detail"] = full(ck_d)
+    return reading
+
+
+def _tolerable(reading, tol, has_checksum):
+    """(diff, True) only for a CONCLUSIVE total-row-count difference that is the reading's sole
+    failure: both totals integers and unequal, the row verdict False (not None/unknown), no NULL-
+    count difference, every coverage marker conclusive, and — for a checksum table — a checksum
+    verdict of True. Anything inconclusive or contradictory is never tolerated (None, False)."""
+    r, d = reading.get("rows") or {}, reading.get("row_detail") or {}
+    s, t = r.get("source"), r.get("target")
+    if not (isinstance(s, int) and isinstance(t, int)) or isinstance(s, bool) or isinstance(t, bool) or s == t:
+        return None, False
+    if r.get("match") is not False:
+        return None, False
+    nulls = d.get("null_rows")
+    if isinstance(nulls, dict) and nulls.get("source") != nulls.get("target"):
+        return None, False
+    if has_checksum and reading.get("checksum_match") is not True:
+        return None, False
+    diff = abs(s - t)
+    return diff, diff <= tol
+
+
+def apply_rechecks(cfg, row_check, checksum_check, rerun):
+    """Re-reads only the LIVE tables whose row count or checksum differed (`match` False), up
+    to recheck.attempts times, recheck.delay_seconds apart, each time in a FRESH snapshot pair
+    via rerun(tables) -> (row_check, checksum_check). Per table, in detail[...]["recheck"]:
+    'converged' (match True — the evidence of every reading is kept, never a silent green),
+    'persistent' (the last reading's values — RED), 'inconclusive' (the last reading is
+    unknown, or the FINAL re-read failed after an earlier one succeeded — None, needs review,
+    never tolerated: an unresolved final reading proves nothing about the current state),
+    'within_tolerance' (a conclusive total-count difference
+    <= row_count_tolerance[table] is the last reading's ONLY failure — match True),
+    'recheck_failed' / 'needs_recheck' (every re-read failed, or attempts = 0 — None, needs
+    review, never RED by itself), 'static_table_exact' (static table: not re-checked).
+    Each reading keeps its full diagnostics; the published table detail is the LAST successful
+    reading's detail (digests, mismatches, examples, verdict — consistent with `match`), with
+    the original reading under recheck.first. Recomputes the two `pass` values when anything
+    was re-checked. Mutates and returns both."""
+    rc, static, tol = recheck_config(cfg)
+    rows, cks = row_check["detail"], checksum_check["detail"]
+    tables = list(dict.fromkeys(list(rows) + list(cks)))
+
+    def differs(t):
+        return (rows.get(t) or {}).get("match") is False or (cks.get(t) or {}).get("match") is False
+
+    touched = False
+    for t in tables:
+        if differs(t) and t in static:
+            touched = True
+            for d in (rows.get(t), cks.get(t)):
+                if d is not None:
+                    d["recheck"] = {"result": "static_table_exact", "attempts": []}
+    pending = [t for t in tables if differs(t) and t not in static]
+    first = {t: _recheck_reading(rows.get(t), cks.get(t)) for t in pending}
+    log, last = {t: [] for t in pending}, {}
+    for n in range(1, rc["attempts"] + 1):
+        if not pending:
+            break
+        RECHECK_SLEEP(rc["delay_seconds"])
+        try:
+            r_row, r_ck = rerun(list(pending))
+            r_rows, r_cks = r_row["detail"], r_ck["detail"]
+        except Exception as e:  # noqa: BLE001 - a failed re-read is recorded, never a pass
+            for t in pending:
+                log[t].append({"attempt": n, "error": f"{type(e).__name__}: {e}"})
+            continue
+        still = []
+        for t in pending:
+            reading = {"attempt": n, **_recheck_reading(r_rows.get(t) if t in rows else None,
+                                                        r_cks.get(t) if t in cks else None)}
+            kinds = []
+            if t in rows:
+                kinds.append((r_rows.get(t) or {}).get("match"))
+            if t in cks:
+                kinds.append((r_cks.get(t) or {}).get("match"))
+            reading["match"] = _combine_states(kinds)
+            log[t].append(reading)
+            last[t] = reading
+            if reading["match"] is not True:
+                still.append(t)
+        pending = still
+    for t in log:
+        touched = True
+        lr = last.get(t)
+        row_value = ck_value = None
+        if t not in pending:
+            result, row_value, ck_value = "converged", True, True
+        elif rc["attempts"] == 0:
+            result = "needs_recheck (recheck.attempts = 0)"
+        elif lr is None:
+            result = "recheck_failed"
+        elif "error" in log[t][-1]:
+            # the FINAL re-read failed: an earlier successful reading is kept as evidence (and
+            # published as the detail), but it is not the current state — never persistent,
+            # never tolerated
+            result = f"inconclusive (final re-read failed: {log[t][-1]['error']})"
+        else:
+            diff, ok = _tolerable(lr, tol[t], t in cks) if t in tol and t in rows else (None, False)
+            if ok:
+                result, row_value, ck_value = f"within_tolerance ({diff} <= {tol[t]})", True, True
+            else:
+                row_value, ck_value = (lr.get("rows") or {}).get("match"), lr.get("checksum_match")
+                result = "persistent" if lr.get("match") is False else "inconclusive"
+        evidence = {"result": result, "first": first[t], "attempts": log[t], "delay_seconds": rc["delay_seconds"]}
+        if t in rows:
+            if lr is not None and "row_detail" in lr:   # publish the final reading's own diagnostics
+                rows[t] = json.loads(json.dumps(lr["row_detail"]))
+            rows[t]["recheck"] = evidence
+            rows[t]["match"] = row_value
+        if t in cks:
+            if lr is not None and "checksum_detail" in lr:
+                cks[t] = json.loads(json.dumps(lr["checksum_detail"]))
+            cks[t]["recheck"] = evidence
+            cks[t]["match"] = ck_value
+    if touched:
+        row_check["pass"] = _combine_states([d.get("match") for d in rows.values()])
+        checksum_check["pass"] = _combine_states([d.get("match") for d in cks.values()])
+    return row_check, checksum_check
+
+# Intentional schema differences (OBS-53): e.g. the generated column the partial-unique-index
+# recipe adds on a MySQL target. Declared ones are reported as "expected (<reason>)" and do not
+# fail schema_drift; anything not declared still does.
+# KEEP IN SYNC with the other soak script — scripts/test_soak_scripts.py asserts identical source.
+EXPECTED_DIFF_KEYS = ("table", "column", "side", "kind", "reason")
+EXPECTED_DIFF_KINDS = ("extra_column", "type")
+
+
+def expected_schema_differences_config(cfg):
+    """Validated `expected_schema_differences`: a list of {table, column, side: source|target,
+    kind: extra_column (column only on `side`) | type (type/nullability/default differ), reason}."""
+    items = cfg.get("expected_schema_differences") or []
+    if not isinstance(items, list):
+        raise ValueError("expected_schema_differences must be a list")
+    tables = cfg.get("tables") or []
+    out = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) != set(EXPECTED_DIFF_KEYS):
+            raise ValueError(f"expected_schema_differences[{i}] needs exactly the keys {list(EXPECTED_DIFF_KEYS)}")
+        if not all(isinstance(item[k], str) and item[k].strip() for k in EXPECTED_DIFF_KEYS):
+            raise ValueError(f"expected_schema_differences[{i}]: every field, the reason included, "
+                             "must be a non-empty string")
+        if item["side"] not in ("source", "target"):
+            raise ValueError(f"expected_schema_differences[{i}].side must be 'source' or 'target'")
+        if item["kind"] not in EXPECTED_DIFF_KINDS:
+            raise ValueError(f"expected_schema_differences[{i}].kind must be one of {list(EXPECTED_DIFF_KINDS)}")
+        if item["table"] not in tables:
+            raise ValueError(f"expected_schema_differences[{i}]: table {item['table']!r} is not in tables")
+        out.append(dict(item))
+    return out
+
+
+def apply_expected_differences(cfg, drift_check):
+    """Moves the declared differences out of the schema-drift failure. A table passes only if
+    every one of its differences was declared; a table that failed for any other reason (no
+    columns read, a planning note, an undeclared column) still fails."""
+    expected = expected_schema_differences_config(cfg)
+    if not expected or drift_check.get("pass") is not False:
+        return drift_check
+    still_failing = False
+    for table, d in (drift_check.get("detail") or {}).items():
+        mine = [e for e in expected if e["table"] == table]
+        lists = ("source_only", "target_only", "mismatched_attributes")
+        had_items = isinstance(d, dict) and any(d.get(k) for k in lists)
+        if not mine or not had_items or d.get("note"):
+            still_failing = True
+            continue
+        explained, ambiguous = [], []
+        for e in mine:
+            family = _declared_side_family(cfg, e["side"])
+            if e["kind"] == "extra_column":
+                key = "source_only" if e["side"] == "source" else "target_only"
+                names = list(d.get(key) or [])
+                by_name = {str(n): n for n in names}
+            else:
+                key = "mismatched_attributes"
+                # entries are keyed by the SOURCE name; match on the DECLARED side's catalog name
+                # (cross-family entries carry {"source": {"name": …}, "target": {"name": …}};
+                # same-family entries share one name, the key)
+                by_name = {}
+                for k, v in (d.get(key) or {}).items():
+                    side_attr = v.get(e["side"]) if isinstance(v, dict) else None
+                    side_name = side_attr.get("name") if isinstance(side_attr, dict) and side_attr.get("name") else k
+                    by_name.setdefault(str(side_name), []).append(k)
+                names = list(by_name)
+            hits = matching_catalog_columns(family, e["column"], names)
+            if e["kind"] != "extra_column" and len(hits) == 1 and len(by_name[hits[0]]) != 1:
+                hits = hits + hits    # one side name behind several entries: ambiguous
+            if len(hits) > 1:
+                # never suppress more than one catalog column per declaration
+                ambiguous.append({"column": e["column"], "side": e["side"], "kind": e["kind"],
+                                  "status": f"ambiguous: matches {len(hits)} catalog columns {sorted(map(str, hits))} "
+                                            "— quote the exact identifier; nothing suppressed"})
+                continue
+            if not hits:
+                continue
+            if e["kind"] == "extra_column":
+                d[key] = [n for n in d.get(key) or [] if n != hits[0]]
+            else:
+                attrs = d.get(key) or {}
+                attrs.pop(by_name[hits[0]][0])
+                d[key] = attrs
+            explained.append(e)
+        d["expected"] = [{"column": e["column"], "side": e["side"], "kind": e["kind"],
+                          "status": f"expected ({e['reason']})"} for e in explained]
+        if ambiguous:
+            d["expected_ambiguous"] = ambiguous
+        if ambiguous or any(d.get(k) for k in lists):
+            still_failing = True
+        else:
+            d["status"] = "expected"
+    drift_check["pass"] = False if still_failing else True
+    return drift_check
+
+
+def _declared_side_family(cfg, side):
+    """'mysql' | 'postgres' | None for the engine on `side` (soak_check.py: cfg[side]["engine"];
+    soak_check_lambda.py: cfg["<side>_engine"])."""
+    conn = cfg.get(side)
+    engine = cfg.get(f"{side}_engine") or (conn.get("engine") if isinstance(conn, dict) else None)
+    try:
+        return _engine_family(engine) if engine else None
+    except Exception:  # noqa: BLE001 - an unsupported engine never widens a match
+        return None
+
+
+def matching_catalog_columns(family, declared, names):
+    """Catalog columns a declared identifier denotes, by the side's identifier rules.
+    PostgreSQL (and unknown): an unquoted name folds to lower case and must equal the catalog
+    name exactly; a "double-quoted" name matches exactly, case included (`""` = one `"`).
+    MySQL: column names are case-insensitive (optional `backticks`). The caller requires exactly
+    one hit — 0 = not explained, >1 = ambiguous (the declaration fails)."""
+    d = str(declared).strip()
+    names = [str(n) for n in names]
+    if family == "mysql":
+        if len(d) >= 2 and d[0] == d[-1] and d[0] in "`\"":
+            d = d[1:-1].replace(d[0] * 2, d[0])
+        return [n for n in names if n.lower() == d.lower()]
+    if len(d) >= 2 and d[0] == '"' and d[-1] == '"':
+        exact = d[1:-1].replace('""', '"')
+        return [n for n in names if n == exact]
+    return [n for n in names if n == d.lower()]
+
+
 def _green_streak(days, current_date):
     days.sort(key=lambda day: day["date"])
     expected = datetime.date.fromisoformat(current_date)
@@ -819,11 +1136,23 @@ def run_day(cfg, run_date=None):
     if not isinstance(tables, list) or not tables or not all(isinstance(table, str) and table for table in tables):
         raise ValueError("tables must be a nonempty list of table identifiers")
     checksum_tables = cfg.get("checksum_tables") or tables[:2]
+    recheck_config(cfg)   # config errors before any connection
     # Resolve the region up front (before touching either database) when any AWS-side
     # check is configured — a missing region is a config error, not a us-east-1 default.
     region = aws_region(cfg) if _needs_aws(cfg) else None
     aws_errors = []
+    row_check, checksum_check, drift_check = _same_family_checks(cfg, family, tables, checksum_tables)
+    apply_rechecks(cfg, row_check, checksum_check, lambda sub: _same_family_checks(
+        cfg, family, [t for t in sub if t in tables], [t for t in sub if t in checksum_tables])[:2])
+    lag_seconds, lag_mechanism = measure_replication_lag(cfg, family, cfg["source"], cfg["target"], aws_errors)
+    return _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, drift_check,
+                       lag_seconds, lag_mechanism)
 
+
+def _same_family_checks(cfg, family, tables, checksum_tables):
+    """(row_check, checksum_check, drift_check) for `tables` / `checksum_tables` (either may be
+    a subset, or empty, for a re-check) — three batched rounds, the last in one consistent
+    snapshot per side."""
     wcfg = watermark_config(cfg)
     timeout = int(cfg.get("batch_timeout_seconds") or BATCH_TIMEOUT_S)
     union = list(dict.fromkeys(list(tables) + list(checksum_tables)))
@@ -910,13 +1239,15 @@ def run_day(cfg, run_date=None):
             sqls.append(f"SELECT md5(string_agg(t.*::text, '' ORDER BY t.*)) FROM {_table_sql(family, t)} t")
     for t in tables:
         keys.append(("cols", t)); sqls.append(_columns_sql(family, t))
-    snapshot_start = ("START TRANSACTION WITH CONSISTENT SNAPSHOT" if family == "mysql"
-                      else "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    batch = [snapshot_start] + sqls + ["COMMIT"]
+    snapshot_start = mysql_snapshot_start() if family == "mysql" else [
+        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ"]
+    batch = snapshot_start + sqls + ["COMMIT"]
     src_chunks, tgt_chunks = _both(batch, batch)
-    # chunks[0] = snapshot-start's own (empty) result; chunks[-1] = COMMIT's.
-    src_res = {k: src_chunks[1 + i] for i, k in enumerate(keys)}
-    tgt_res = {k: tgt_chunks[1 + i] for i, k in enumerate(keys)}
+    # chunks[:len(snapshot_start)] = the snapshot-start statements' own (empty) results;
+    # chunks[-1] = COMMIT's.
+    skip = len(snapshot_start)
+    src_res = {k: src_chunks[skip + i] for i, k in enumerate(keys)}
+    tgt_res = {k: tgt_chunks[skip + i] for i, k in enumerate(keys)}
 
     def _int(v):
         return int(v) if v is not None else None
@@ -943,6 +1274,7 @@ def run_day(cfg, run_date=None):
         else:
             ok = sc is not None and sc == tc
             detail = {"source": sc, "target": tc, "mode": "whole_table", "note": plans[t][1], **extras.get(t, {})}
+        detail["match"] = ok
         row_ok_by[t] = ok
         if t in tables:
             row_check["detail"][t] = detail
@@ -959,6 +1291,7 @@ def run_day(cfg, run_date=None):
         else:
             ok = sc is not None and sc == tc
             checksum_check["detail"][t] = {"source": sc, "target": tc, "mode": "whole_table", "note": plans[t][1]}
+        checksum_check["detail"][t]["match"] = ok
         ck_oks.append(ok)
     checksum_check["pass"] = combine_checks(ck_oks)
     src_cols = [src_res[("cols", t)] for t in tables]
@@ -974,10 +1307,7 @@ def run_day(cfg, run_date=None):
                 "source_only": sorted(set(sc) - set(tc)), "target_only": sorted(set(tc) - set(sc)),
                 "mismatched_attributes": {k: {"source": sc[k], "target": tc[k]} for k in mismatched},
             }
-
-    lag_seconds, lag_mechanism = measure_replication_lag(cfg, family, cfg["source"], cfg["target"], aws_errors)
-    return _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, drift_check,
-                       lag_seconds, lag_mechanism)
+    return row_check, checksum_check, drift_check
 
 
 def _load_cross_engine():
@@ -1016,6 +1346,7 @@ def _run_day_cross_family(cfg, run_date, source_family, target_family):
     aws_errors = []
     options = cfg.get("cross_engine") or {}
     cec.merge_options(options)   # config errors before any connection
+    recheck_config(cfg)
     timeout = int(cfg.get("batch_timeout_seconds") or BATCH_TIMEOUT_S)
     src = _cross_connect(cec, cfg["source"], "source", options, timeout)
     try:
@@ -1023,6 +1354,9 @@ def _run_day_cross_family(cfg, run_date, source_family, target_family):
         try:
             row_check, checksum_check, drift_check = cec.soak_checks(
                 src, tgt, tables, checksum_tables, watermark_config(cfg), options)
+            apply_rechecks(cfg, row_check, checksum_check, lambda sub: cec.soak_checks(
+                src, tgt, [t for t in sub if t in tables], [t for t in sub if t in checksum_tables],
+                watermark_config(cfg), options)[:2])
         finally:
             _cross_close(tgt)
     finally:
@@ -1049,6 +1383,7 @@ def _finish_day(cfg, run_date, region, aws_errors, row_check, checksum_check, dr
                 lag_seconds, lag_mechanism):
     """AWS-side checks + the four-state verdict — shared by the same-family and the
     cross-family paths so both produce the identical day-record shape."""
+    drift_check = apply_expected_differences(cfg, drift_check)   # declared differences: expected, not RED
     firing_alarms, unknown_alarms, alarms_check = cloudwatch_alarms(cfg.get("alarm_names", []), region, aws_errors)
 
     target_db_instance_id = cfg.get("target_db_instance_id")

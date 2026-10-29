@@ -58,7 +58,9 @@ accepted. The config itself is not included unless explicitly allowlisted.
 ```
 
 From the installed skill directory, with an existing private output directory
-**outside** the engagement root:
+**outside** the engagement root (the tool refuses an output inside `--root`) that belongs to
+this engagement alone — e.g. `<engagements>/<engagement>.handoff/`, never a directory shared by
+several engagements — unless the customer names another path:
 
 ```bash
 umask 077

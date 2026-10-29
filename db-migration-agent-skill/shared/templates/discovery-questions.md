@@ -124,7 +124,9 @@ For every application/service that connects: where does it get the host — an e
 variable, a systemd unit file, a config file, a secret, or (worth knowing now, not at
 cutover) a hardcoded IP? This is what makes the difference, at cutover, between "update
 one secret" and "we have to find and edit a script on a server with no deployment
-pipeline."
+pipeline." **And how does it read its credentials** — `EnvironmentFile`, a config file, a
+secret manager, an environment variable? That decides how the new credentials reach the host
+(planned by GATE 2, never improvised at cutover).
 
 **If any part is unknown, confirm access now:** for each known client, does a writable
 path exist to change and revert its effective DB-host setting (SSM/SSH or the deployment

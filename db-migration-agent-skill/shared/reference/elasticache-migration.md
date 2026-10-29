@@ -51,9 +51,9 @@ validation or cutover content, offer what still transfers (assessment, client di
 |---|---|
 | 1 Discovery | §2 + template `shared/templates/discovery-questions-cache.md` → working file `discovery-questions.md` (same #3–#18 numbering) |
 | 2 Assessment | §3 commands, §4 blocker catalog, sizing in §6 |
-| 3 Method | §5 matrix (top-down, first match) + rollback gate §11 |
-| 4–5 Provision | §6 target choice + `cdk-stacks.md` §ElastiCache |
-| 6 Execute | §7 runbooks (+ `execution-control.md` supervision, rehearsal §7.9) |
+| 3 Method | §5 matrix (top-down, first match) + rollback gate §11; readiness proofs §7.10 (1, 4) before GATE 2 |
+| 4–5 Provision | §6 target choice + `cdk-stacks.md` §ElastiCache (prefixed parameter-group names, maintenance window clear of the cutover interval §7.10 5) + bulk-path smoke test §7.10 1 |
+| 6 Execute | §7 runbooks (+ `execution-control.md` supervision, rehearsal §7.9, end-to-end numbers §7.10 3 for GATE 4) |
 | 7 Validate | §8 + `shared/scripts/cache_compare.py` |
 | 7.5 Clients | §10 |
 | 7.7 Soak | §9 |
@@ -102,6 +102,21 @@ Cache-only facts not covered by a numbered item go on the closest item's sub-let
 ---
 
 ## 3. Read-only assessment (Phase 2)
+
+**Identify every real client process, and the exact AUTH/TLS form it sends** (read-only, under
+the host-inspection block below): the service unit (`systemctl cat <unit>` → `ExecStart`,
+`EnvironmentFile`), the connection code and client library + version, and from them the auth
+form — `AUTH <password>` (password-only → the `default` user), `AUTH <user> <password>`, or none —
+and TLS on/off; cross-check with `CLIENT LIST` (`user=`, `lib-name`, `lib-ver`) and the source's
+`ACL LIST` / `requirepass` presence (never its value). Record per client: unit, binary/script
+path + hash, library, auth form, TLS. This drives the §6 auth mapping.
+
+**First present A1** (read-only source access — the cache host, `stats`/`INFO`, any SSM
+session) and a separate block for any read-only host inspection (app server config, prewarm
+code) as explicit chat blocks, exactly as for SQL engagements; GATE 1 or a discovery answer
+("you may look at the app server") motivates a block but never confirms it (live: a cache
+run skipped A1, a SQL run recorded an app-server inspection block as confirmed from a
+discovery answer).
 
 Credentials stay out of argv (hard constraint 4): `redis-cli`/`valkey-cli` read the
 password from **`REDISCLI_AUTH`** (both CLIs; verified with `--user` for an ACL user on
@@ -169,7 +184,8 @@ recorded decision.
 | D1 | **Logical dbs other than 0 in use** (`INFO keyspace` db1+, `SELECT` in commandstats) and a **cluster-mode** target (CME node-based, or any Serverless) | "When cluster mode is enabled, only database 0 is available" — except Valkey 9.0+ `cluster-databases` (Serverless 1024 on 9.0+) | CMD node-based target (keeps `databases`, default 16); or Valkey 9 with `cluster-databases`; or consolidate (key prefixes) as an app change; or one cache per db. Node-based online migration additionally requires the **same `databases` count** on both sides |
 | X1 | **Multi-key commands / Lua / `MULTI` touching several keys** with a CME target | Allowed only when all keys hash to one slot → `CROSSSLOT` errors | Hash tags `{tag}` in key names (an app + data change — re-keying), or a CMD target. Detect: commandstats (MGET/MSET/DEL n>1/SUNIONSTORE/EVAL with several keys), code review |
 | C1 | **Client library is not cluster-aware** (CME/Serverless target) | Must follow `MOVED`/`ASK`; Serverless is always cluster mode | Upgrade/configure the client (cluster mode on) — rehearse; or CMD node-based target |
-| T1 | **Client can't do TLS** (or can't do ACL `AUTH user pass`) | Serverless: TLS always on, RBAC only. Node-based: AUTH token and RBAC both require TLS. Node-based Memcached TLS is creation-time only (1.6.12+); Serverless Memcached TLS mandatory | Upgrade the client; for node-based you may keep TLS off (no AUTH possible then) only with an explicit compliance decision (#11) |
+| T1 | **Client can't do TLS** | Serverless: TLS always on, RBAC only. Node-based: AUTH token and RBAC both require TLS. Node-based Memcached TLS is creation-time only (1.6.12+); Serverless Memcached TLS mandatory | Upgrade the client; for node-based you may keep TLS off (no AUTH possible then) only with an explicit compliance decision (#11) |
+| T2 | **Client sends password-only `AUTH <password>`** (no username — `requirepass` on the source) | Not a blocker by itself: one-argument AUTH authenticates as the user named `default` | **No client upgrade needed** — map it per §6 (RBAC with a custom user whose `UserName` is `default`, or an AUTH token; both need TLS, so T1 still applies) and prove it in rehearsal with the real app (§7.9). Only a client that must use a *different* named ACL user needs the two-argument form |
 | R1 | **Command families ElastiCache restricts** used by apps/ops tooling: `CONFIG`, `SAVE`/`BGSAVE`, `BGREWRITEAOF`, `DEBUG`, `MIGRATE`, `REPLICAOF`/`SLAVEOF`, `SYNC`/`PSYNC`, `SHUTDOWN`, `ACL SETUSER/DELUSER/LOAD/SAVE`, most `CLUSTER` admin verbs | Calls fail on the target | Replace with API equivalents (parameter groups, snapshots, users/user groups); remove from runbooks/cron. **Serverless additionally lacks** `KEYS`, `MONITOR`, `CLIENT LIST/KILL`, `MEMORY …`, `OBJECT …`, `SLOWLOG`, `FUNCTION`/`FCALL`, `PSUBSCRIBE`, `MOVE`, `SWAPDB`, `WAIT`; `FLUSHALL/FLUSHDB` flush the whole cache and can't be in a transaction |
 | K1 | **Keyspace notifications used** (`notify-keyspace-events` non-empty, `__keyspace@` / `__keyevent@` subscribers) | Serverless: **not supported**. Node-based: the default parameter group has it empty | Node-based target with the same value in a custom parameter group; Serverless → redesign |
 | E1 | **Eviction policy differs** — source `noeviction` (Redis default) vs ElastiCache default **`volatile-lru`** (node-based `default.valkey8` checked live; Serverless fixed `volatile-lru`, not modifiable) | A primary-datastore workload can silently lose TTL'd keys under memory pressure; a full cache returns errors instead of evicting (or vice versa) | Set `maxmemory-policy` in the custom parameter group to the source's value; Serverless can't change it — record the acceptance or choose node-based |
@@ -261,6 +277,22 @@ present the gap; never improvise.
   VALKEY-engine user groups attach only to Valkey caches and need no `default` user;
   REDIS-engine groups must include a `default` user. RBAC passwords 16–128 chars, not
   `, " / @`. Min TLS 1.2 (Valkey 7.2+/Redis OSS 6+); no mTLS.
+- **Map the source's authentication onto the target — per real client, not per test client.**
+  A password-only client (`requirepass` on the source → `AUTH <password>`) authenticates as the
+  user named **`default`** (Redis/Valkey ACL semantics) and sends no username. Target options:
+
+  | Source / client sends | Target option | Notes |
+  |---|---|---|
+  | No AUTH | none (node-based, TLS optional) or RBAC with a `default` user | adding auth later is a client change |
+  | `AUTH <password>` (`requirepass`) | **AUTH token** (requires in-transit encryption; adding one to an existing group is a replacement) — or **RBAC with a custom user whose `UserName` is `default`** carrying that password | ElastiCache: "To change the default user, create a new user with the user name set to default" and swap it into the user group. **REDIS-engine user groups must include a user named `default`**; on a **VALKEY-engine** group "there is no default user requirement" and the built-in default user is turned **off** — so a password-only client needs a `UserName: default` user there too (live: Valkey 8.2 target, fixed this way; verify in rehearsal) |
+  | `AUTH <user> <password>` (ACL users) | RBAC named users (`UserName` = the source ACL user), plus the group's `default` user per the row above | access strings re-derived from the source ACL |
+
+  Live (OBS-41): rehearsal and GATE 3 used a redis-py test client logging in as RBAC user
+  `cacheapp` over TLS, while the real app (`/opt/app-sim/app.py` under systemd) sends
+  password-only `AUTH` — the target had no matching `default` user, so the repoint would have
+  failed; caught 3.5 h later, fixed with a `UserName: default` RBAC user, then re-rehearsed with
+  the byte-identical production `app.py`, same unit and `EnvironmentFile` (pause 31.5 s, rollback
+  31.3 s, 0 mismatches).
 
 ---
 
@@ -409,6 +441,16 @@ Publish one step per shard/db where the method exposes it. Record the copy bound
 - During sync, compare with a live tolerance; before cutover, freeze writers, wait until the
   writer's applied offset stops moving (RedisShake log/status), then a final
   `cache_compare.py` with zero tolerance.
+- **Readiness/health checks use only fields the configured reader type actually reports.**
+  `sync_reader` (PSYNC) and `scan_reader` (SCAN + keyspace notifications) expose different
+  status/log fields (`status_port` HTTP JSON, log lines). Live (OBS-50): the production
+  reverse-readiness check read `reader.status`, which the reverse task's `scan_reader` does not
+  report — the rehearsals had passed through a different check path; the auto-abort worked
+  (write pause 50.2 s, RPO 0; retry 20 min later succeeded). During rehearsal, **capture one real
+  status sample (`curl -s localhost:<status_port>` + the matching log lines) from the exact reader
+  type and version** used in each direction, store it in `evidence/`, and build each check from
+  the fields in that sample; a field the sample lacks means the check fails closed (not ready),
+  never "absent = fine". Field names are **verify against your RedisShake version**.
 
 ### 7.5 Dual-write (C7)
 
@@ -467,12 +509,80 @@ executes it from the handed-over runbook; Mode 3 — only under GATE 4 / A4.
 
 On a clone (a scratch EC2 copy of the source from its RDB, or a staging cache) and a
 scratch target: freeze writers → final sync (`complete-migration` / RedisShake drain /
-final RDB) with a **measured** pause → repoint a test client → verify (`cache_compare.py`,
+final RDB) with a **measured** pause → repoint **the real application** (its production
+binary/script, unit and config — or a client reproducing exactly its AUTH form and TLS; §3 client
+inventory) → verify (`cache_compare.py`,
 app health, target connections via `CLIENT LIST` or `CurrConnections`/`NewConnections` on
 Serverless) → **rollback exercised** (repoint back, stale-data handling of §11 applied).
 Serverless online migration's repoint-before-sync order must be rehearsed exactly as it
 will run (§7.2 Stage A); C3 rehearsals include the TLS/RBAC transition C3-T1…T4; C1
-rehearsals are the clone-A/clone-B pair of §7.7.
+rehearsals are the clone-A/clone-B pair of §7.7. Every cache rehearsal also produces the
+§7.10 numbers, and its cleanup step **lists every rehearsal stack and resource by name**
+(stand-in source, scratch target, harness, test client) with its delete evidence — a
+rehearsal stand-in left running after "cleanup" is a finding (live: only the harness was
+removed). The A3 block that created them enumerates the same list.
+
+### 7.10 Cache readiness proofs — before GATE 2 and GATE 4 (all cache methods)
+
+Live (Memcached, Redis): each of these surfaced only in rehearsal or Phase 9 and forced a
+redeploy, a lost requirement or an unmet customer goal.
+
+1. **Exercise the client's REAL bulk path, with the target's TLS setting, before GATE 2.**
+   Not a `PING`/single `set`: the code path the app actually uses for bulk work (pipelined
+   `set_many`/`MSET`/pipeline, the prewarm job, the batch size it uses), through the same
+   client library and TLS mode, against a scratch target (an A3 node for minutes) — or GATE 2
+   lists it as an unproven assumption whose failure re-opens GATE 2, and the Phase 5 smoke test
+   runs it against the provisioned target **before** any warm-up or cutover planning. Measured
+   live: pymemcache over TLS ≈ **200 sets/s vs ≈ 16,000/s** plaintext on the same path — the
+   approved TLS design failed its 120 s prewarm budget and was rebuilt without TLS (node-based
+   Memcached TLS is creation-time only). Client TLS throughput can be orders of magnitude lower
+   than plaintext — measure, don't assume. **Error-hiding clients:** pymemcache defaults to
+   `noreply` for storage commands (`default_noreply=True`) and `HashClient(ignore_exc=True)`
+   turns errors into misses / a returned list of failed keys the app may ignore — the smoke
+   test counts what landed (`get_many` of the written keys, or `curr_items`/`cmd_set` deltas),
+   never the client's return code alone.
+2. **Size the warm-up to the hot set.** Estimate it from the source (`stats` `get_hits` /
+   `curr_items`, key-popularity sampling with the app's key patterns, `stats slabs`; Redis:
+   `INFO keyspace`, `--hotkeys` where the eviction policy is LFU). If the app's own prewarm
+   covers less than the hot set (live: 150k keys → post-cutover hit ratio 0.906 vs a
+   0.93–0.957 baseline the customer asked to keep), offer a **separate warmer** (replay the hot
+   keys from the backing store, or a dual-read/warm-from-source job over the source cache's keys
+   before repoint) and state the expected hit-ratio dip and recovery time at GATE 4.
+3. **Rehearsal measures end-to-end app calls against the target** — latency per call (p50/p95)
+   and throughput of the real app path from the app's network location (VPN / cross-AZ change
+   latency materially), side by side with the same run against the source — and GATE 4 shows
+   them with the customer's accepted ceiling. Live: +2.4 ms/call (over the 1.9 ms accepted) and
+   −10% throughput appeared only in Phase 9.
+4. **Parameter parity is a diff, not a claim.** Memcached: `stats settings` on source and
+   target, diffed key by key (live: `lru_crawler`, `lru_maintainer`, `slab_reassign`,
+   `slab_automove` differed although GATE 2 said "defaults same as source"); Redis/Valkey: the
+   named `CONFIG GET` list of §3 vs `describe-cache-parameters` on the attached group. Every
+   difference is either aligned (parameter group) or accepted at GATE 2.
+5. **Maintenance window clear of the actual cutover interval; maintenance exposure assessed.**
+   ElastiCache assigns a random 60-minute weekly window from the region's block
+   (ap-northeast-2: 12:00–20:00 UTC) unless `PreferredMaintenanceWindow` is set — set it at
+   creation (`cdk-stacks.md` ElastiCache snippet) so it does not overlap the **scheduled
+   cutover interval** (freeze → repoint → verification, plus its rehearsed rollback execution
+   time). A weekly window cannot avoid a multi-day soak or rollback window — do not try, and
+   **never shorten the soak** to dodge it. Instead, before GATE 4, list pending maintenance
+   from **both** APIs — their fields differ:
+   `aws elasticache describe-update-actions --replication-group-ids <id>` (or
+   `--cache-cluster-ids`) gives, per cache, `ServiceUpdateName`, `UpdateActionStatus`,
+   `ServiceUpdateSeverity`, `ServiceUpdateRecommendedApplyByDate`, `EstimatedUpdateTime`;
+   `aws elasticache describe-service-updates --service-update-name <name>` gives, per update,
+   `AutoUpdateAfterRecommendedApplyByDate` ("whether the service update will be automatically
+   applied once the recommended apply-by date has expired") and `ServiceUpdateEndDate`. An
+   update with `AutoUpdateAfterRecommendedApplyByDate: true` whose apply-by date falls before
+   the end of the rollback window will be scheduled into an upcoming maintenance window (the
+   ElastiCache guide: "during one of your clusters' upcoming maintenance windows after the
+   Auto-update start date"); critical security updates are applied in the maintenance window
+   regardless. Also read `describe-replication-groups` / `describe-cache-clusters`
+   `PendingModifiedValues`. Apply (`batch-apply-update-action`) or reschedule what you can
+   before cutover, and state the failover exposure of any window that
+   falls inside the soak/rollback period (node replacement/failover on a Multi-AZ group = brief
+   connection drop and a primary change; single-node / Memcached = cache contents lost on the
+   replaced node). Any unavoidable overlap with the soak or rollback window is presented and
+   **explicitly accepted** as its own block; show the window and the pending list at GATE 4.
 
 ---
 
@@ -510,7 +620,10 @@ python3 shared/scripts/cache_compare.py --config cache-compare.json --report evi
 | `alarms` (`alarm_names`) | Named CloudWatch alarms are OK now | Nothing about the past — §2.7 history review |
 
 Plus, mirroring `validation-patterns.md` §2.6: **each application user authenticates
-through the intended endpoint with the application's own client library**, TLS on,
+through the intended endpoint with the application's own client library** — the real app
+binary/script and config (same unit/`EnvironmentFile`), or a client that reproduces **exactly**
+its AUTH form (password-only vs username + password) and TLS setting; a test client that logs in
+differently proves nothing about the app, and GATE 3's "does NOT prove" column says so — TLS on,
 cluster mode as configured (a `MOVED`-following test for CME), and its ACL permits the
 commands it uses; Lua scripts/functions loaded or `NOSCRIPT` fallback proven; pub/sub
 subscribers reconnect; keyspace-notification consumers receive events (node-based).
@@ -562,7 +675,13 @@ automatic unless that schedule exists.
 ## 10. Client discovery and repoint (Phase 7.5)
 
 Start from #9, then verify and extend (same completion criterion as
-`cutover-procedures.md` §client discovery):
+`cutover-procedures.md` §client discovery). **How the target credential reaches each client
+host is decided by Phase 5 / GATE 2** (`cutover-procedures.md` §Credential delivery): on-host
+derivation from the existing local config (live: the target's `default` user got the source
+password through a CloudFormation dynamic reference to the customer's secret, and the app host
+built `app.env.target` with `sed` from its own config — the password never left the host), a
+fetch by the host's own role only if already in scope, customer-operated, or same password now
+with rotation in Phase 9 — never via SSM command parameters:
 
 1. **SG trace** of the source's 6379/11211 ingress — same as SQL Step 1.
 2. **`CLIENT LIST`** on **every node, primaries and replicas** (reads may target
@@ -600,14 +719,26 @@ Start from #9, then verify and extend (same completion criterion as
 
 **Freeze for caches** (A4 / customer): stop or pause writers (app maintenance flag), or
 `CLIENT PAUSE <ms> WRITE` on the source (Redis 6.2+; a production-source fence — scoped in
-A4); prove writers = 0 (`instantaneous_ops_per_sec` of write commands via commandstats
+A4). **GATE 4 impact text** states what clients experience: during the pause, write commands
+**block** (no error from the server) — a client whose socket/command timeout is shorter than the
+pause times out and reconnects/retries per its own policy (live, OBS-51: three "Timeout reading
+from socket … reconnecting in 5s" log lines before resuming against the target). Compare the
+planned pause (rehearsal-measured) with each client's socket timeout and retry behaviour,
+recorded from discovery #8a / the real app code (§3 client inventory), and tell the customer to
+expect app-level timeouts/errors or added latency for that span — and that the post-cutover
+report will count them from the app's own error stream, pause and after-pause separately
+(OBS-57); prove writers = 0 (`instantaneous_ops_per_sec` of write commands via commandstats
 deltas, `CLIENT LIST` cmd). Serverless online migration does its own `CLIENT PAUSE` at
 cutover. Then per method: C3 `complete-migration` → repoint → TLS/RBAC transition C3-T1…T4
 with per-user proof (§7.1 step 7); C2 Stage B (proxy repoint) earlier, Stage D
 `complete-migration` → deferred validation (§7.2); C1 the engine change itself (§7.7 step 3);
 C4 drain then stop RedisShake; C5 already frozen; C6 none; C7 switch reads. Repoint → bidirectional
 verification (app health **and** target `CLIENT LIST`/`CurrConnections` shows every
-inventoried client; source connections drained).
+inventoried client; source connections drained). Report app errors from the app's **own error
+stream** (journal/stderr/app log) as well as its write log — pause-time timeouts and reconnects
+explicitly (live, OBS-57: "0 app errors" from the write log hid 3 timeout + reconnect lines in the
+journal); never "0 errors" from a source that cannot record errors (`cutover-procedures.md`
+§Completion criterion).
 
 **Rollback — ElastiCache cannot replicate out** (`replicaof`, `sync`, `psync`, `migrate`,
 `bgsave`, `config` are restricted; non-ElastiCache replicas unsupported). So
@@ -618,8 +749,31 @@ inventoried client; source connections drained).
 | Before C3/C2 `complete-migration` | C3: clients never moved — do nothing. C2: `stop-migration`, repoint clients from the migration endpoint back to the source | 0 |
 | After cutover, **dual-write (C7) still on** | Switch reads back | 0 if failed secondary writes were reconciled |
 | After cutover, no dual-write | Repoint back to the source and **accept writes made on ElastiCache since cutover as lost** — explicit RPO acknowledgment in the plan/A4 | All writes since cutover |
-| After cutover, reverse logical copy | RedisShake `scan_reader` from ElastiCache → source (scan needs no `PSYNC`) — **UNVERIFIED** against ElastiCache; only if rehearsed | Not point-in-time |
+| After cutover, reverse logical copy | RedisShake `scan_reader` from ElastiCache → source (scan needs no `PSYNC`) — **UNVERIFIED** against ElastiCache; only if rehearsed; **size its bandwidth and latency cost first (below)** — every change re-copies the whole key | Not point-in-time |
 | After cutover, snapshot export | Export snapshot to S3 and load into the self-managed source **only if the RDB version is loadable** (never from Valkey 9) | Since the snapshot |
+
+**Reverse sync cost — scan-based readers re-copy the whole key on every change.** RedisShake's
+`scan_reader` with keyspace notifications (`ksn`) — the only reverse path from ElastiCache, where
+`PSYNC`/`SYNC` are unavailable — reacts to each change notification by reading the **whole key**
+with `DUMP` and writing it with `RESTORE` ("When a Key changes, RedisShake will receive the
+modified Key, then use the DUMP and RESTORE commands to read the content of the Key from the source
+and write it to the destination"; `DUMP` "is CPU-intensive" — RedisShake scan_reader docs; verify
+against your RedisShake version). Big, frequently written keys multiply bandwidth:
+
+    reverse bytes/s ≈ Σ over hot keys of (writes/s × key size)
+
+Live (OBS-63): one hot 38.5 MB stream (`events:orders`) drove ≈ 12 MB/s — ≈ 1 TB/day of transfer —
+plus ≈ 72 ms p99 latency spikes on the target, while GATE 2 had estimated data transfer at ≈ $0.
+**Before GATE 2:** list big keys (`--bigkeys`/`--memkeys`, `MEMORY USAGE` on candidates, per-type
+length — `XLEN`/`LLEN`/`HLEN`/`ZCARD`) and their write rate (app knowledge, or `MONITOR` sampling
+on the **rehearsal** copy only — never on production); compute reverse bytes/day and its cost
+(cross-AZ, VPN / Direct Connect / internet egress to the source) and the target-side impact
+(`DUMP` CPU, latency); **measure it in rehearsal** with the real write pattern. Present at GATE 2,
+per hot key, as decisions: (a) accept the cost for a bounded rollback window (state $ and window);
+(b) shorten the rollback window; (c) exclude the key from reverse sync (RedisShake `[filter]`) with
+an explicit RPO/reconciliation statement for it; (d) restructure it first (e.g. cap a stream with
+`XTRIM`/`MAXLEN`, split a big hash); (e) for that key, rollback without reverse sync (repoint and
+accept the loss, row 3 above).
 
 **Pure caches (C6/M1) roll back cheaply — but not blindly:** the old source still holds
 values from before cutover, and writes since went to ElastiCache, so a repointed client can
@@ -655,6 +809,9 @@ rollback window, with constraint 8's confirmation.
 - Validation: `cache_compare.py` with `"engine": "memcached"` — a **stats comparison, not a
   data comparison** (`data_match: "not_applicable"`); optional warmth checks
   (`memcached_min_items_ratio`, `memcached_max_hit_ratio_drop` with `memcached_min_gets`).
+- Readiness: §7.10 applies in full — the bulk-path TLS smoke test, hot-set-sized warm-up
+  (separate warmer when the app's prewarm is partial), end-to-end latency/throughput at
+  GATE 4, `stats settings` diff, maintenance window clear of the cutover + pending-maintenance review.
 - Soak: none (no live copy); the static alternative records the warm-up observation.
   Rollback: repoint back (stale-entry caveat of §11).
 
@@ -697,7 +854,9 @@ rollback window, with constraint 8's confirmation.
   replicas/Multi-AZ, snapshots, the migration host (C4), S3 seed storage (C5), Serverless
   online-migration nodes (free 180 days per account, then per node-hour), source
   double-running through the rollback window, Redis OSS Extended Support if staying on
-  4/5/6. Valkey pricing differences: §6.
+  4/5/6, and **reverse-sync data transfer** for a scan-based rollback path (§11 — bytes/day ≈
+  Σ hot-key writes/s × key size × 86,400, priced as cross-AZ / VPN / DX / internet egress; live:
+  ≈ 1 TB/day from one 38.5 MB stream, estimated $0 at GATE 2). Valkey pricing differences: §6.
 - IAM actions and the S3/KMS grants: `preflight-iam-cost.md` §2 (ElastiCache row);
   alarms and metric names/dimensions: `preflight-iam-cost.md` §4 and `cdk-stacks.md`
   §ElastiCache.
@@ -716,6 +875,11 @@ Facts brief: `research/facts-elasticache-mysql-pg.md` Part A (2026-10-28), whose
 [supported/restricted commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html) ·
 [Serverless configuration](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/RedisConfiguration.html) ·
 [parameter groups](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/ParameterGroups.Engine.html) ·
+[RBAC and the default user](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Clusters.RBAC.html) ·
+[AUTH token (requires in-transit encryption)](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/auth.html) ·
+[Redis ACL — one-argument AUTH authenticates the "default" user](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/) ·
+[service updates](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Self-Service-Updates.html) ·
+[RedisShake scan_reader (KSN: DUMP/RESTORE per changed key)](https://tair-opensource.github.io/RedisShake/en/reader/scan_reader.html) ·
 [in-transit encryption](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/in-transit-encryption.html) ·
 [RBAC](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Clusters.RBAC.html) ·
 [endpoints](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Endpoints.html) ·

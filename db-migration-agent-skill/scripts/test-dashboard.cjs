@@ -232,6 +232,28 @@ async function main() {
   assert(cwHTML.includes(escapeHTML(cwExample.compressed_window.intervals[0].limitations[0])), 'Interval limitation missing');
   assert(cwHTML.includes('reports/soak-manual-0800-1000.md'), 'Interval evidence missing');
   assert(cwHTML.includes('GREEN'), 'Interval verdict missing');
+  // OBS-42: hour-granular intervals render with their check table (compressed_window
+  // intervals carrying `checks`/`detail`), and sub-day soak.days entries render as
+  // time-labelled intervals with unique keys within one date.
+  const hourly = structuredClone(cwStatus);
+  hourly.soak.compressed_window.intervals = [
+    { started_at: '2026-10-28T18:55:00Z', ended_at: '2026-10-28T19:55:00Z', overall: 'green',
+      checks: { row_count: true, checksum: true, alarms: true }, detail: { orders_lag_rows: 0 } },
+    { started_at: '2026-10-28T19:55:00Z', ended_at: '2026-10-28T20:55:00Z', overall: 'unknown',
+      checks: { row_count: null } }];
+  const hourlyPage = await mount(hourly, smallLog);
+  const hHTML = hourlyPage.get('soak').innerHTML;
+  assert(hHTML.includes('2026-10-28 18:55:00Z → 2026-10-28 19:55:00Z') && hHTML.includes('2026-10-28 19:55:00Z → 2026-10-28 20:55:00Z'), 'hour intervals missing');
+  assert(hHTML.includes('Row count') && hHTML.includes('orders_lag_rows'), 'interval check table / detail missing');
+  const subDay = structuredClone(soakStatus);
+  subDay.soak.days = [0, 1, 2].map(h => ({ date: '2026-10-28', started_at: `2026-10-28T${19 + h}:00:00Z`,
+    ended_at: `2026-10-28T${20 + h}:00:00Z`, overall: 'green', checks: { row_count: true } }));
+  const sdHTML = (await mount(subDay, smallLog)).get('soak').innerHTML;
+  for (const h of [0, 1, 2]) assert(sdHTML.includes(`Interval ${h + 1} · 2026-10-28 ${19 + h}:00:00Z → 2026-10-28 ${20 + h}:00:00Z`), `interval ${h + 1} label`);
+  const keys = [...sdHTML.matchAll(/data-key="(soak-day-[^"]+)"/g)].map(m => m[1]);
+  assert.equal(new Set(keys).size, 3, 'sub-day entries need unique disclosure keys');
+  const koSub = (await mount({ ...subDay, lang: 'ko' }, smallLog)).get('soak').innerHTML;
+  assert(koSub.includes('1번째 구간'), 'ko interval label');
   delete cwStatus.soak.compressed_window;
   await page.update(cwStatus);
   assert.equal(page.get('soak').innerHTML.replace(escapeHTML(cwExample.waived_reason), escapeHTML('Recorded waiver')),
@@ -368,6 +390,66 @@ async function main() {
     assert(objHTML.includes(lang === 'en' ? 'Keyspaces (cache)' : '키스페이스 (캐시)'), 'keyspace card label missing');
     assert((objHTML.match(/row-mismatch/g) || []).length >= 1, 'a false sample_match must be highlighted');
     if (small.migration_objects && small.migration_objects.tables) assert(objHTML.includes(escapeHTML(small.migration_objects.tables.items[0].name)), 'tables card lost');
+    // OBS-28: a row with key counts only (no sampled/sample_match/comparison) must say so
+    // and must not render as validated, even if a writer set status "validated".
+    const countsOnly = { ...structuredClone(ks), migration_objects: { keyspaces: { total: 2, validated: 1, items: [
+      { name: 'db0', keys_source: 9514532, keys_target: 9514532, key_count_match: true, status: 'validated' },
+      { name: 'db1', keys_source: 1000, keys_target: 1000, sampled: 1000, mismatches: 0, key_count_match: true,
+        sample_match: true, comparison: 'match', status: 'validated' }] } } };
+    const coHTML = (await mount(countsOnly, smallLog)).get('objects').innerHTML;
+    const [db0Row, db1Row] = coHTML.split('<tr').filter(r => r.includes('>db0<') || r.includes('>db1<'));
+    const co = lang === 'en' ? 'counts only' : '건수만';
+    const coStatus = lang === 'en' ? 'counts only (no key sample)' : '건수만 일치 (표본 미비교)';
+    const validatedLabel = lang === 'en' ? '>validated<' : '>검증완료<';
+    assert((db0Row.match(new RegExp(co.replace(/[()]/g, '\\$&'), 'g')) || []).length >= 2, 'counts-only row must label the sample columns');
+    assert(db0Row.includes(coStatus) && !db0Row.includes(validatedLabel), 'counts-only row must not render as validated');
+    assert(db1Row.includes(validatedLabel) && !db1Row.includes(coStatus), 'sampled row keeps its validated badge');
+    assert(coHTML.includes(lang === 'en' ? '1/2 validated' : '1/2 검증완료'), 'aggregate recomputed from rows');
+    // Review r5 #12: partial sample fields never earn "validated", and the card aggregate is
+    // recomputed from the rows (a writer's inflated count is flagged, not shown).
+    const partial = { ...structuredClone(ks), migration_objects: { keyspaces: { total: 3, validated: 3, items: [
+      { name: 'db0', keys_source: 500, keys_target: 500, sampled: 0, key_count_match: true, status: 'validated' },
+      { name: 'db1', keys_source: 500, keys_target: 500, sampled: 0, sample_match: true, comparison: 'match', key_count_match: true, status: 'validated' },
+      { name: 'db2', keys_source: 0, keys_target: 0, sampled: 0, sample_match: true, comparison: 'match', key_count_match: true, status: 'validated' }] } } };
+    const pHTML = (await mount(partial, smallLog)).get('objects').innerHTML;
+    const pRows = Object.fromEntries(pHTML.split('<tr').filter(r => /mono">db\d</.test(r)).map(r => [r.match(/>(db\d)</)[1], r]));
+    const noResult = lang === 'en' ? 'not validated (no sample result)' : '검증 미완료 (표본 결과 없음)';
+    assert(pRows.db0.includes(noResult) && !pRows.db0.includes(validatedLabel), 'sampled:0 without a result must downgrade');
+    assert(pRows.db1.includes(noResult), 'a source with keys but 0 sampled keys is not a sample result');
+    assert(pRows.db2.includes(validatedLabel), 'an empty keyspace with a match result stays validated');
+    assert(pHTML.includes(lang === 'en' ? '1/3 validated' : '1/3 검증완료'), 'aggregate from downgraded rows');
+    assert(pHTML.includes(lang === 'en' ? 'status file says 3' : '상태 파일 값 3'), 'inflated aggregate flagged');
+    // Review r6 #6: missing counts or key_count_match:false never validate; the declared total
+    // stays the denominator and a gap between it and the listed rows is flagged.
+    const contra = { ...structuredClone(ks), migration_objects: { keyspaces: { total: 3, validated: 1, items: [
+      { name: 'db0', keys_source: 10, keys_target: 10, sampled: 10, sample_match: true, comparison: 'match', key_count_match: true, status: 'validated' },
+      { name: 'db1', sample_match: true, comparison: 'match', status: 'validated' },
+      { name: 'db2', keys_source: 10, keys_target: 9, sampled: 9, sample_match: true, comparison: 'match', key_count_match: false, status: 'validated' }] } } };
+    const cHTML = (await mount(contra, smallLog)).get('objects').innerHTML;
+    const cRows = Object.fromEntries(cHTML.split('<tr').filter(r => /mono">db\d</.test(r)).map(r => [r.match(/>(db\d)</)[1], r]));
+    assert(cRows.db0.includes(validatedLabel), 'complete evidence stays validated');
+    assert(cRows.db1.includes(noResult) && !cRows.db1.includes(validatedLabel), 'missing counts must not validate');
+    assert(cRows.db2.includes(noResult) && !cRows.db2.includes(validatedLabel), 'key_count_match:false must not validate');
+    assert(cHTML.includes(lang === 'en' ? '1/3 validated' : '1/3 검증완료'), 'declared total kept, count recomputed');
+    const short = { ...structuredClone(ks), migration_objects: { keyspaces: { total: 3, validated: 1, items: [contra.migration_objects.keyspaces.items[0]] } } };
+    const sHTML = (await mount(short, smallLog)).get('objects').innerHTML;
+    assert(sHTML.includes(lang === 'en' ? '1/3 validated' : '1/3 검증완료') && !sHTML.includes('1/1'), 'declared inventory is the denominator');
+    assert(sHTML.includes(lang === 'en' ? '1 of 3 declared keyspaces listed' : '선언된 3개 중 1개만 표시'), 'inventory gap flagged');
+    // Review r7 #6: contradictory or malformed evidence never validates; declared total kept.
+    const base = { keys_source: 10, keys_target: 10, sampled: 10, sample_match: true, comparison: 'match', status: 'validated' };
+    const evil = { ...structuredClone(ks), migration_objects: { keyspaces: { total: 7, validated: 7, items: [
+      { name: 'db0', ...base, key_count_match: true },
+      { name: 'db1', ...base, keys_target: 9, sampled: 1 },                                  // unequal, no key_count_match
+      { name: 'db2', ...base, mismatches: 3 },                                                // positive mismatch count
+      { name: 'db3', ...base, keys_source: -1, keys_target: -1 },                            // negative count
+      { name: 'db4', ...base, sampled: 2.5 },                                                 // non-integer
+      { name: 'db5', ...base, keys_target: 9, key_count_match: true, key_count_tolerance: 0 }, // diff beyond tolerance
+      { name: 'db6', ...base, keys_target: 9, key_count_match: true, key_count_tolerance: 1 }] } } }; // tool tolerance
+    const eHTML = (await mount(evil, smallLog)).get('objects').innerHTML;
+    const eRows = Object.fromEntries(eHTML.split('<tr').filter(r => /mono">db\d</.test(r)).map(r => [r.match(/>(db\d)</)[1], r]));
+    for (const k of ['db1', 'db2', 'db3', 'db4', 'db5']) assert(eRows[k].includes(noResult) && !eRows[k].includes(validatedLabel), `${k} must not validate`);
+    for (const k of ['db0', 'db6']) assert(eRows[k].includes(validatedLabel), `${k} keeps its validated badge`);
+    assert(eHTML.includes(lang === 'en' ? '2/7 validated' : '2/7 검증완료'), 'declared denominator, recomputed numerator');
   }
   const cacheSoak = structuredClone(soakStatus);
   cacheSoak.soak.days = [{ date: '2026-10-27', overall: 'red', needs_agent_review: true,
@@ -381,7 +463,7 @@ async function main() {
   assert(cacheHTML.includes('Row count'), 'SQL soak day must keep its original rows');
   const [cacheDay] = cacheHTML.split('2026-10-28');
   assert(!cacheDay.includes('Row count') && !cacheDay.includes('Schema drift'), 'cache day rendered SQL-only checks');
-  console.log('PASS cache keyspaces card (en/ko) and cache soak-day check rows (additive)');
+  console.log('PASS cache keyspaces card (en/ko, counts-only / no-sample-result rows downgraded, aggregate recomputed) and cache soak-day check rows (additive)');
   const empty = await mount({ phases: [], cutover_gates: [] }, '');
   assert.equal(empty.document.documentElement.lang, 'en');
   console.log(`PASS ${omissions} optional-field omissions; spec examples; en/ko parity; readiness; four-state soak; gaps; compressed soak window; escaping; fetch recovery; legacy logs; disclosure/focus preservation; zero/range costs`);

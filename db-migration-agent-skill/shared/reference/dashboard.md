@@ -57,8 +57,9 @@ only *where* they live changes, never their shape.
 
 ## Presigned-URL viewing (soak window only)
 
-`shared/scripts/generate_presigned_urls.py --bucket <bucket> --region <bucket-region>`
-(run at soak start; renew per the runbook) presigns GET URLs — signed for the bucket's
+`shared/scripts/generate_presigned_urls.py --bucket <bucket> --region <bucket-region>
+--must-cover-until <UTC: next renewal or window end + buffer>` (run at soak start; renew per
+the runbook — refresh the signing credentials first when they are the limit) presigns GET URLs — signed for the bucket's
 **actual** region, detected from S3, never the caller's default — for `index.html`, both files under `assets/`, `status.json`, and `activity-log.jsonl`, all
 expiring together for the requested coverage, then rewrites `index.html` so its CSS
 `href`, JS `src`, and the two data-fetch targets are those absolute presigned URLs instead
@@ -118,6 +119,54 @@ are the intended failure mode — say so up front when handing over the link, so
 stopped working" on day 8 of a 7-day soak reads as expected, not as a bug. See
 execution-runbooks.md's credential-longevity caveat for the one way this can fail *earlier*
 than the stated expiry (signing with short-lived credentials for a multi-day tier).
+
+**Links signed from a workstation/instance role** (live, OBS-40): the URL is ~2 KB because it
+embeds the role session token (`X-Amz-Security-Token`), and it stops working when that **role
+session** ends, whatever `--expires-seconds` said. State the real expiry = **min(requested,
+remaining lifetime of the signing credentials)** — the script prints it as `EFFECTIVE EXPIRY` and
+warns when the credentials are temporary. If that expiry falls inside the period the customer
+must watch (a long soak), **renew before it**: refresh the signing credentials first (a new role
+session / SSO login / re-assume — re-running with the same session reproduces the same expiry and
+cannot extend the link), then re-run with `--must-cover-until <next re-issue time or window end>`
+so the script refuses to issue a link that would expire earlier; put the re-issue time in the plan
+and the final message. A shorter or longer-lived link needs a different sharing mechanism — CloudFront with
+signed URLs/cookies, or (not recommended) an IAM user's long-term keys — each a **separate A3**
+block, never improvised.
+
+**Keeping the bucket copy current outside the soak** (a presigned link shared before the soak,
+e.g. under an A3 dashboard-sharing block): never a `while true; aws s3 cp …; sleep` loop started
+with `&` from the agent's shell — it holds a headless turn open forever (live, OBS-48). Use the
+shipped bounded, self-detaching publisher, which uploads only `status.json` and
+`activity-log.jsonl` when they change (never `index.html`, never `.status.lock`) and **stops by
+itself** at `--until`. The guarantee: no new S3 call within 15 s of `--until`; a call in flight
+(including a slow streaming body read, which socket timeouts do not bound) is **interrupted at
+`--until`** (SIGALRM via `setitimer`) or on SIGTERM; and a watchdog **hard-exits the process by
+`--until` + 30 s** whatever happens (5 s connect/read timeouts, no retries); the watchdog starts
+before any boto3 client, credential or bucket-region lookup, and that start-up runs under the same
+deadline. **An interrupted upload has an unknown outcome** — S3 may already have committed it — so
+recovery re-reads both objects and their ETags and never assumes `status.json` and
+`activity-log.jsonl` reflect the same cycle. It **fails closed**:
+every cycle that publishes anything — log-only cycles included — first reads the log's ETag, then
+`status.json` with its ETag, and stops when the status carries an active soak, is malformed, or
+cannot be read; it then writes `status.json` and only then the log, each as a **conditional
+write** (`IfMatch` on the ETag read before the guard, `IfNoneMatch='*'` for a new object) — any
+conflict abandons the whole cycle, so evidence appended after the guard read is never
+overwritten (it
+refuses to run if the installed boto3 lacks conditional writes). From the soak on the Lambda owns the bucket copy — read/modify/write instead:
+
+```bash
+python3 -B shared/scripts/dashboard_s3_publish.py --dir dashboard --bucket <bucket> --region <region> \
+  --until <UTC end of the window it serves> --detach      # prints PID, log, pidfile and the stop command
+python3 -B shared/scripts/dashboard_s3_publish.py --dir dashboard --bucket <bucket> --once   # one push now
+python3 -B shared/scripts/dashboard_s3_publish.py --dir dashboard --stop                       # end / Phase 9
+```
+
+Record the PID and the stop command in the plan (`engagement-safety.md` §Surfacing — Headless
+turns, rule 8) and stop it when the window ends or at Phase 9 cleanup. **Stop it — and confirm the
+stop (`--stop` exit 0 and `ps -p <pid>` empty) — before seeding or activating a soak**: the soak
+guard is a backstop, not the procedure. `--stop` signals only a process it can prove is this
+publisher (pidfile PID > 1 + run token in its command line + matching start time); otherwise it
+refuses (exit 1) and never signals anything else.
 
 ## The update rule — one habit, not two
 
@@ -408,7 +457,18 @@ that the skipped work ran; compression/reuse alone cannot close the requirement.
   (`match`/`mismatch`/`unknown`/`not_applicable` — a word, because merge-patch drops
   nulls); `status:"validated"` only when `comparison` is `match`. Uncompared contents
   (module types, keys over `max_elements`, an unselectable cluster db, an exhausted time
-  budget) are `unknown`, never validated. A `false` in either is a failed validation that blocks the `validation`
+  budget) are `unknown`, never validated. `status:"validated"` also **requires complete,
+  consistent evidence** — non-negative integer `keys_source`, `keys_target` and `sampled`;
+  `mismatches` absent or `0`; equal key counts, or a difference within the
+  `key_count_tolerance` the tool applied and published (with `key_count_match: true`;
+  cache_compare's default tolerance is 0); `key_count_match` not `false`; `sample_match: true`,
+  `comparison: "match"`, and `sampled > 0` whenever `keys_source > 0`. A hand-written row with key counts only, or partial fields (e.g.
+  `sampled: 0` with no result), must stay `loaded`; the page renders a row without any sample
+  field as "counts only"/"건수만" and any other `validated` row lacking that result as "not
+  validated (no sample result)". The card shows `n/total validated` with `n` computed from the
+  rows it displays and `total` the **declared** `keyspaces.total`; fewer listed rows than
+  declared ("1 of 3 declared keyspaces listed") and a differing `keyspaces.validated` ("status
+  file says N") are flagged, never trusted. A `false` in either is a failed validation that blocks the `validation`
   gate, exactly like `checksum_match:false`. Memcached has no keyspace inventory — its
   stats comparison is recorded in the step `detail` only (it is not a data comparison).
 
@@ -673,7 +733,13 @@ This optional fragment is additive, not a replacement `soak` shape:
   `planned_end_at` is a plan, not proof of elapsed green coverage. `tracking` is
   `manual`; `state` is `active|blocked|complete`, recorded by the agent.
 - `intervals[]` records ordered, non-overlapping contiguous coverage, one verdict
-  (`green|red|unknown`) and report references per interval. Reports contain the actual
+  (`green|red|unknown`) and report references per interval. **Hour-granular intervals** may
+  also carry `checks` (the same keys as a soak day — SQL or cache set — four-state) and
+  `detail` (additive); the page renders them with the same check table a day gets, so a
+  1-hour interval shows what a day would. Put sub-day soak intervals **here**, not in
+  `days[]` (live: a 3 × 1 h soak recorded as `days[]` with `n_total: 3` showed nothing useful);
+  a legacy writer's `days[]` entry that carries `started_at`/`ended_at` is still rendered as
+  "Interval N · start → end" with its own disclosure key, never merged by date. Reports contain the actual
   validation and full-period monitoring evidence, plus limitations. Missing, unknown,
   or RED intervals break the streak; do not sum disconnected green hours. Missing
   fields mean unrecorded, never pass.
@@ -749,7 +815,10 @@ this reference's JSON examples, using only Node built-ins.
 
 ## `activity-log.jsonl` — JSON Lines, APPEND ONLY, never rewritten
 
-One line per event, oldest first in the file (the page reverses it for display, shows the
+One line per event (a periodic probe loop writes **one rolling summary line per interval** —
+interval, probes, min/max/last values, failures, evidence-file link — never one line per probe;
+the per-probe detail goes to an evidence file, `engagement-safety.md` §Surfacing — Headless
+turns), oldest first in the file (the page reverses it for display, shows the
 newest 25 and puts the rest behind a "Show all (N)" / "모두 보기 (N)" disclosure — a
 472-line live log had made the page ~45,000 px tall; shorter logs render unchanged):
 

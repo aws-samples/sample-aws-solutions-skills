@@ -47,9 +47,30 @@
 8. Confirm with the user the window may close (no open incidents, baseline comparison
    accepted).
 9. **Stop reverse replication** (the source stops being a warm standby — from here,
-   rollback = restore from snapshot).
+   rollback = restore from snapshot). **Stop every detached job this engagement started**
+   (watchers, the dashboard publisher — `dashboard_s3_publish.py --dir dashboard --stop`,
+   `systemctl --user stop <prefix>-…`) from the PID/unit list in the plan, and confirm none is
+   left (`ps -o pid,sid,cmd` on each host). **List every replication slot on every PostgreSQL
+   endpoint with its retained WAL** and record it in the plan and the final report:
+
+   ```sql
+   SELECT slot_name, plugin, slot_type, active, active_pid,
+          pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal,
+          wal_status
+   FROM pg_replication_slots ORDER BY pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) DESC NULLS LAST;
+   ```
+
+   A slot no task still uses is dropped under an A6/A2 block, or — if the customer keeps it — listed
+   as a **hand-off item** with its owner, the WAL-growth alarm watching it, the measured growth per
+   hour and the hours of disk headroom left (live, OBS-81: a declined drop left ≈ 117 MB/h of WAL
+   retained).
 10. **Decommission** — with the explicit-confirmation rule (SKILL.md hard constraint 8),
-    listing exactly what is deleted:
+    listing exactly what is deleted. **Always present the A6 block at the end of Phase 9**, even
+    when the customer is expected to defer cleanup (live, OBS-64: no A6 was presented because the
+    customer had declined cleanup "for now"): the exact decommission scope, what is **kept** and
+    why (rollback copy, retention, the customer's own reasons), and the cost of keeping it. A
+    deferral is the customer's reply to that block — record it in `authorizations.md` and the
+    plan (what is kept, until when, who decides), never an unasked assumption.
     - Stop, snapshot (final image), then terminate the source EC2 (or stop if the user
       keeps it as a cold copy).
     - Delete DMS tasks, endpoints, then the replication instance.
@@ -72,10 +93,26 @@
 12. Mark the plan complete: final costs vs the GATE 2 estimate, lessons-learned notes,
     handover of the CDK project + runbooks to the customer.
 
+## Final report — mandatory "Corrections and incidents" section
+
+The final report always contains a **Corrections and incidents** section (write "none" only when
+there were none), listing:
+- every claim later found false — what was claimed, when (UTC), the truth, the exposure window and
+  its impact (live, OBS-80: the report omitted that the rollback path had been reported ready while
+  it was lossy);
+- every outage or degraded period (network, task stalls, an unavailable rollback path) with its
+  RPO/RTO effect;
+- every action executed without its block (the after-the-fact records in `authorizations.md`).
+
 ## Verify the handoff before delivery
 
 This also applies to the Mode 2 package prepared before customer cutover. Read
 [handoff-packaging.md](handoff-packaging.md) and use `shared/scripts/handoff_bundle.py`.
+**Where the ZIP goes:** in this engagement's own deliverables directory unless the customer names
+another path. `handoff_bundle.py` refuses an output inside its `--root`, so with `--root` = the
+engagement directory use a per-engagement sibling such as `<engagements>/<engagement>.handoff/`
+— never a directory shared by several engagements (live, OBS-65: a ZIP landed in a common
+`engagements/deliverables/`). Record the path in the plan and the final report.
 
 Build reports and dashboard summaries from the same reviewed operation results and
 evidence references. For supervised steps, use the attempt's `result.json` and bound

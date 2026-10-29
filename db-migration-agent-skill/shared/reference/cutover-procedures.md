@@ -169,10 +169,77 @@ binlog/LSN positions are different coordinates. Plan per consumer:
 Record each consumer + its plan in the `migration-plan.md` client inventory (they get
 their own rows).
 
+### Credential delivery to each client host — planned by Phase 5 / GATE 2, never first at GATE 4
+
+Live (OBS-43): the repoint needed the target password in `app.env` on the app host, and how it
+would get there was first worked out just before GATE 4 — a customer operator writing the file
+(a cutover-critical manual step on the customer in Mode 3), or installing the AWS CLI and
+granting the shared, un-prefixed hybrid SSM role new IAM (against the customer's prefix/no-
+shared-role-change rule). The plan must state, **per client host, by Phase 5 / GATE 2 at the
+latest**, how the new credentials reach it and how they are reverted, from what discovery #9
+found about how the app reads them (`EnvironmentFile`, config file, secret manager, env var):
+- **On-host derivation from the existing local config** — the host builds the new config from
+  its own current one (e.g. `sed` over `app.env` → `app.env.target`), when the target reuses
+  the source credential (set on the target from the customer-provided secret, e.g. a
+  CloudFormation dynamic reference); the secret never leaves the host. (Used live.) This is the
+  **only** exception to hard constraint 4 ("no credentials in files you generate"), and only
+  under all of these conditions:
+  - it is an **authorized** step (its A-block names the host, the live file and the staged
+    file) and the staged file exists **only on the customer's application host** — never on the
+    workstation, in the engagement repo, in `evidence/`, in the handoff bundle or in any log;
+  - the staged file gets the **same owner, group and mode as the live config** (e.g. `0600` or
+    `0640`, root or the app user — `install -m <mode> -o <owner> -g <group>` or
+    `chown --reference`/`chmod --reference`), created that way atomically, never world-readable
+    even briefly;
+  - it is verified **by allow-list, never by masking** (a `sed` mask leaked `API_KEY`/
+    `PRIVATE_KEY`, JSON/YAML password fields, multi-line values and the second URL on a line in
+    review): run `shared/scripts/config_diff.py <live> <staged>` **on the host** (copy the script
+    there; the config never leaves it). It is **fail-closed**: a value is printed only when the key
+    is a connection field (host/endpoint, port, TLS/SSL flag or SSL mode, db index or name, user,
+    URL — a key with a secret word such as PASS/SECRET/TOKEN/KEY/AUTH never is) **and** the value
+    passes that field's strict pattern (hostname/IP, port 1–65535, boolean, small integer,
+    identifier, `[A-Za-z0-9_.@-]{1,64}`; a URL is shown only as `scheme://host:port` — never its
+    userinfo, path, query or fragment). Every other key or value is reported only as
+    `changed | unchanged | added | removed` from SHA-256 comparisons on the host. Strict `KEY=VALUE`
+    env files are parsed (key names printed only if `^[A-Za-z_][A-Za-z0-9_]{0,63}$`); a JSON object is
+    compared as a whole — only top-level keys named exactly like a connection field are shown,
+    everything else is one `other content: changed (N) | unchanged` line from a type-preserving
+    canonical form, and no other JSON key name is ever printed (duplicates → opaque); any ambiguous env
+    construct (multi-line or continued values, unterminated quotes, duplicates), YAML and every
+    other format are compared as one opaque file (`changed | unchanged` only). No other command prints or copies a value off the host;
+  - it is **removed or reverted** once its job is done: the unused one of live/staged is deleted
+    after cutover is verified, or — if it is the rollback copy — when the rollback window closes;
+    record the deletion in the plan.
+- **A Secrets Manager fetch by the host's own role** — only if that role **already** has the
+  permission in scope; changing a host role is an IAM change: check the customer's
+  prefix/no-shared-resource rule (C-1-style constraints) **before** proposing it, and present it
+  as its own A3 block.
+- **Customer-operated** — their operator writes the file in a rehearsed, timed step (record it
+  as a customer action in the runbook; in Mode 3 it is a dependency, not an agent step).
+- **Same password now, rotation in Phase 9** — the target starts with the source's credential;
+  rotate after the rollback window, with its own block.
+Never pass a secret through SSM `send-command` parameters or a command string — Systems
+Manager: "don't include sensitive information formatted as plaintext, such as passwords … All
+Systems Manager API activity in your account is logged in an S3 bucket for AWS CloudTrail logs.
+This means that any user with access to S3 bucket can view the plaintext values of those secrets"
+([Running commands](https://docs.aws.amazon.com/systems-manager/latest/userguide/running-commands.html));
+the command history keeps it too.
+Rehearse the chosen delivery with the real app and include its revert.
+
 ### Completion criterion
-**Before cutover:** EVERY client has a reviewed repoint/revert plan, upstream change
-staged (not activated), and pool preparation complete; every replication/CDC consumer
+**Before cutover:** EVERY client has a reviewed repoint/revert plan **including how its new
+credentials are delivered** (above), upstream change staged (not activated), and pool
+preparation complete; every replication/CDC consumer
 has an approved Step 4 restart plan. This is the client-inventory readiness gate.
+**App errors are counted from the app's own error stream, never from a source that cannot
+record them.** Live (OBS-57): a cutover report said "0 app errors" from the app's write log,
+while its journal held three `TimeoutError('Timeout reading from socket') … reconnecting in 5s`
+lines during the write pause. Post-cutover verification counts errors from the app's error
+stream (systemd journal / stderr / app log, `journalctl -u <unit> --since <freeze start>`) **and**
+from any write/request log, for the pause window and after it separately, and reports them that
+way — e.g. "3 timeout + reconnect during the 31.5 s pause, 0 after". "0 errors" is written only
+from a source that records errors and was read for the whole interval.
+
 **After authorized cutover:** every client is repointed and verified bidirectionally
 (app health + new-DB processlist), and every consumer's plan is executed and verified.
 Mode 2 hands over these execution checks; the agent does not repoint to satisfy readiness.
@@ -283,7 +350,8 @@ WHERE TABLE_SCHEMA=DATABASE() AND EXTRA LIKE '%auto_increment%';
 SQL
 # Verify with SHOW CREATE TABLE (AUTO_INCREMENT=<n> > MAX(pk)) or after
 # SET SESSION information_schema_stats_expiry=0 — information_schema.TABLES.AUTO_INCREMENT
-# is cached for up to 24 h on 8.0+ and reads stale (validation-patterns.md §4 item 3).
+# is cached for up to 24 h on 8.0+ and reads stale (validation-patterns.md §4 item 3; live OBS-60).
+# A test INSERT after SELECT MAX(id) proves it in REHEARSAL only — never on production.
 # PostgreSQL — re-seed every owned sequence to its column max:
 #   SELECT setval(seq, COALESCE(max_val, 1)) for each sequence via pg_get_serial_sequence.
 
@@ -406,19 +474,51 @@ or the A4b handover (Mode 2), record each with its evidence:
 | ▢ | Task settings `"Logging": {"EnableLogging": true}` (log group `dms-tasks-<instance>`, stream `dms-task-<task resource id>`) | `describe-replication-tasks` → `ReplicationTaskSettings` | DMS "Logging task settings" |
 | ▢ | Reverse endpoints test-connected, TLS mode per dms-best-practices.md | `aws dms test-connection` | — |
 | ▢ | **Reverse task actually run and applying** on the rehearsal pair (execution-runbooks.md §Migration Rehearsal minimum): an INSERT, UPDATE and DELETE on the new side each confirmed on the source-version stand-in, plus CDC-latency alarms on the reverse task (task dimension = ARN suffix) seeing data | row-level evidence + alarm state | — |
+| ▢ | Triggers on the old source that app writes fire (audit rows, `updated_at`, event tables): DMS-applied rows fire them too (live: rollback doubled every audit row) — a **disable-at-cutover / re-enable-at-rollback** step pair in the runbook, or a writer guard (`USER()`, not `CURRENT_USER()`), rehearsed with a trigger-side row count | rehearsal count, runbook steps | mysql-postgresql.md §10 |
 
 **Engine-family change (MySQL ↔ PostgreSQL):** the reverse task crosses the family and its
 prerequisites differ by direction — a PostgreSQL new side needs `rds.logical_replication=1`
 (static; set at creation), `REPLICA IDENTITY FULL` on key-less tables and a logical slot +
 LSN captured at the freeze (PostgreSQL sources cannot start CDC from a timestamp); a MySQL
 new side needs the rows above. Rollback-side tables keep their original DDL
-(`DO_NOTHING`), with `change-data-type` rules for booleans. Checklists:
+(`DO_NOTHING`), with `change-data-type` rules for booleans. **A MySQL new primary with
+`ON DELETE/UPDATE CASCADE` FKs loses those child changes on the way back to PostgreSQL**
+(InnoDB does not binlog cascaded rows; the reverse apply's `session_replication_role = replica`
+skips PG's own FK actions): convert the cascades to binlogged app/trigger behaviour before
+cutover (preferred), or accept them and, after any rollback, reconcile every child table
+reachable through a cascade (`mysql-postgresql.md` §10 R2) with a keyed normalized compare
+against the MySQL side — an orphan count (R1) is only a detector and misses a re-created parent
+key — and rehearse a parent DELETE (and delete + re-insert) on the new side. Checklists:
 [mysql-postgresql.md](mysql-postgresql.md) §10 — same GATE 4 rule.
+
+After any task replacement, re-point the reverse-lag alarms, dashboards and the soak config to
+the new task's resource-id dimension and confirm datapoints for it; `INSUFFICIENT_DATA` on a
+rollback-path alarm means "not monitored" (OBS-75, `dms-best-practices.md` §Operating DMS tasks).
+Then list the replication slots on every PostgreSQL endpoint (slot, active, retained WAL via
+`pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)`) and, for each slot of a replaced task, drop it
+under its own block or keep it explicitly with a WAL-growth alarm and disk-headroom math (OBS-81:
+an orphan slot retained ≈ 117 MB/h).
 
 Endpoint test-connection alone proves reachability, not apply permission or binlog
 availability. Any unchecked row blocks GATE 4 unless a waiver with an explicit RPO
-acknowledgment is confirmed. At cutover step 8, confirm the task is `running` **and** that a
-post-cutover write has landed on the source before calling rollback "armed".
+acknowledgment is confirmed. **A `running` status is not proof** (live: a reverse task failed
+28 s after start while the drill had recorded "running" as success). At cutover step 8 — and
+in every rehearsal drill — call rollback "armed" only after a **hold of ≥ 60 s** in which every
+`describe-replication-tasks` poll shows `Status=running` with no `LastFailureMessage`, **and** a
+probe write on the new primary has landed on the old source (direct row evidence — for an
+engine-family change, one probe per replicated table across every type class, compared **by
+value** with the normalized cross-engine compare, `mysql-postgresql.md` §10.1/§10.2; the A5 RPO
+claim holds only after that value proof), **and**, for **each probed table**, `describe-table-statistics` shows `TableState` ≠
+`Table error` and `AppliedInserts`/`AppliedUpdates`/`AppliedDeletes` risen by that table's probes
+since a reading taken just before them, the task log shows no apply errors and
+`awsdms_apply_exceptions` (where present) is empty for the probe window, **and** the backlog has drained:
+`CDCIncomingChanges` counts changes still *waiting* to be applied (DMS: "waiting to be applied
+to the target"), so it is a backlog gauge, never applied-work evidence — it must return to ~0.
+Order the freeze so the old source is writable for DMS when the task starts: fence the
+application accounts (MySQL `ACCOUNT LOCK` + kill sessions; PostgreSQL `NOLOGIN` + terminate),
+never the server — `super_read_only` blocks DMS's `awsdms_control` creation **and** `ALTER USER`
+even for root (ERROR 1290), so turn `super_read_only` OFF first (`read_only` still holds the app),
+lock the app accounts, then `read_only` OFF.
 
 ### When Reverse Replication is NOT Possible
 
@@ -702,7 +802,86 @@ actual DB work into a 300+ s write pause. Rules:
 3. **Time-budget each step from the rehearsal** and put the numbers in the runbook; a step
    exceeding 2× its budget is an abort signal, not a "keep fiddling" signal.
 
+## Progress during the cutover on a headless runner
+
+When the customer's runner or wrapper shows **only the final message** of a turn (common for
+headless / scripted runs — `claude -p` with the default text output, scripted `kiro-cli` turns;
+it is a property of the runner, not of headless mode: `claude -p --output-format stream-json
+--include-partial-messages` can stream), say so in the GATE 4 presentation: **live per-step
+progress is on the dashboard** (each runbook step published `in_progress` → result), **the chat
+receives the result** (and any abort) when the turn ends. If the customer wants chat updates per
+phase, offer to split the cutover into turns **only at safe checkpoints the runbook allows** —
+before the freeze, after the switch is verified — never inside the write freeze, and never in a
+way that lengthens it (live, OBS-61; `engagement-safety.md` §Surfacing — Headless turns, rule 9).
+
+## Network-path redundancy — a GATE 4 precheck
+
+Check that every network path the cutover and the rollback window depend on is redundant: for a
+site-to-site VPN, both tunnels' status (`aws ec2 describe-vpn-connections --vpn-connection-ids
+<id> --query 'VpnConnections[0].VgwTelemetry[].[OutsideIpAddress,Status,StatusMessage,
+LastStatusChange]'` — both `UP`); for Direct Connect, the connection and virtual-interface states
+(`describe-connections`, `describe-virtual-interfaces` — `available`, BGP up). **A single active
+path is a risk the customer must accept explicitly at GATE 4**: an outage during the freeze or the
+rollback window has no fallback (live, OBS-84: an engagement cut over with VPN tunnel 2 down the
+whole time and the agent never raised it; the same dry run had a ≈ 20-min outage that stalled the
+reverse task). Record the state and the acceptance; re-check right before the freeze.
+
+## Go/no-go disclosure — rehearsed vs changed vs estimated (cutover and rollback)
+
+Live (OBS-73): during a production rollback, a new boolean-reconciliation step and a new
+precheck had been added to the runbook **after** the last full rehearsal cycle and tested only
+standalone, and the go/no-go quoted a write-pause figure that was an estimate. At every go/no-go
+(GATE 4, A4/A5 execution, any rollback decision):
+- **A step added or changed after the last full rehearsal makes the runbook "unrehearsed".**
+  Either re-run a full cycle on the rehearsal copy, or present the gap in the go/no-go message
+  itself: which steps were not rehearsed end to end (standalone tests named as such), and what an
+  untested failure of each could cause (extended freeze, partial apply, rollback blocked).
+- **Every timing figure is labelled** "measured in rehearsal <id/date>" or "estimate (basis)". The
+  customer accepts any estimate explicitly — an estimate never stands in for a rehearsed number.
+- **Any change to an approved boundary or parameter** — window, scope, batch size, thresholds,
+  abort criteria — is disclosed in the go/no-go message, **even when it is safer or wider**; the
+  approval covers what was approved, not its improved version.
+
+## Rehearse the production orchestrator, every branch (all engines)
+
+The rehearsal runs the **byte-identical production orchestrator** (same script revision/hash,
+same flags and config shape, only the endpoints differ) — not a rehearsal-specific variant — and
+**every check branch executes at least once**: the forward health hold, the reverse-readiness
+check, each abort path that can be triggered safely, and the rollback branch. Live (OBS-50): the
+production cutover's reverse-readiness check read a field the reverse reader type does not
+report; the rehearsals had gone through a different check path, so the branch had never run.
+Record per branch "executed in rehearsal (evidence)" or, for any rehearsal-only shortcut or
+unexecuted branch, list it explicitly as **not proven** at GATE 4.
+
+## Measure the write pause from commit boundaries (all engines)
+
+Live (OBS-62): a production cutover script reported a **0.3 s** write pause; the real pause was
+**≈134 s** (independently verified from the app's write log). It took "first write on the new side"
+from a business timestamp column with **seconds** granularity instead of a commit boundary; the
+agent caught it and switched to an id-boundary check. Rules:
+- **Pause = last committed write on the old side → first committed write on the new side.** Prefer
+  the application's own write log (each write's completion time, sub-second) or a commit timestamp
+  column with **sub-second** precision on each side. Generated IDs (`AUTO_INCREMENT`, sequences) are
+  **not guaranteed to be commit-ordered** (concurrent transactions commit out of id order), so an
+  id-boundary check — max id on the old side at quiescence vs the first id above it on the new side
+  — is a cross-check, not the measurement.
+- **Sanity check:** the measured pause can never be shorter than **confirmed quiescence → repoint
+  done** — quiescence = the old side drained (no new writes arriving, CDC/replication applied) and
+  no open write transactions — from the orchestrator's own timestamps; the freeze command's start
+  is not quiescence. A smaller value is a measurement error — investigate and do not report it;
+  report the pause only once the two agree.
+- **Never measure from second-granularity business timestamps** (`placed_at`, `created_at` at
+  `DATETIME(0)`/`timestamp(0)`), from app clocks that are not the commit, or from a single side.
+
 ## Minimize the Write-Pause Window (pre-cutover prep)
+
+**Keep full validation out of the freeze unless its measured time fits.** Live (PostgreSQL →
+MySQL rehearsal): a 29.7-minute write pause, 27 minutes of it a full normalized compare inside
+the freeze; the switch itself was 163 s. In the freeze run quick checks only — counts,
+watermark/last-key per table, per-column non-NULL counts, money sums and a keyed compare of the
+hot tables' newest keys with `--writes-frozen` (`mysql-postgresql.md` §9) — and run the full
+normalized compare right after the switch (with its live-data consistency caveat), or size it
+beforehand on a quiesced rehearsal. Budget every freeze step from measured rehearsal timings.
 
 
 For "absolute minimal downtime" EC2 → RDS/Aurora, the cutover pause is the time between *freezing the source* and *the app writing to the target*. CDC catch-up (matrix rows 6–7 — XtraBackup seed + binlog/CDC catch-up, DMS Full Load + CDC — and their Oracle analog, row 15's Data Pump seed + DMS CDC) is what makes this a **pause measured in seconds, not the whole transfer** — the bulk load runs while the app stays up, and only the final CDC drain happens inside the window. Shrink that window with these prep steps:

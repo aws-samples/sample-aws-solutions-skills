@@ -15,6 +15,11 @@ can measure one step while the rest remain estimated; do not label the whole run
 measured. A syntax-only check is not a duration measurement. Split a mixed step or mark
 it estimated and identify its measured component.
 
+**Go/no-go disclosure** (`cutover-procedures.md` §Go/no-go disclosure): steps added/changed since
+the last full rehearsal {none / list + how tested + what an untested failure could cause}; every
+timing figure labelled {measured in rehearsal <id> / estimate (basis) — estimates accepted
+explicitly}; changes to approved boundaries/parameters {none / list — disclosed even if safer}.
+
 **Operational contacts:** operator: {team/channel} · app owner: {team/channel}
 **Approval and abort authority:** confirmed context-and-mark block in `authorizations.md`
 (no identifying approval details); agreed abort criteria apply at every step.
@@ -24,6 +29,7 @@ it estimated and identify its measured component.
 | ✅ | Step | Command / action | Expect |
 |---|------|------------------|--------|
 | ▢ | Validation green (GATE 3) | see migration-plan.md Phase 7 | all ▢→✅ |
+| ▢ | Network-path redundancy (cutover-procedures.md §Network-path redundancy) | VPN: `describe-vpn-connections` → `VgwTelemetry` both tunnels; DX: connection + VIF state | both paths up — or a single path explicitly accepted at GATE 4 (recorded); re-checked right before the freeze |
 | ▢ | Production settings effective before validation/soak | {parameter group, reboot/session checks} | durable commits, integrity checks, TLS/timezone, approved backups/availability |
 | ▢ | Method-specific readiness | {CDC: observed N green periods / offline: accepted static-copy evidence and final-copy obligation}; migration-plan.md Phase 7.7 | applicable evidence/waiver conditions resolved; soak-exit confirmed; no invented green intervals |
 | ▢ | **Mode 3:** cutover authorization confirmed (A4) + abort criteria agreed. **Mode 2:** handover acceptance confirmed (A4b) + abort criteria agreed with the customer's own team | authorizations.md §3 | that block's `**Confirmed:**` date present (no name — this checks the block exists and is marked, not who marked it) |
@@ -99,8 +105,9 @@ blocks source release even when A5 is accepted.
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 4. Final CDC drain | {fresh CloudWatch Source/Target metrics and C1/C2 applied source checkpoint} | post-freeze datapoints =0; missing/stale blocks | retain fences; inspect actual apply state; approved recovery only |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 5. Stop forward task | `aws dms stop-replication-task --replication-task-arn {fwd-arn}` | `stopped` | inspect actual task/checkpoint; no blind restart |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 6. Spot-validate {3-5 critical tables} | {C3 — source queries and target queries separately} | match | ROLLBACK |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 7. Reset AUTO_INCREMENT / sequences on target | {C4 — target statements file} | next-val > max | ROLLBACK |
-| ▢ | {duration} | {measured/estimated + evidence/basis} | 8. Start REVERSE replication (fresh start from freeze point, never-run task) | {retain source app/job fence; clear read-only controls for ordinary DMS SQL apply}; `aws dms start-replication-task --replication-task-arn {rev-arn} --start-replication-task-type start-replication` | `running`; apply permissions rehearsed; source app writers still blocked | abort unless alternative rollback/RPO explicitly confirmed |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 7. Reset AUTO_INCREMENT / sequences on target | {C4 — target statements file} | next-val > max — MySQL via `SHOW CREATE TABLE` or `information_schema_stats_expiry=0` (the cached `information_schema.TABLES.AUTO_INCREMENT` reads stale) | ROLLBACK |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 7b. **Heterogeneous / DMS reverse only — trigger step pair (cutover half):** disable on the reverse target (old source) every trigger that app writes fire {list}; create the deferred target triggers {list} | {MySQL: `DROP TRIGGER …` (DDL saved for rollback) or swap in the `USER()`-guarded version; PG: `AfterConnectScript: SET session_replication_role = replica` proven, or `ALTER TABLE … DISABLE TRIGGER …`} | trigger inventory matches the rehearsed state both sides | ROLLBACK (re-enable half is rollback-runbook step 5b) |
+| ▢ | {duration} | {measured/estimated + evidence/basis} | 8. Start REVERSE replication (fresh start from freeze point, never-run task) | {retain source app/job fence (app accounts locked, not `super_read_only`); clear read-only controls for ordinary DMS SQL apply}; `aws dms start-replication-task --replication-task-arn {rev-arn} --start-replication-task-type start-replication` {PG new side: `--cdc-start-position {slot LSN}`} | **hold ≥ 60 s:** `Status=running` on every poll, no `LastFailureMessage`; **probe matrix** {homogeneous: one probe table; engine-family change: one probe row INSERT/UPDATE/DELETE on **every** replicated table, spanning every type class — uuid, boolean, numeric, json, timestamps, … — `mysql-postgresql.md` §10.2} each verified **by key and by value** on the old source (normalized cross-engine compare of the probe keys, MATCH — presence alone is not proof, OBS-69); **per table** `describe-table-statistics`: `TableState` ≠ `Table error`, `AppliedInserts/Updates/Deletes` rose by that table's probes (delta); task log free of apply errors for the probe window; `awsdms_apply_exceptions` (where present) empty for the window; `CDCIncomingChanges` backlog drained to ~0 — a transient `running` or good overall counters are not proof (live: every uuid table's changes went unapplied while the task ran); source app writers still blocked | abort unless alternative rollback/RPO explicitly confirmed |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 9. Repoint: {secret update / DNS swap / config+unit change} | {exact command(s) per client} | persistent highest-priority config matches intended endpoint | retain fences; verify every changed layer under rollback runbook |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 10. Refresh/restart clients ({coordinated / rolling-with-frozen-source}) | {per-client commands} | reload succeeded; effective process/pool endpoint and start identity verified | reconcile persistent config AND running clients; approved recovery only |
 | ▢ | {duration} | {measured/estimated + evidence/basis} | 11. **Bidirectional verify** | app health = UP **and** target processlist shows {expected client IPs, ~pool counts} | both | ROLLBACK |
@@ -108,6 +115,11 @@ blocks source release even when A5 is accepted.
 
 **Total budgeted write-pause: {n}s. End-to-end rehearsal: {measured duration + evidence /
 not measured; do not describe summed component times as a measured full pause}.**
+**Measured write pause (after the switch):** {last committed old-side write → first committed
+new-side write, from the app's write log or sub-second commit timestamps (generated IDs are not
+commit-ordered — cross-check only) — never second-granularity business timestamps} = {s}; sanity
+check: ≥ confirmed quiescence (old side drained, no open write transactions) → repoint done ({s}) — a smaller value is a measurement error, not reported (`cutover-procedures.md` §Measure the
+write pause).
 
 ## Post-cutover account cleanup (native binlog replication only)
 

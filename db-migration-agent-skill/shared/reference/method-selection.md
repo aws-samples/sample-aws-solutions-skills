@@ -160,6 +160,13 @@ schema (`TargetTablePrepMode` `DO_NOTHING`/`TRUNCATE_BEFORE_LOAD`, never `DROP_A
 | H4 | Any PostgreSQL-family | Aurora MySQL / RDS MySQL | Any | Yes (hours) | Yes | **DMS Full Load** (no pgloader equivalent; MySQL Workbench Migration Wizard only for small offline copies) | Same as H1 (reverse = MySQL → PostgreSQL, §10.2) |
 | H5 | Any PostgreSQL-family (`wal_level=logical`, slot capacity) | Aurora MySQL / RDS MySQL | Any | No (minutes / near-zero) | per estimate | **DMS Full Load + CDC** | Reverse DMS MySQL → PostgreSQL CDC-only from the binlog position at the freeze; `binlog retention hours` ≥ 24 on the new MySQL |
 
+**DMS rows (H2–H5, and H1's DMS fallback) carry a GATE 2 blocker check:** any table without a
+PK/UK whose columns DMS maps to a LOB (the confirmed rows of mysql-postgresql.md §2 A10 / §3 P9;
+the `dms_lob = 0/false` rows are conditional checks, §4.7) loses those columns
+silently under DMS, in the forward **and** the reverse task — GATE 2 names the chosen remedy
+per table (§4.7) or the DMS row is not eligible. The same check applies to every homogeneous
+DMS row.
+
 Bandwidth-bound (> 1 TB over a thin link): there is no file-seed path across the family
 (row 8's DataSync seed restores native files) — DMS must carry the bulk; size the
 replication instance (C-family for conversion CPU, `dms-best-practices.md`) and use
@@ -258,3 +265,7 @@ C6 (cold start), C2 (Serverless Valkey online migration), C3 (node-based online 
 C4 (RedisShake), C5 (RDB → S3 seed), C7 (dual-write overlay), top-down, first match.
 ElastiCache cannot replicate out, so the rollback-direction gate above always resolves to
 §11 of that file (repoint + accepted RPO, or dual-write).
+
+A reverse RedisShake `scan_reader` rollback path re-copies the **whole key** on every change, so
+big, frequently written keys can turn it into a large bandwidth and latency cost — size it before
+GATE 2 (`elasticache-migration.md` §11 "Reverse sync cost").

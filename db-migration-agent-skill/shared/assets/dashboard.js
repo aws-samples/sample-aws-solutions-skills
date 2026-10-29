@@ -64,6 +64,9 @@
       objTableCol: { name: 'Table', src: 'Source rows', tgt: 'Target rows', cs: 'Checksum', status: 'Status' },
       objTypeLabel: { tables: 'Tables', keyspaces: 'Keyspaces (cache)', views: 'Views', procedures: 'Procedures', functions: 'Functions', triggers: 'Triggers', events: 'Events' },
       objKeyspaceCol: { name: 'Keyspace', src: 'Source keys', tgt: 'Target keys', sampled: 'Keys compared', match: 'Sample', status: 'Status' },
+      ksCountsOnly: 'counts only', ksCountsOnlyStatus: 'counts only (no key sample)',
+      ksNoSampleResult: 'not validated (no sample result)', ksAggReported: (n) => `status file says ${n}`,
+      ksInventoryGap: (n, t) => `${n} of ${t} declared keyspaces listed`,
       objStatusBadge: { pending: 'pending', loading: 'loading', loaded: 'loaded', validated: 'validated', created: 'created', deferred: 'deferred to cutover' },
       phaseBadge: { done: 'done', in_progress: 'in progress', pending: 'pending', blocked: 'blocked' },
       objectsCountSuffix: 'validated',
@@ -71,7 +74,7 @@
       soakSub: 'observation window before cutover is recommended',
       soakExplain: (n) => `Production remains on the source while the target receives replicated changes. We require ${n} consecutive green day(s) plus soak-exit acceptance. Scheduled samples alone cannot rule out an overnight incident; full-period evidence must also be reviewed.`,
       soakCounterOf: (n) => `/ ${n} consecutive green`,
-      soakDayLabel: (n) => `Day ${n}`,
+      soakDayLabel: (n) => `Day ${n}`, soakIntervalLabel: (n) => `Interval ${n}`,
       soakReviewBanner: (n) => `Day ${n} needs review — ask the agent to look at this before continuing`,
       soakOverdueBanner: (hrs) => `No soak check in ${hrs}h — the scheduled run may have been missed (host down, cron didn't fire, script crashed). Verify it's still running.`,
       soakWaived: (reason) => `Soak waived${reason ? ' — ' + reason : ''}.`,
@@ -169,6 +172,9 @@
       objTableCol: { name: '테이블', src: '소스 행 수', tgt: '타깃 행 수', cs: '체크섬', status: '상태' },
       objTypeLabel: { tables: '테이블', keyspaces: '키스페이스 (캐시)', views: '뷰', procedures: '프로시저', functions: '함수', triggers: '트리거', events: '이벤트' },
       objKeyspaceCol: { name: '키스페이스', src: '소스 키 수', tgt: '타깃 키 수', sampled: '비교한 키', match: '표본 비교', status: '상태' },
+      ksCountsOnly: '건수만', ksCountsOnlyStatus: '건수만 일치 (표본 미비교)',
+      ksNoSampleResult: '검증 미완료 (표본 결과 없음)', ksAggReported: (n) => `상태 파일 값 ${n}`,
+      ksInventoryGap: (n, t) => `선언된 ${t}개 중 ${n}개만 표시`,
       objStatusBadge: { pending: '대기', loading: '적재중', loaded: '적재완료', validated: '검증완료', created: '생성완료', deferred: '컷오버 시 생성' },
       phaseBadge: { done: '완료', in_progress: '진행중', pending: '대기', blocked: '중단' },
       objectsCountSuffix: '검증완료',
@@ -176,7 +182,7 @@
       soakSub: '컷오버 권고 전 관찰 기간',
       soakExplain: (n) => `운영은 소스에서 계속하고 타깃은 변경분을 복제받습니다. ${n}일 연속 green과 병행 가동 종료 승인이 필요합니다. 예약된 표본 점검만으로는 야간 장애를 배제할 수 없으므로 전체 기간의 증빙도 검토해야 합니다.`,
       soakCounterOf: (n) => `/ ${n}일 연속 green`,
-      soakDayLabel: (n) => `${n}일차`,
+      soakDayLabel: (n) => `${n}일차`, soakIntervalLabel: (n) => `${n}번째 구간`,
       soakReviewBanner: (n) => `${n}일차 확인 필요 — 계속하기 전에 에이전트에게 검토를 요청하세요`,
       soakOverdueBanner: (hrs) => `${hrs}시간 동안 소크 점검이 실행되지 않았습니다 — 예약된 실행이 누락되었을 수 있습니다 (호스트 다운, cron 미실행, 스크립트 오류). 정상 동작 중인지 확인하세요.`,
       soakWaived: (reason) => `병행 가동 생략됨${reason ? ' — ' + reason : ''}.`,
@@ -486,20 +492,47 @@
 
   // Additive cache type (cache_compare.py): one row per logical db; sample_match is the
   // four-state sampled TYPE/TTL/value comparison, never inferred from the key counts.
+  // A row without any sample field (sampled / sample_match / comparison) was compared by key
+  // counts only: say so instead of leaving the columns blank, and never show it as validated.
+  // "validated" is displayed only with complete, consistent evidence: numeric keys_source,
+  // keys_target and sampled, key_count_match not false, sample_match true AND comparison
+  // "match", and a non-zero sample when the source has keys. Anything missing or contradictory
+  // — e.g. sampled: 0 with no result, absent counts, key_count_match: false — is downgraded,
+  // whatever the writer put in `status`.
+  // Counts must be non-negative integers; unequal counts validate only inside the tolerance the
+  // comparison tool itself applied and published (key_count_match true AND |diff| <=
+  // key_count_tolerance; cache_compare's default tolerance is 0); any mismatch > 0 never validates.
+  const ksNum = v => typeof v === 'number' && Number.isFinite(v);
+  const ksCount = v => Number.isInteger(v) && v >= 0;
+  const ksCountsOnly = it => it.sampled == null && it.sample_match == null && it.comparison == null;
+  const ksCountsAgree = it => it.keys_source === it.keys_target
+    || (it.key_count_match === true && ksCount(it.key_count_tolerance)
+        && Math.abs(it.keys_source - it.keys_target) <= it.key_count_tolerance);
+  const ksHasSampleResult = it => ksCount(it.keys_source) && ksCount(it.keys_target) && ksCount(it.sampled)
+    && (it.mismatches == null || it.mismatches === 0) && it.key_count_match !== false && ksCountsAgree(it)
+    && it.sample_match === true && it.comparison === 'match'
+    && !(it.keys_source > 0 && !(it.sampled > 0));
+  const ksValidated = it => it.status === 'validated' && ksHasSampleResult(it);
   function renderKeyspaceRows(items) {
     const l = L();
     return items.map(it => {
       const bad = it.sample_match === false || it.key_count_match === false;
+      const countsOnly = ksCountsOnly(it);
       const sm = it.sample_match === true ? `<span class="cs-ok">${esc(l.checksumMatch)}</span>`
         : it.sample_match === false ? `<span class="cs-bad">${esc(l.checksumMismatch)}</span>`
+        : countsOnly ? `<span class="cs-pending">${esc(l.ksCountsOnly)}</span>`
         : '<span class="cs-pending">—</span>';
+      const sampled = countsOnly ? `<span class="cs-pending">${esc(l.ksCountsOnly)}</span>` : fmtNum(it.sampled);
+      const status = it.status === 'validated' && !ksValidated(it)
+        ? `<span class="obj-badge loaded">${esc(countsOnly ? l.ksCountsOnlyStatus : l.ksNoSampleResult)}</span>`
+        : `<span class="obj-badge ${esc(it.status)}">${l.objStatusBadge[it.status] || esc(it.status)}</span>`;
       return `<tr class="${bad ? 'row-mismatch' : ''}">
         <td class="mono">${esc(it.name)}</td>
         <td class="num mono">${fmtNum(it.keys_source)}</td>
         <td class="num mono">${fmtNum(it.keys_target)}</td>
-        <td class="num mono">${fmtNum(it.sampled)}</td>
+        <td class="num mono">${sampled}</td>
         <td>${sm}</td>
-        <td><span class="obj-badge ${esc(it.status)}">${l.objStatusBadge[it.status] || esc(it.status)}</span></td>
+        <td>${status}</td>
       </tr>`;
     }).join('');
   }
@@ -511,10 +544,21 @@
     const countLabel = o.validated != null ? l.objectsCountSuffix
       : o.loaded != null ? l.objectLoaded : o.done != null ? l.objectRecorded : l.notRecorded;
     if (typeKey === 'keyspaces') {
+      // The validated count is recomputed from the rows' displayed (downgraded) state, never
+      // trusted; the denominator stays the DECLARED inventory total, and a declared total that
+      // the listed rows don't cover (or a different stored count) is flagged, not hidden.
       const c = l.objKeyspaceCol;
+      const rows = o.items || [];
+      const shown = rows.filter(ksValidated).length;
+      const declared = ksNum(o.total) ? o.total : null;
+      const total = declared ?? rows.length;
+      const flags = [];
+      if (declared != null && rows.length !== declared) flags.push(l.ksInventoryGap(rows.length, declared));
+      if (o.validated != null && Number(o.validated) !== shown) flags.push(l.ksAggReported(o.validated));
+      const drift = flags.length ? ` <span class="cs-bad">(${esc(flags.join('; '))})</span>` : '';
       return `<div class="obj-card obj-card-wide">
         <div class="obj-card-head"><span class="obj-title">${esc(label)}</span>
-          <span class="obj-count">${esc(doneCount)}/${esc(o.total)} ${esc(countLabel)}</span></div>
+          <span class="obj-count">${esc(shown)}/${esc(total)} ${esc(l.objectsCountSuffix)}${drift}</span></div>
         <div class="table-scroll"><table class="obj-table">
           <thead><tr><th>${esc(c.name)}</th><th>${esc(c.src)}</th><th>${esc(c.tgt)}</th><th>${esc(c.sampled)}</th><th>${esc(c.match)}</th><th>${esc(c.status)}</th></tr></thead>
           <tbody>${renderKeyspaceRows(o.items || [])}</tbody>
@@ -621,10 +665,13 @@
     if (!cw || typeof cw !== 'object' || Array.isArray(cw)) return '';
     const l = L();
     const when = (iso) => iso ? String(iso).replace('T', ' ') : l.notRecorded;
+    // Hour-granular intervals may carry the same `checks` / `detail` as a soak day (additive):
+    // rendered with the same check table, so a 1-hour interval shows what a day would.
     const rows = list(cw.intervals).filter(iv => iv && typeof iv === 'object').map((iv, i) => disclosure(
       `soak-cw-${i}-${iv.started_at || ''}`,
       `${when(iv.started_at)} → ${when(iv.ended_at)} · ${l.cwVerdict[iv.overall] || l.dayUnknown}`,
-      references(iv.evidence) + (list(iv.limitations).length ? `<h4>${esc(l.cwLimitations)}</h4>${bullets(iv.limitations)}` : '')
+      (soakChecksTable(iv) + references(iv.evidence)
+        + (list(iv.limitations).length ? `<h4>${esc(l.cwLimitations)}</h4>${bullets(iv.limitations)}` : ''))
         || `<p class="empty">${esc(l.notRecorded)}</p>`)).join('');
     return `<div class="soak-compressed"><h3>${esc(l.cwTitle)}</h3>
       <p>${badge(cw.state, l.cwState)} ${numeric(cw.required_hours)
@@ -644,6 +691,16 @@
     return !!c && typeof c === 'object' && ('key_count' in c || 'sample_match' in c);
   }
 
+  // The per-day / per-interval check table (only when the entry carries `checks`).
+  function soakChecksTable(d, keySuffix = '') {
+    if (!d || !d.checks || typeof d.checks !== 'object') return '';
+    const l = L();
+    return `<table class="obj-table"><thead><tr><th>${esc(l.check)}</th><th>${esc(l.result)}</th></tr></thead><tbody>
+      ${Object.entries(isCacheDay(d) ? l.soakCacheCheckLabel : l.soakCheckLabel).map(([k, label]) => `<tr><td>${esc(label)}</td><td>${checkMark(d.checks?.[k])}</td></tr>`).join('')}
+      </tbody></table>${d.detail && Object.keys(d.detail).length
+        ? disclosure(`soak-evidence-${keySuffix || d.started_at || d.date}`, l.sampleDetail, `<pre>${esc(JSON.stringify(d.detail, null, 2))}</pre>`) : ''}`;
+  }
+
   function renderSoak(s) {
     const l = L();
     const soak = s.soak;
@@ -654,7 +711,11 @@
       return;
     }
     const nTotal = soak.n_total || 0;
-    const days = list(soak.days).slice().sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+    // Sub-day entries (started_at/ended_at, additive) sort by start time and are labelled as
+    // intervals with their time range; their disclosure keys stay unique within one date.
+    const sortKey = d => String(d.started_at || d.date || '');
+    const days = list(soak.days).slice().sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    const when = (iso) => iso ? String(iso).replace('T', ' ') : l.notRecorded;
     const consecutive = soak.consecutive_green || 0;
     const needsReview = days.some(d => d.needs_agent_review);
     const lastReviewDay = days.map((d, i) => ({ d, i })).filter(x => x.d.needs_agent_review).pop();
@@ -666,12 +727,11 @@
       ? (Date.now() - new Date(lastExpectedRun).getTime()) / 3600000 : 0;
     const isOverdue = soak.state === 'active' && (!lastExpectedRun || !Number.isFinite(overdueHrs) || overdueHrs > 36);
 
-    const dayCells = days.map((d, i) => disclosure(`soak-day-${d.date}`,
-      `${l.soakDayLabel(i + 1)} · ${d.date || '—'} · ${l.dayVerdict[d.overall] || l.dayUnknown}`,
-      `<table class="obj-table"><thead><tr><th>${esc(l.check)}</th><th>${esc(l.result)}</th></tr></thead><tbody>
-      ${Object.entries(isCacheDay(d) ? l.soakCacheCheckLabel : l.soakCheckLabel).map(([k, label]) => `<tr><td>${esc(label)}</td><td>${checkMark(d.checks?.[k])}</td></tr>`).join('')}
-      </tbody></table>${d.detail && Object.keys(d.detail).length
-        ? disclosure(`soak-evidence-${d.date}`, l.sampleDetail, `<pre>${esc(JSON.stringify(d.detail, null, 2))}</pre>`) : ''}`,
+    const dayCells = days.map((d, i) => disclosure(`soak-day-${d.date}${d.started_at ? `-${d.started_at}` : ''}`,
+      d.started_at
+        ? `${l.soakIntervalLabel(i + 1)} · ${when(d.started_at)} → ${when(d.ended_at)} · ${l.dayVerdict[d.overall] || l.dayUnknown}`
+        : `${l.soakDayLabel(i + 1)} · ${d.date || '—'} · ${l.dayVerdict[d.overall] || l.dayUnknown}`,
+      soakChecksTable({ ...d, checks: d.checks || {} }, d.started_at ? `${d.date}-${d.started_at}` : d.date),
       i === days.length - 1)).join('');
 
     setHTML('#soak', `

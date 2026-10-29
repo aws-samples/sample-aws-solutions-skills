@@ -36,8 +36,11 @@ the requested one — as the link's lifetime.
 
 DEFAULT: re-issue on demand. Re-running this script is always safe (it starts from the
 clean template each time — see below); when the customer needs to look, re-run it and send
-the new CUSTOMER LINK, stating its effective expiry. Do NOT casually suggest creating
-long-term IAM user keys to get a longer link.
+the new CUSTOMER LINK, stating its effective expiry. When the effective expiry is limited by
+the signing credentials, a re-run with the SAME credentials produces the SAME expiry — refresh
+them first (new role session / SSO login / re-assume), and pass --must-cover-until <time the
+link must still work> so the script refuses to issue a link that would expire earlier. Do NOT
+casually suggest creating long-term IAM user keys to get a longer link.
 
 ONLY IF a longer-lived link is genuinely required (e.g. a stakeholder who must watch a
 multi-day soak without asking): propose a DEDICATED signing IAM user as a new long-term
@@ -59,7 +62,7 @@ Even then a single SigV4 signature is capped at 604800 s (7 days).
 
 Usage:
     python3 generate_presigned_urls.py --bucket my-dashboard-bucket --region ap-northeast-2 \
-        --expires-seconds 604800
+        --expires-seconds 604800 --must-cover-until 2026-11-04T12:00:00Z   # next renewal / window end + buffer
 
 REGION (real failure, ap-northeast-2 engagement): a SigV4 presigned URL embeds the region
 in its credential scope. A client built without region_name signs for the caller's default
@@ -179,8 +182,9 @@ def effective_expiry(requested_seconds, temporary, cred_expiry, now=None):
         return None, None, (
             "WARNING: signed with TEMPORARY credentials (session token present) whose expiry is "
             "not known — these links stop working when that session ends (an assumed role is "
-            "often 1 hour), NOT after the requested time. Default: re-issue on demand (re-run "
-            "this script). A longer-lived link needs a dedicated signing user behind an explicit "
+            "often 1 hour), NOT after the requested time. To renew: REFRESH the credentials first "
+            "(new role session / SSO login), then re-run — re-running with the same session cannot "
+            "extend the link. A longer-lived link needs a dedicated signing user behind an explicit "
             "A3 approval — see this script's docstring; never suggest long-term keys casually.")
     eff = min(wanted, cred_expiry)
     secs = max(0, int((eff - now).total_seconds()))
@@ -188,10 +192,35 @@ def effective_expiry(requested_seconds, temporary, cred_expiry, now=None):
         return eff, secs, (
             f"WARNING: signed with TEMPORARY credentials expiring {cred_expiry.isoformat()} — these "
             f"links stop working then (in {secs // 3600}h {secs % 3600 // 60}m), NOT after the requested "
-            f"{requested_seconds}s. Default: re-issue on demand (re-run this script and send the new "
-            "link). A longer-lived link needs a dedicated signing user behind an explicit A3 "
-            "approval — see this script's docstring; never suggest long-term keys casually.")
+            f"{requested_seconds}s. To renew: REFRESH the credentials first (new role session / SSO "
+            "login / re-assume), then re-run with --must-cover-until — re-running with the SAME "
+            "credentials yields the same expiry and cannot extend the link. A longer-lived link needs "
+            "a dedicated signing user behind an explicit A3 approval — see this script's docstring; "
+            "never suggest long-term keys casually.")
     return eff, secs, None
+
+
+def coverage_error(eff_at, must_cover_until, limited_by_credentials):
+    """None if the link's effective expiry covers `must_cover_until` (aware UTC datetime), else
+    the reason. An unknown effective expiry never covers anything."""
+    if must_cover_until is None:
+        return None
+    need = must_cover_until.isoformat(timespec="seconds")
+    if eff_at is None:
+        return (f"the link's effective expiry is UNKNOWN (temporary credentials without a known expiry) — "
+                f"it cannot be shown to cover {need}. Use credentials with a known expiry, or refresh "
+                "them and re-run.")
+    if eff_at >= must_cover_until:
+        return None
+    got = eff_at.isoformat(timespec="seconds")
+    if limited_by_credentials:
+        return (f"the link would expire at {got}, before the required {need}: the limit is the SIGNING "
+                "CREDENTIALS. Refresh them (new role session / SSO login / re-assume with a longer "
+                "DurationSeconds) and re-run — the same credentials cannot extend the link. If no "
+                f"credential can cover it, plan a re-issue before {got} or a different sharing "
+                "mechanism (separate A3).")
+    return (f"the link would expire at {got}, before the required {need}: raise --expires-seconds "
+            "(max 604800) or plan a re-issue before then.")
 
 
 def expiry_line(eff_at, requested_seconds, now=None):
@@ -311,7 +340,20 @@ def main():
                           "own shared/templates/dashboard.html). Never point this at the "
                           "bucket's own current index.html once this script has run once — "
                           "see the module docstring for why.")
+    ap.add_argument("--must-cover-until", default=None,
+                     help="UTC ISO-8601 time the link must still work at (e.g. the next re-issue or the end "
+                          "of the soak window). The script stops BEFORE issuing a link whose effective "
+                          "expiry is earlier (or unknown).")
     args = ap.parse_args()
+
+    must_cover = None
+    if args.must_cover_until:
+        try:
+            must_cover = datetime.datetime.fromisoformat(args.must_cover_until.replace("Z", "+00:00"))
+        except ValueError:
+            sys.exit(f"--must-cover-until {args.must_cover_until!r} is not an ISO-8601 time")
+        if must_cover.tzinfo is None:
+            sys.exit("--must-cover-until needs an explicit zone (use UTC, e.g. 2026-10-29T06:00:00Z)")
 
     if args.expires_seconds > 604800:
         sys.exit("--expires-seconds cannot exceed 604800 (7 days) — S3 SigV4's own ceiling.")
@@ -336,6 +378,10 @@ def main():
     eff_at, eff_seconds, cred_warning = effective_expiry(args.expires_seconds, temporary, cred_expiry)
     if cred_warning:
         print(cred_warning, file=sys.stderr)
+    problem = coverage_error(eff_at, must_cover, bool(temporary and eff_seconds is not None
+                                                      and eff_seconds < args.expires_seconds))
+    if problem:
+        sys.exit(f"NOT ISSUED — {problem}")
     s3 = make_signing_client(region, args.bucket, session)
     all_keys = ["index.html"] + ASSET_KEYS + DATA_KEYS
     presigned = {k: presign(s3, args.bucket, f"{args.prefix}{k}", args.expires_seconds) for k in all_keys}
@@ -372,8 +418,13 @@ def main():
           f"Requested {args.expires_seconds}s; {lifetime}.")
     print("Re-uploaded index.html with absolute presigned references (css/js/status/log).")
     if temporary:
-        print("Signed with temporary credentials: tell the customer the EFFECTIVE expiry above and "
-              "re-issue on demand (re-run this script).")
+        print("Signed with temporary credentials: tell the customer the EFFECTIVE expiry above. To renew "
+              "before it expires during a long soak, REFRESH the credentials first and re-run with "
+              "--must-cover-until <next re-issue time> — re-running with the same session cannot extend it.")
+        print(f"Link length {len(presigned['index.html'])} chars: it embeds the role session token "
+              "(X-Amz-Security-Token). A short, long-lived link needs a different sharing mechanism "
+              "(CloudFront with signed URLs/cookies; an IAM user's long-term keys are NOT recommended) "
+              "— a separate A3 block.")
     if cred_warning:
         print(cred_warning)
     print(expiry_line(eff_at, args.expires_seconds))

@@ -269,6 +269,11 @@ On the target, enable at provisioning time (all are in the CDK stacks —
 
 ### 4a. Alarm readiness — ONE rule, two checkpoints
 
+> An alarm without a confirmed subscriber pages nobody. If subscribers are waived, the waiver says
+> so ("nobody is paged") and the rollback path is then watched by the agent's detached monitor for
+> the whole rollback window (`engagement-safety.md` §Waiver protocol, item 5). An alarm in
+> `INSUFFICIENT_DATA` — including one left on a replaced DMS task — is "not monitored".
+
 Live: a run deployed only RDS alarms and no DMS alarms at all — and with the friendly task
 name as dimension they would have been `INSUFFICIENT_DATA` forever. The rule:
 

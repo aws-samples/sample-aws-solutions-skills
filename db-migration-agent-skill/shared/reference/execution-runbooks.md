@@ -341,6 +341,10 @@ the scheduler's newer results; the dashboard reference describes coordination.
   "customer_test_suite_provided": false,
   "region": "ap-northeast-2", "n_total": 3,
   "watermark": {"enabled": true, "pk_margin": 10000, "timestamp_columns": {}, "timestamp_age_minutes": 15},
+  "recheck": {"attempts": 2, "delay_seconds": 20},
+  "static_tables": ["countries"],
+  "row_count_tolerance": {},
+  "expected_schema_differences": [],
   "batch_timeout_seconds": 900
 }
 ```
@@ -353,12 +357,59 @@ MAX(pk)) - pk_margin`; tables named in `timestamp_columns` (`{"shop.orders":
 "created_at"}`) are bounded by `column <= source NOW() - timestamp_age_minutes` instead —
 the column must exist with the same date/time type on both sides (else whole-table, and
 preflight reports an Error); if it is nullable on either side, NULL rows are included in
-the compared set and their counts compared explicitly (`null_rows`; a mismatch is RED).
+the compared set and their counts compared explicitly (`null_rows`; a mismatch follows the
+same three-way rule as any difference: immediate failure on a static table, failure on a live
+table only if it persists after the re-reads, inconclusive if a re-read fails).
 Rows beyond the bound are reported as `detail.row_count.<table>.tail_rows` — informational,
 never a failure. Tables without such a key fall back to the whole-table comparison and the
-detail's `note` says so (expect RED under writes; prefer a timestamp column for them). A
-mismatch **below** the watermark is RED and needs review — a lost row, or an UPDATE/DELETE
-of an old row still in flight. `pk_margin` ≥ 2 × peak inserts/s × the 30 s lag threshold.
+detail's `note` says so (expect differences under writes that the re-reads may not settle —
+a persistent one is RED; prefer a timestamp column for them). A
+mismatch **below** the watermark needs review — a lost row, or an UPDATE/DELETE of an old row
+still in flight — and is **re-checked before it can be RED** (next paragraph). `pk_margin` ≥ 2 ×
+peak inserts/s × the 30 s lag threshold.
+
+**Live-table differences are re-checked, never RED on one reading (`recheck`, `static_tables`,
+`row_count_tolerance`; Lambda env `RECHECK`, `STATIC_TABLES`, `ROW_COUNT_TOLERANCE`).** The two
+sides are read in separate snapshots (no transaction spans two servers), so a live table can
+differ for an instant — live (OBS-42): a non-atomic cross-engine count of a live `orders` table
+read "target ahead by 1" as RED and cost a soak-window restart. Both scripts (same-family and
+cross-family) therefore re-read every **live** table whose row count or checksum differed, up
+to `recheck.attempts` times (default 2), `recheck.delay_seconds` apart (default 20), each time
+in a **fresh** snapshot pair, and record every reading in `detail.<check>.<table>.recheck`:
+`converged` (the difference closed — green, with the evidence kept), `persistent` (still
+different on the last re-read — RED), `inconclusive` (the last re-read is unknown, e.g. 0/0
+below the watermark with unexamined tail rows, **or the final re-read failed** after an earlier
+one succeeded — the earlier reading is kept as evidence but never tolerated or counted as
+persistent — needs review), `within_tolerance` (the last
+reading's **only** failure is a conclusive total row-count difference ≤
+`row_count_tolerance[<table>]` — both totals known and unequal, NULL counts equal, coverage
+conclusive, checksum (if checked) matching — green; NULL-count differences, unknown coverage and
+checksum differences are never tolerated), `recheck_failed` / `needs_recheck` (every re-read
+failed, or `attempts: 0` — needs review, not RED by itself). Every reading keeps its full
+diagnostics (`row_detail` / `checksum_detail`: digests, mismatch counts and examples, verdict);
+the published table detail is the **final** reading's, the original under `recheck.first`. Tables in `static_tables` do not move and are compared
+**exactly** on the first reading: never re-checked, no tolerance (`static_table_exact`). Size
+`delay_seconds` above the usual CDC latency. Re-reads run in **batches** (one sleep per attempt,
+then every still-pending table together), so the run takes `T_initial + Σ over attempts of
+(delay_seconds + T_pending_batch)`, where `T_pending_batch` is the measured sum of the comparison
+times of the tables still pending (worst case: every live table) — the Lambda timeout must cover
+it (`cdk-stacks.md` "Timeouts", same formula).
+
+**Intentional schema differences (`expected_schema_differences`; Lambda env
+`EXPECTED_SCHEMA_DIFFERENCES`; SoakStack prop `expectedSchemaDifferences`).** A list of
+`{"table", "column", "side": "source"|"target", "kind": "extra_column"|"type", "reason"}` —
+`extra_column` = the column exists only on `side`; `type` = it exists on both with a different
+type/nullability/default. A declared difference is reported in the day's
+`detail.schema_drift.<table>.expected` as `expected (<reason>)` and does not make `schema_drift`
+RED (live, OBS-53: the partial-unique-index recipe's generated column made every interval RED
+and forced manual overrides). A table passes only when **every** difference is declared; an
+undeclared column, a table whose columns could not be read, or a planning failure still fails.
+Validated before any connection: exactly those five keys, a non-empty `reason`, a listed table.
+`column` is matched against the catalog with the declared side's identifier rules — PostgreSQL:
+an unquoted name folds to lower case and must equal the catalog name exactly, a
+`"Double_Quoted"` name matches exactly (case included); MySQL: case-insensitive. A declaration
+suppresses **exactly one** catalog column: matching none leaves the difference failing, matching
+more than one is reported as `expected_ambiguous` and fails (nothing suppressed).
 The bounded MySQL checksum is a CRC32-based fingerprint over every column (CHECKSUM TABLE
 cannot take a WHERE clause) — like CHECKSUM TABLE, a drift detector, not cryptographic.
 `batch_timeout_seconds` (default 900) bounds each per-side client session; size it from a
@@ -574,6 +625,12 @@ re-polling" viewing model possible (`dashboard.md` §Presigned-URL viewing):
    single resulting link — no port-forwarding, no tunnel, no re-download to see an update;
    the page's own 5-second polling keeps working against the presigned URLs until they
    expire.
+   **Before seeding the soak object or activating the soak**, stop any pre-soak publisher and
+   confirm the stop: `dashboard_s3_publish.py --dir dashboard --stop` exits 0 and
+   `ps -p <recorded pid>` shows nothing (exit 1 = ownership not proven — resolve by the exact PID,
+   never by pattern). Its fail-closed soak guard and conditional writes are a backstop, not the
+   procedure — background jobs are always fully detached and bounded (`engagement-safety.md`
+   §Surfacing — Headless turns, rule 8).
 3. **Ending soak**: download the bucket's final `dashboard/` contents (now holding every
    day's results — `status.json`, `activity-log.jsonl`, every `reports/soak-report-day*.md`)
    back into the engagement working directory, so `migration-plan.md` and everything else
@@ -598,7 +655,8 @@ object seeded) are uploaded to the bucket:
 ```bash
 python3 shared/scripts/generate_presigned_urls.py \
   --bucket <DashboardBucketName output> --region <DashboardBucketRegion output> \
-  --expires-seconds 604800
+  --expires-seconds 604800 \
+  --must-cover-until <UTC: next planned renewal, or soak end + buffer>   # default in every issuance/renewal
 ```
 
 The script resolves the bucket's real region from S3 and signs with a client pinned to it
@@ -634,7 +692,10 @@ session token and prints the **effective** expiry (`EFFECTIVE EXPIRY:` line — 
 credential session's expiry` when the session's expiry isn't exposed) with a
 warning; give the customer that time, never the requested one. **Default: re-issue on
 demand** — re-running the script is safe; send the fresh link when the customer wants to
-look. Only if a longer-lived link is genuinely required, propose a dedicated signing IAM
+look. **When the credential expiry is the limit, a re-run with the same credentials gives the
+same expiry**: refresh the credentials first (new role session / SSO login / re-assume), then
+re-run with `--must-cover-until <time the link must still work>` — the script stops instead of
+issuing a link that expires earlier (or whose expiry is unknown). Only if a longer-lived link is genuinely required, propose a dedicated signing IAM
 user (scope and cleanup in the script's docstring) as new long-term credential
 infrastructure behind its own **A3** block — never suggest long-term user keys casually.
 
@@ -1101,8 +1162,36 @@ drill with zero loss). A rehearsal counts as done only when, on the clone/stand-
    observed loss against the accepted terms; never label that lossless. Every branch
    verifies persistent config, runtime and both-side sessions before source release.
    **Endpoint test-connection ≠ rollback proven** — it shows reachability and credentials only.
+   **Engine-family change (MySQL ↔ PostgreSQL):** include a **reverse-cascade case** — DELETE
+   a parent with `ON DELETE CASCADE` children on the new primary (plus a delete + re-insert of
+   the same parent key), then run a keyed normalized compare of every cascade-reachable child
+   table on the rollback side (`mysql-postgresql.md` §10 R2; R1 orphan counts only detect);
+   any difference is a finding unless the accepted reconciliation repairs it. Also run the
+   **reverse type-class probe matrix** (`mysql-postgresql.md` §10.2): one probe row per
+   replicated table covering uuid, boolean, numeric, json and timestamp columns, verified by key
+   on the rollback side plus per-table statistics, task-log apply errors and
+   `awsdms_apply_exceptions` — a `running` task with good overall counters dropped every uuid
+   table's changes in a live rehearsal. The probe rows are compared **by value** across engines
+   (`cross_engine_compare.py` on the probe keys, MATCH) — a reverse task once corrupted every
+   boolean for ≈ 2 h of production writes while I/U/D "landed" (OBS-69); until this value proof
+   passes, the rollback is not armed and the A5 RPO claim does not hold.
 3. **Timings recorded** per step as *measured*; anything reconstructed is labelled
    *estimated*.
+4. **Runbook changes after the last full rehearsal are tracked:** any step added or changed since
+   then makes the runbook "unrehearsed" — re-run a full cycle, or list each such step (with how it
+   was tested — standalone is not end-to-end — and what its untested failure could cause) in the
+   go/no-go message; timing figures are labelled measured/estimate (`cutover-procedures.md`
+   §Go/no-go disclosure; live OBS-73).
+5. **No rehearsal drift:** keep a **"production changes since clone"** list (every data fix and
+   schema change applied to production after the clone was taken — e.g. a zero-date UPDATE, an A2
+   surrogate key) and replay each onto the rehearsal copy **before any rehearsal comparison**;
+   a comparison on a drifted clone is not evidence (live, OBS-70: a clone rebuilt without the
+   production zero-date fix gave a false MISMATCH).
+6. **Production parity:** the byte-identical production orchestrator with the same flags ran,
+   and every check branch (health holds, reverse-readiness, abort paths, rollback) executed at
+   least once — checks built from real status samples of the exact tools/reader types used; any
+   rehearsal-only shortcut or unexecuted branch is listed as **not proven**
+   (`cutover-procedures.md` §Rehearse the production orchestrator).
 
 Anything skipped (e.g. no stand-in available, reverse task not run) is a **recorded waiver**
 (§Waiver protocol in `engagement-safety.md`) that names the untested step and its risk —

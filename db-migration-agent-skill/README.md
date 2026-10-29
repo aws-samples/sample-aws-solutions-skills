@@ -238,6 +238,10 @@ db-migration-agent-skill/
 │   ├── scripts/                            Dashboard publisher, step supervisor, handoff packager, soak helpers,
 │   │                                       cache_compare.py (read-only Redis/Valkey/Memcached source↔target comparison)
 │   │                                       cross_engine_compare.py (normalized MySQL ↔ PostgreSQL comparison)
+│   │                                       predeploy_check.py (synth-template check before every cdk deploy)
+│   │                                       generate_presigned_urls.py (presigned dashboard link, coverage-checked)
+│   │                                       dashboard_s3_publish.py (bounded, self-detaching dashboard S3 publisher)
+│   │                                       config_diff.py (value-safe live vs staged app-config check, on-host)
 │   ├── assets/                             dashboard.css/.js, rds-global-bundle.pem
 │   └── templates/
 │       ├── migration-plan.md               Working artifact (source of truth per engagement)
@@ -284,6 +288,8 @@ install_skill() {  # $1 = variant dir (claude-code | kiro | codex), $2 = destina
            shared/assets/dashboard.js shared/scripts/soak_check.py shared/scripts/soak_check_lambda.py \
            shared/scripts/dashboard_update.py shared/scripts/execution_step.py shared/scripts/handoff_bundle.py \
            shared/scripts/cross_engine_compare.py shared/scripts/cache_compare.py \
+           shared/scripts/predeploy_check.py shared/scripts/generate_presigned_urls.py \
+           shared/scripts/dashboard_s3_publish.py shared/scripts/config_diff.py \
            shared/reference/elasticache-migration.md shared/reference/mysql-postgresql.md; do
     [ -r "$stage/$f" ] || { rm -rf "$stage"; echo "INSTALL INCOMPLETE: $f missing" >&2; return 1; }
   done

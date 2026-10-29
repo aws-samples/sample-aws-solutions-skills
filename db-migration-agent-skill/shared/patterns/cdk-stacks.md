@@ -18,6 +18,7 @@
 │       ├── database-stack.ts      ← Aurora/RDS cluster + BOTH parameter groups
 │       ├── proxy-stack.ts         ← RDS Proxy (conditional: minimal-downtime plans)
 │       ├── migration-stack.ts     ← DMS instance/endpoints/tasks (conditional: DMS paths)
+│       ├── helper-stack.ts        ← helper/migration host (conditional: compare tools, pgloader, drills)
 │       ├── cache-stack.ts         ← ElastiCache target (cache engagements, §cache-stack.ts — replaces database/proxy/migration)
 │       └── monitoring-stack.ts    ← Alarms + dashboard + SNS
 ├── scripts/{01-precondition-check,02-deploy,03-execute-migration,
@@ -28,6 +29,41 @@
 `bin/app.ts` wires `addDependency()` in order: network → security → database → proxy →
 migration → monitoring. Tag everything via `Tags.of(app).add(...)` from constants
 (`Project`, `Owner`, `Environment`, `CostCenter`, `CreatedBy: cdk`).
+
+## Physical names — the engagement prefix, and when to pin a name
+
+Customers routinely require every resource the engagement creates to carry a prefix
+(`constants.PREFIX`, confirmed in Phase 1). Two failure modes pull in opposite directions:
+**generated names can lose the prefix** (live: ElastiCache parameter groups named
+`dryrun-cache-rjsouic6f79d` by CloudFormation; CDK's `requireImdsv2` launch template named
+`HelperLaunchTemplate`, account-wide, which collided with another team's template), and
+**pinned names block retries and replacements** — CloudFormation: "You can't perform an
+update that causes a custom-named resource to be replaced. If you must replace the resource,
+specify a new name." The rule that satisfies both:
+
+1. **Every stack name starts with the prefix** (``stackName: `${constants.PREFIX}-cache` ``).
+   CloudFormation-generated names derive from the stack name, so buckets, secrets, roles, log
+   groups and topics left unnamed (the soak stack's retry-safe default) carry it too.
+2. **Pin `<prefix>-<purpose>` at FIRST creation** for identifiers that become endpoints or
+   console ids (RDS cluster/instance, ElastiCache replication group/cluster/serverless cache,
+   DMS instance/endpoint/task) and for named-by-convention classes whose generated names can
+   drop or truncate the prefix (seen live for ElastiCache parameter groups): ElastiCache
+   parameter and subnet groups, RDS parameter and subnet groups, the DMS replication subnet
+   group, EC2 launch templates.
+3. **Never let an un-prefixed fixed name in** — including CDK defaults (`<Id>LaunchTemplate`).
+   The only exceptions are names AWS requires verbatim (`dms-vpc-role`,
+   `dms-cloudwatch-logs-role`, `dms-access-for-endpoint` — "AWS DMS looks for these roles by
+   name").
+4. **Retry / replacement with pinned names.** A rolled-back create normally deletes the named
+   resource, but RETAINed resources, secrets scheduled for deletion and buckets stay behind
+   and make the retry fail with "already exists" — delete, restore or import them first
+   (§Retry after a failed first deploy). A change that needs replacement of a named resource
+   (a rename included) fails: give it a **new logical id and a new name**, deploy, then delete
+   the orphan under its own approval block. Live: renaming an ElastiCache parameter group in
+   place ended `UPDATE_FAILED "Internal Failure"` and left the wrong physical id in stack state.
+
+`shared/scripts/predeploy_check.py` (§scripts/ contract) enforces 2–3 on the synthesized
+templates: an un-prefixed name FAILS, an unnamed resource of a class in rule 2 WARNS.
 
 ## network-stack.ts — import, don't create
 
@@ -56,7 +92,7 @@ if (constants.NATIVE_REPLICATION) {
     'native replication to source');
 }
 
-new rds.SubnetGroup(this, 'DbSubnets', { vpc,
+new rds.SubnetGroup(this, 'DbSubnets', { vpc, subnetGroupName: `${constants.PREFIX}-db-subnets`,
   vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
   description: 'DB subnets (private)' });
 ```
@@ -75,7 +111,7 @@ quotes, and Korean text. **This applies in a Korean-language session too**: chat
 dashboard prose follow the user's language; SG/rule descriptions stay plain ASCII from that
 set (`'DMS to target DB'`, `'app client sg-0abc'`). The L2 default `GroupDescription` is
 the construct path, so keep construct ids/stack names ASCII as well. Before every
-`cdk deploy`, after `cdk synth`, run the check in §scripts/ contract (`02-deploy.sh`).
+`cdk deploy`, after `cdk synth`, run `predeploy_check.py` (§scripts/ contract, `02-deploy.sh`).
 
 ## security-stack.ts
 
@@ -103,8 +139,28 @@ constants and be user-confirmed at GATE 2: engine version, KMS key, Oracle chars
 DB_BLOCK_SIZE, SQL Server collation, license model, port.
 
 ```typescript
+// MySQL-family targets: sql_mode is set EXPLICITLY (constants.MYSQL_SQL_MODE, one value for
+// every MySQL group of the engagement). Engine defaults are NOT strict: RDS for MySQL 8.0/8.4
+// default to 'NO_ENGINE_SUBSTITUTION', Aurora MySQL 3 reports '0' (no modes) — a live run on
+// RDS MySQL 8.4 silently truncated bad values / wrote '' instead of failing. Default value:
+//   'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'
+// (the MySQL 8.0/8.4 server default). Changing it is an APP-BEHAVIOUR decision: if the source
+// app runs with another sql_mode (assessment A3 `@@GLOBAL.sql_mode` / app session settings),
+// that value wins unless the customer accepts strict mode at GATE 2 after the app SQL and
+// views were rehearsed under it. Strict mode does not stop DMS's LOAD DATA LOCAL full load from
+// downgrading errors to warnings (LOCAL = IGNORE) — the compare still has to prove the data.
+// After apply, read it back on every instance: SELECT @@GLOBAL.sql_mode;
+//
+// Aurora MySQL: sql_mode is an INSTANCE-level parameter (not in the cluster group family) — it
+// goes in a DB parameter group on every writer/reader. RDS for MySQL: put it in BOTH groups below.
+const mysqlSqlMode = { sql_mode: constants.MYSQL_SQL_MODE };
+const instanceParams = new rds.ParameterGroup(this, 'InstanceParams', { engine,
+  name: `${constants.PREFIX}-instance-params`,   // §Physical names: pinned at first creation
+  description: 'instance-level: sql_mode', parameters: { ...mysqlSqlMode } });
+
 // TWO cluster parameter groups — swap before validation/soak, never after go-live.
 const migrationParams = new rds.ParameterGroup(this, 'MigrationParams', { engine,
+  name: `${constants.PREFIX}-migration-params`,   // §Physical names: pinned at first creation
   description: 'import-optimized', parameters: {
     // MySQL-family examples; engine-specific values live in constants.ts
     max_allowed_packet: '1073741824',
@@ -115,6 +171,7 @@ const migrationParams = new rds.ParameterGroup(this, 'MigrationParams', { engine
     time_zone: constants.SOURCE_TIME_ZONE,
   }});
 const productionParams = new rds.ParameterGroup(this, 'ProductionParams', { engine,
+  name: `${constants.PREFIX}-production-params`,
   description: 'steady-state', parameters: {
     binlog_format: 'ROW',
     innodb_flush_log_at_trx_commit: '1',
@@ -131,6 +188,7 @@ new CfnOutput(this, 'ProductionParameterGroupName', {
 });
 
 const cluster = new rds.DatabaseCluster(this, 'Cluster', {
+  clusterIdentifier: `${constants.PREFIX}-target`,   // becomes the endpoint hostname — replacement-only
   // Generate the secret HERE, not in security-stack — see pitfall below.
   // Full connection contract (host/port/dbname/engine) comes from secretStringTemplate;
   // Phase 7.5 discovers whether the app's existing secret has `host`; this one always does.
@@ -140,9 +198,9 @@ const cluster = new rds.DatabaseCluster(this, 'Cluster', {
   }),
   writer: rds.ClusterInstance.provisioned('writer', {
     instanceType: constants.MIGRATION_INSTANCE_TYPE,   // sized UP for import
-    enablePerformanceInsights: true }),
+    enablePerformanceInsights: true, parameterGroup: instanceParams }),   // sql_mode (Aurora MySQL)
   readers: constants.READER_COUNT > 0
-    ? [rds.ClusterInstance.provisioned('reader1', { promotionTier: 1 })] : [],
+    ? [rds.ClusterInstance.provisioned('reader1', { promotionTier: 1, parameterGroup: instanceParams })] : [],
   vpc, securityGroups: [dbSg], subnetGroup,
   storageEncryptionKey: key, parameterGroup: migrationParams,
   backup: { retention: Duration.days(constants.BACKUP_RETENTION_DAYS) },
@@ -156,7 +214,11 @@ Notes: `deletionProtection: true` + `RETAIN` always — a migration target holds
 data the moment CDC starts. XtraBackup path uses `restore-db-cluster-from-s3` (no CDK L2)
 — run it from `scripts/03-execute-migration.sh`, then adopt monitoring around it; don't
 fight CDK into importing it mid-migration. RDS (non-Aurora) targets: `rds.DatabaseInstance`
-with `multiAz: true` — same parameter-group pair pattern.
+with `multiAz: true` — same parameter-group pair pattern (DB parameter groups,
+`bindToInstance`), each carrying `...mysqlSqlMode`; no separate instance group. PostgreSQL
+targets drop `instanceParams`/`mysqlSqlMode`. Read back `SELECT @@GLOBAL.sql_mode` (and
+`describe-db-parameters --source user` on the attached group) before validation and record it
+with the GATE 2 decision.
 
 **Pitfall — an unbound `rds.ParameterGroup` can disappear from synth:** the L2 represents
 either `AWS::RDS::DBClusterParameterGroup` or `AWS::RDS::DBParameterGroup`; it creates
@@ -201,8 +263,10 @@ CDK has only L1s (`CfnReplication*`) for DMS. Keep it thin and readable:
 ```typescript
 const dmsSg = new ec2.SecurityGroup(this, 'DmsSg', { vpc });
 const subnetGrp = new dms.CfnReplicationSubnetGroup(this, 'DmsSubnets', {
+  replicationSubnetGroupIdentifier: `${constants.PREFIX}-dms-subnets`,   // §Physical names
   replicationSubnetGroupDescription: 'dms', subnetIds });
 const instance = new dms.CfnReplicationInstance(this, 'DmsInstance', {
+  replicationInstanceIdentifier: `${constants.PREFIX}-dms`,
   replicationInstanceClass: constants.DMS_INSTANCE_CLASS,   // never t-family in prod
   allocatedStorage: 100, multiAz: constants.PROD,
   replicationSubnetGroupIdentifier: subnetGrp.ref,
@@ -219,10 +283,12 @@ const targetCa = new dms.CfnCertificate(this, 'TargetCa', {
   certificatePem: fs.readFileSync(constants.RDS_CA_BUNDLE_PATH, 'utf8') });
 
 const sourceEp = new dms.CfnEndpoint(this, 'SourceEp', { endpointType: 'source',
+  endpointIdentifier: `${constants.PREFIX}-source`,          // tasks: replicationTaskIdentifier `${PREFIX}-fwd` / `-rev`
   engineName: constants.SOURCE_ENGINE, serverName: constants.SOURCE_HOST,
   port: constants.DB_PORT, databaseName: constants.DB_NAME,
   // MySQL-family endpoints: 'none' | 'verify-ca' | 'verify-full' ONLY — 'require' is
-  // rejected at deploy ("The require SSL mode is not supported by the 'mysql' engine").
+  // rejected at deploy ("The require SSL mode is not supported by the 'mysql' engine");
+  // predeploy_check.py FAILS on it (3 live deploy failures before the check existed).
   sslMode: 'verify-ca', certificateArn: sourceCa.ref,
   mySqlSettings: {
     secretsManagerAccessRoleArn: constants.DMS_SECRET_ACCESS_ROLE_ARN,
@@ -269,9 +335,16 @@ const pgReverseReady = { 'rds.logical_replication': '1' };   // spread into BOTH
 //     Aurora MySQL 3 cluster creation (RDS MySQL 8.0/8.4: can't be modified once associated) —
 //     constants.LOWER_CASE_TABLE_NAMES, confirmed at GATE 2, in the group the cluster is CREATED with.
 const mysqlCaseParams = { lower_case_table_names: constants.LOWER_CASE_TABLE_NAMES };  // '1' or '0'
+//     ...and the MySQL target's sql_mode stays explicit (database-stack `mysqlSqlMode`, strict by
+//     default): a non-strict target turns PG values MySQL can't hold (out-of-range numbers,
+//     over-long strings, invalid dates) into silent truncation / '' / zero dates instead of
+//     errors. A MySQL ROLLBACK side the reverse task writes to (the old source of a MySQL -> PG
+//     move) keeps its own, already-assessed sql_mode — read it (A3), don't change it; reverse
+//     DMS writes are judged by that value, so rehearse them under it.
 
 // (3) Endpoints. PG as a DMS source (forward PG->MySQL, or the reverse task of MySQL->PG):
 const pgSourceEp = new dms.CfnEndpoint(this, 'PgSourceEp', { endpointType: 'source',
+  endpointIdentifier: `${constants.PREFIX}-pg-source`,
   engineName: 'aurora-postgresql',            // or 'postgres'
   serverName: constants.PG_HOST, port: 5432, databaseName: constants.PG_DB_NAME,
   sslMode: 'verify-full', certificateArn: targetCa.ref,
@@ -285,6 +358,7 @@ const pgSourceEp = new dms.CfnEndpoint(this, 'PgSourceEp', { endpointType: 'sour
   } });
 // MySQL as a DMS target from PostgreSQL (forward PG->MySQL, or the reverse task of MySQL->PG):
 const mysqlTargetEp = new dms.CfnEndpoint(this, 'MySqlTargetEp', { endpointType: 'target',
+  endpointIdentifier: `${constants.PREFIX}-mysql-target`,
   engineName: 'aurora',                        // or 'mysql'
   serverName: constants.MYSQL_HOST, port: 3306,
   sslMode: 'verify-full', certificateArn: targetCa.ref,   // Aurora MySQL 8.4 rejects 'none'
@@ -298,6 +372,41 @@ const mysqlTargetEp = new dms.CfnEndpoint(this, 'MySqlTargetEp', { endpointType:
 Tasks for this pair use `TargetTablePrepMode: DO_NOTHING` (pre-created schema), never
 `DROP_AND_CREATE`; the reverse task is `migrationType: 'cdc'`, created stopped, with
 `cdcStartPosition` supplied at cutover (an LSN for a PostgreSQL source).
+
+## helper-stack.ts (conditional — helper / migration host)
+
+For tools that must run next to the databases (cross_engine_compare, pgloader, drill
+scripts, SSM sessions). Private subnet, SSM only (no SSH key, no inbound rule), encrypted
+root volume, IMDSv2 — and **no launch template**:
+
+```typescript
+const helperSg = new ec2.SecurityGroup(this, 'HelperSg', { vpc, allowAllOutbound: true,
+  description: `${constants.PREFIX} migration helper` });   // ASCII; no ingress (SSM only)
+dbSg.addIngressRule(helperSg, ec2.Port.tcp(constants.DB_PORT), 'migration helper');
+const helper = new ec2.Instance(this, 'Helper', {
+  vpc, vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }, securityGroup: helperSg,
+  instanceType: new ec2.InstanceType(constants.HELPER_INSTANCE_TYPE),   // compare is CPU-bound: size for it
+  machineImage: ec2.MachineImage.latestAmazonLinux2023({ cpuType: ec2.AmazonLinuxCpuType.ARM_64 }),
+  instanceName: `${constants.PREFIX}-helper`,                          // Name tag
+  ssmSessionPermissions: true,                                         // AmazonSSMManagedInstanceCore
+  blockDevices: [{ deviceName: '/dev/xvda',
+    volume: ec2.BlockDeviceVolume.ebs(30, { encrypted: true, volumeType: ec2.EbsDeviceVolumeType.GP3 }) }],
+  // IMDSv2 via the instance's own MetadataOptions. NOT `requireImdsv2: true`: that adds a
+  // LaunchTemplate with the FIXED account-wide name `<ConstructId>LaunchTemplate` (no prefix;
+  // live collision with another team's "HelperLaunchTemplate", deploy failed).
+  httpTokens: ec2.HttpTokens.REQUIRED, httpPutResponseHopLimit: 1,
+});
+new CfnOutput(this, 'HelperInstanceId', { value: helper.instanceId });
+// Older aws-cdk-lib without `httpTokens` on ec2.Instance: an explicitly named template instead —
+// const lt = new ec2.CfnLaunchTemplate(this, 'HelperImds', { launchTemplateName: `${constants.PREFIX}-helper-lt`,
+//   launchTemplateData: { metadataOptions: { httpTokens: 'required' } } });
+// (helper.node.defaultChild as ec2.CfnInstance).launchTemplate =
+//   { launchTemplateName: lt.launchTemplateName!, version: lt.attrLatestVersionNumber };
+```
+
+`requireImdsv2` and `httpTokens` are mutually exclusive (CDK throws). Rehearsal stand-ins
+(a clone source host, a rehearsal target) follow the same pattern in their own
+`<prefix>-rehearsal-*` stacks, listed in the A3 block and removed by the rehearsal cleanup.
 
 ## proxy-stack.ts (conditional) / monitoring-stack.ts
 
@@ -332,6 +441,11 @@ cutover. Phase 7 then authenticates as **each** application account through the 
 endpoint (`validation-patterns.md` §2.6), not only directly. Monitoring: the alarm set
 from [../reference/preflight-iam-cost.md](../reference/preflight-iam-cost.md) §4 + a
 dashboard with source-vs-target panels during the migration window, all → one SNS topic.
+
+**Alarms follow the task they watch (OBS-75).** DMS task alarms use the task's resource-id
+dimension; when a task is replaced (new logical id/identifier), redeploy the alarms with the new
+task's id in the same change and verify datapoints for the new dimension — an alarm left on a
+stopped task shows `INSUFFICIENT_DATA`/`OK` and must be read as "not monitored".
 
 ## soak-stack.ts (conditional — Phase 7.7 automated soak checks, the recommended path)
 
@@ -393,7 +507,8 @@ network to `public.ecr.aws` + PyPI, and fails `cdk synth` (not deploy) without t
 ### The stack — `lib/stacks/soak-stack.ts` (self-contained; synthesizes as-is)
 
 Every external dependency is an explicit prop; no fixed physical names anywhere (bucket,
-secrets, log group, topic are all CloudFormation-generated), so a rolled-back first deploy
+secrets, log group, topic are all CloudFormation-generated and carry the prefix through the
+prefixed stack name — §Physical names rule 1), so a rolled-back first deploy
 can never block the retry with "already exists" / "scheduled for deletion"; every optional
 environment variable is `?? ''` (the handler treats empty as "not configured", so a
 binlog-replication engagement with no DMS props deploys cleanly); the function gets an
@@ -468,7 +583,7 @@ export interface SoakStackProps extends StackProps {
    *  after preflight is ok, then redeploy (template stays the truth). */
   scheduleEnabled?: boolean;
   /** Lambda timeout. Default 900 (the Lambda maximum; you pay only for actual duration).
-   *  Size from a measured COUNT/checksum of the largest table — see "Sizing" below. */
+   *  Size from a MEASURED end-to-end soak run incl. re-check batches — see "Timeouts" below. */
   functionTimeoutSeconds?: number;
   /** Per-statement DB read timeout inside the function. Default 300. */
   dbQueryTimeoutSeconds?: number;
@@ -479,6 +594,18 @@ export interface SoakStackProps extends StackProps {
   /** MySQL <-> PostgreSQL pairs only: cross_engine_compare.py options (DEFAULT_OPTIONS), e.g.
    *  { naive_timezone: '+09:00', tables: { 'shop.orders': { target: 'shop.orders' } } }. */
   crossEngine?: Record<string, unknown>;
+  /** Re-check of live-table count/checksum differences (soak_check_lambda.py RECHECK_DEFAULTS:
+   *  attempts 2 (0-5), delaySeconds 20 (0-600)); a difference is RED only if it persists. */
+  recheck?: { attempts?: number; delaySeconds?: number };
+  /** Tables that receive no writes during the soak: compared exactly, never re-checked. */
+  staticTables?: string[];
+  /** Per-table tolerated total-row-count difference AFTER the re-checks (never for checksums,
+   *  never for static tables), e.g. { 'shop.page_views': 5 }. */
+  rowCountTolerance?: Record<string, number>;
+  /** Intentional schema differences (e.g. the generated column of the partial-unique-index recipe,
+   *  mysql-postgresql.md §4.3): reported as "expected (reason)" and not schema drift; anything not
+   *  listed still fails. kind 'extra_column' (only on `side`) | 'type' (type/nullability/default). */
+  expectedSchemaDifferences?: { table: string; column: string; side: 'source' | 'target'; kind: string; reason: string }[];
 }
 
 // Same normalization as soak_check_lambda.py's _engine_family() — keep in sync.
@@ -571,7 +698,8 @@ export class SoakStack extends Stack {
     const soakFn = new lambda.Function(this, 'SoakCheckFunction', {
       runtime: lambda.Runtime.PYTHON_3_12, architecture: lambda.Architecture.ARM_64,
       handler: 'soak_check_lambda.handler', code,
-      // 900s default: full scans of ~100M-row tables (source and target run concurrently,
+      // 900s default: full scans of ~100M-row tables (SAME-FAMILY: source and target run concurrently;
+      // cross-family soak_checks reads them serially — size from a measured run, "Timeouts" below;
       // tables sequentially) needed ~900s live. Preflight budgets itself against the remaining time.
       timeout: Duration.seconds(props.functionTimeoutSeconds ?? 900), memorySize: 256,
       logGroup,
@@ -603,6 +731,12 @@ export class SoakStack extends Stack {
         WATERMARK_TIMESTAMP_COLUMNS: props.watermark?.timestampColumns ? JSON.stringify(props.watermark.timestampColumns) : '',
         WATERMARK_AGE_MINUTES: props.watermark?.ageMinutes !== undefined ? `${props.watermark.ageMinutes}` : '',
         CROSS_ENGINE_OPTIONS: props.crossEngine ? JSON.stringify(props.crossEngine) : '',
+        // Optional: '' == defaults (the handler's _env_json treats '' as unset).
+        RECHECK: props.recheck ? JSON.stringify({ attempts: props.recheck.attempts,
+          delay_seconds: props.recheck.delaySeconds }) : '',
+        STATIC_TABLES: props.staticTables ? JSON.stringify(props.staticTables) : '',
+        ROW_COUNT_TOLERANCE: props.rowCountTolerance ? JSON.stringify(props.rowCountTolerance) : '',
+        EXPECTED_SCHEMA_DIFFERENCES: props.expectedSchemaDifferences ? JSON.stringify(props.expectedSchemaDifferences) : '',
         DASHBOARD_BUCKET: dashboardBucket.bucketName, DASHBOARD_PREFIX: '',
       },
     });
@@ -733,19 +867,40 @@ lag threshold × 2), or `column <= source NOW() - ageMinutes` for tables listed 
 `watermark.timestampColumns` (same date/time type required on both sides; NULL rows of a
 nullable column are compared explicitly); the tail beyond is reported as `detail.row_count.<t>.tail_rows`
 (informational, never a failure). Tables without such a key fall back to the whole-table
-comparison and say so in `detail.*.<t>.note`. A mismatch below the watermark stays RED
-(it can be a lost row, or an UPDATE/DELETE of an old row still in flight — review it).
+comparison and say so in `detail.*.<t>.note`. A difference below the watermark is judged
+three ways: on a **static** table (`staticTables`) it fails immediately; on a **live** table it is
+re-read (`recheck`) and fails only if it **persists** (a lost row) — an UPDATE/DELETE of an old row
+still in flight converges and is green with the readings kept; if a re-read itself fails, the
+result is **inconclusive** (needs review, never green).
 Preflight's `*_db_watermark <table>` rows show which mode each table will use.
 
-Timeouts: source and target queries run concurrently, tables sequentially. Measure the
-largest checksum table's bounded COUNT + checksum on the target during Phase 7 and set
-`functionTimeoutSeconds` ≥ 1.5 × the sum over all tables (default 900 = the Lambda
-maximum; a ~100M-row table needed ~900 s live) and `dbQueryTimeoutSeconds` ≥ 1.5 × the
-slowest single statement (default 300). If the total cannot fit in 900 s, reduce the
-per-run scope — checksum only the critical tables (`checksumTables`) and row-count the
-rest — or, for
-very large engagements, run the standalone `shared/scripts/soak_check.py` from the
-migration host (no 900 s ceiling; `batch_timeout_seconds`). **Sharding the tables across
+Timeouts — size from a **measured run of the soak comparison itself**, not from one side.
+Same-family pairs read source and target **concurrently** (two threads), tables sequentially;
+**cross-family (MySQL ↔ PostgreSQL) pairs read the two sides serially** inside
+`cross_engine_compare.soak_checks` and also pay normalization — so time a full run of exactly
+what the Lambda will do (`shared/scripts/soak_check.py` with the same config from the
+migration host, or a preflight-sized invocation) during Phase 7: per table, the watermark
+queries + bounded COUNT + checksum/normalized comparison on **both** sides, end to end =
+`T_table`; their sum is `T_initial`. Re-checks run in **batches**: after the first pass the
+scripts sleep **once** (`delaySeconds`) and then re-read all tables still differing, together,
+per attempt. Budget:
+
+    T_run = T_initial  +  Σ over attempts a = 1..attempts of (delaySeconds + T_pending_batch(a))
+
+where `T_pending_batch(a)` is the measured time to re-read the live tables still pending at
+attempt `a` (worst case: every live table that may differ; static tables are read once and never
+re-read; defaults `attempts` 2, `delaySeconds` 20), and set
+`functionTimeoutSeconds` ≥ 1.5 × `T_run` (default 900 = the Lambda maximum) and
+`dbQueryTimeoutSeconds` ≥ 1.5 × the slowest single statement (default 300). Example
+(cross-family, from a review reproduction): one table at 170 s per side is ≈ 340 s per serial
+pass; two 20 s re-checks of it make ≈ 340 + 2 × (20 + 340) = 1,060 s — **over** the 900 s ceiling,
+although a "concurrent sides" estimate gives 825 s. Conversely, 20 one-second live tables with two
+re-check batches need only 20 + 2 × (20 + 20) = 100 s (150 s with headroom) — the delay is paid
+per batch, not per table. If `1.5 × T_run` exceeds 900 s, in this order: lower
+`recheck.attempts` / `delaySeconds`; list truly write-free tables in `staticTables`; checksum only
+the critical tables (`checksumTables`) and row-count the rest; or run the standalone
+`shared/scripts/soak_check.py` from the migration host (no 900 s ceiling;
+`batch_timeout_seconds`). A timed-out run is unknown, never green. **Sharding the tables across
 several soak stacks/functions is unsupported:** each run replaces the whole day entry in
 `status.json`, so shards overwrite each other's results. Never silently drop tables from
 the soak.
@@ -862,9 +1017,16 @@ RED/needs-review day is logged at WARNING and returned normally, so it trips onl
 needs-review alarm, not `Errors`; a fatal AWS failure (secret/S3) raises, so it trips
 `Errors` with the `SOAK_CHECK_ERROR` line naming the fix.
 
+**Keeping the bucket current before the soak** (if a link is shared earlier): the bounded,
+self-detaching `shared/scripts/dashboard_s3_publish.py --until … --detach` (`dashboard.md`) —
+never a plain `&` sync loop from the agent's shell; it stops itself at `--until` or when the
+bucket copy carries an active soak (fail closed, conditional writes). **Stop it and confirm the
+stop before seeding or activating the soak** (execution-runbooks.md §soak), and at Phase 9.
+
 **Presigned URLs — initial issuance plus planned renewal, not part of this stack.** Run
 `shared/scripts/generate_presigned_urls.py --bucket <DashboardBucketName> --region
-<DashboardBucketRegion>` (both are stack outputs) right after this stack deploys and the
+<DashboardBucketRegion> --expires-seconds <tier> --must-cover-until <UTC: next renewal or window
+end + buffer>` (bucket and region are stack outputs) right after this stack deploys and the
 initial `dashboard/` contents are uploaded (index.html, assets/, status.json +
 activity-log.jsonl) — it presigns every file the page needs and rewrites `index.html` so its
 CSS/JS/data references are absolute presigned URLs (see that script's docstring for why
@@ -872,11 +1034,11 @@ relative paths silently 403). It signs for the bucket's **actual** region (detec
 S3; `--region` must match it), then GETs every URL and refuses to print the customer link
 unless all return HTTP 200 — a URL signed for the wrong region fails with
 `AuthorizationQueryParametersError` while the script's own upload still succeeds, which is
-how this bug shipped once. Signing credentials cap every link: with temporary credentials (a role/SSO/instance session) a link dies when that session does, whatever `--expires-seconds` says — the script detects this and prints the **effective** expiry; tell the customer that time and **re-issue on demand** (re-run the script) by default. A dedicated signing IAM user is the exception, proposed only when a longer link is genuinely needed, behind its own A3 block (script docstring) — never suggest long-term keys casually. With credentials that do last, sign for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
+how this bug shipped once. Signing credentials cap every link: with temporary credentials (a role/SSO/instance session) a link dies when that session does, whatever `--expires-seconds` says — the script detects this and prints the **effective** expiry; tell the customer that time and **re-issue on demand** by default. **Every issuance and renewal passes `--must-cover-until <UTC time the link must still work>`** (the next planned renewal, or the window end + buffer) so the script refuses a link that expires earlier or whose expiry is unknown; when the credentials are the limit, **refresh them first** (new role session / SSO login / re-assume) — re-running with the same session reproduces the same expiry. A dedicated signing IAM user is the exception, proposed only when a longer link is genuinely needed, behind its own A3 block (script docstring) — never suggest long-term keys casually. With credentials that do last, sign for slightly OVER the tier's nominal length: `129600` seconds (1.5 days) for the 1-day
 tier and `302400` (3.5 days) for the 3-day tier. Plan **648000 seconds (7.5 days) of
 coverage** for the 7-day tier, but never request a single S3 signature that long: SigV4
 rejects expiries over `604800` seconds. Issue with `--expires-seconds 604800`, renew by
-day 6 (earlier if signing credentials expire), and deliver the new customer link with
+day 6 (earlier if signing credentials expire — refresh them, then re-run with `--must-cover-until`), and deliver the new customer link with
 an explicit instruction to reopen it. Re-signing does not update URLs embedded in an
 already-open page. Renew again if RED days extend the soak; keep signing credentials
 valid through the final half-day buffer.
@@ -911,9 +1073,10 @@ This file is self-contained and was synthesized with aws-cdk-lib 2.275.0 (CLI 2.
 six shapes — node-based CME online-migration target (C3), CMD TLS (`preferred`) + RBAC
 seeded from S3, CME seeded from three per-shard RDBs with `nodeGroups`, Serverless Valkey
 C2 target with RBAC and source egress, Serverless Memcached, node-based Memcached — and
-passes the §scripts/ SG-description check; invalid combinations (C2/C3 without
-`sourceCidr`, C3 with TLS, C2 on Memcached, CME seed without `nodeGroups`, REDIS-engine
-group without `default`) throw at synth.
+passes `predeploy_check.py` (§scripts/ contract) with 0 failures / 0 warnings; invalid
+combinations (C2/C3 without `sourceCidr`, C3 with TLS, C2 on Memcached, CME seed without
+`nodeGroups`, REDIS-engine group without `default`, node-based without a maintenance
+window) throw at synth.
 
 Decisions it encodes (each from the reference's verified facts):
 
@@ -969,6 +1132,18 @@ Decisions it encodes (each from the reference's verified facts):
   — check the seeding doc for that Region.
 - **RETAIN** on the replication group/serverless cache: it holds production data once
   replication or dual-write starts. Destroying it is a constraint-8 action.
+- **Every visible name carries the prefix from the first deploy** (§Physical names): `cache.id`
+  starts with `constants.PREFIX`; subnet group `<id>-subnets`, parameter group `<id>-pg`, user
+  group `<id>-users`, alarms `<id>-*`, secrets `<id>/cache-users/*`.
+- **Maintenance window is a GATE 2 value.** `preferredMaintenanceWindow` (node-based only) is
+  set explicitly so it does not overlap the **scheduled cutover interval** — ElastiCache's
+  default window can land anywhere in the regional block (live: `tue:04:30-05:30` UTC, inside the
+  rollback window, noticed only in Phase 9). A weekly window cannot avoid a multi-day soak or
+  rollback window: review pending maintenance (`describe-update-actions` for the
+  per-cache apply-by dates, `describe-service-updates` for `AutoUpdateAfterRecommendedApplyByDate`,
+  `PendingModifiedValues`) and its failover exposure before GATE 4, and get any unavoidable
+  overlap with soak/rollback explicitly accepted — never shorten the soak
+  (`elasticache-migration.md` §7.10 5).
 
 ```typescript
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
@@ -992,6 +1167,24 @@ export interface CacheNodeGroup {
   readonly replicaCount: number;
   readonly primaryAvailabilityZone?: string;
   readonly replicaAvailabilityZones?: string[];
+}
+
+// PreferredMaintenanceWindow: 'ddd:hh24:mi-ddd:hh24:mi' (24-hour clock, UTC), minimum 60 minutes
+// (CloudFormation ReplicationGroup/CacheCluster docs). The range may wrap the week (sun -> mon).
+const WINDOW_DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const WINDOW_RE = /^(sun|mon|tue|wed|thu|fri|sat):([01][0-9]|2[0-3]):([0-5][0-9])-(sun|mon|tue|wed|thu|fri|sat):([01][0-9]|2[0-3]):([0-5][0-9])$/;
+export function maintenanceWindowMinutes(window: string): number {
+  const m = WINDOW_RE.exec(window);
+  if (!m) {
+    throw new Error(`preferredMaintenanceWindow '${window}' is not ddd:hh24:mi-ddd:hh24:mi (UTC, hours 00-23)`);
+  }
+  const at = (d: string, h: string, mi: string) => WINDOW_DAYS.indexOf(d) * 1440 + Number(h) * 60 + Number(mi);
+  const week = 7 * 1440;
+  const minutes = (at(m[4], m[5], m[6]) - at(m[1], m[2], m[3]) + week) % week;   // across the weekly wrap
+  if (minutes < 60) {
+    throw new Error(`preferredMaintenanceWindow '${window}' lasts ${minutes} min; ElastiCache requires at least 60`);
+  }
+  return minutes;
 }
 
 export function evenSlots(shards: number, replicaCount: number): CacheNodeGroup[] {
@@ -1029,6 +1222,11 @@ export interface CacheConfig {
   readonly rbacUsers?: { userId: string; userName: string; accessString: string }[];  // needs TLS
   readonly snapshotArns?: string[];          // C5 S3 seed (replacement-only: first deploy)
   readonly snapshotRetentionDays: number;
+  // REQUIRED for node-based kinds: weekly UTC window 'ddd:hh24:mi-ddd:hh24:mi' (>= 60 min) that
+  // does not overlap the scheduled cutover interval; overlap with the soak/rollback window is
+  // reviewed (pending maintenance, failover exposure) and accepted explicitly, never avoided by
+  // shortening the soak. Serverless has no maintenance-window property.
+  readonly preferredMaintenanceWindow?: string;
   readonly serverlessMaxDataGb?: number;
   readonly serverlessMaxEcpuPerSecond?: number;
 }
@@ -1066,6 +1264,12 @@ export class CacheStack extends Stack {
     if (cme && cache.snapshotArns?.length && !cache.nodeGroups?.length) {
       throw new Error('seeding a CME replication group from S3 needs nodeGroups (NodeGroupConfiguration) at creation');
     }
+    if (cache.kind !== 'serverless') {
+      if (!cache.preferredMaintenanceWindow) {
+        throw new Error('node-based caches need preferredMaintenanceWindow ddd:hh24:mi-ddd:hh24:mi (UTC), clear of the cutover interval');
+      }
+      maintenanceWindowMinutes(cache.preferredMaintenanceWindow);   // format, hours 00-23, >= 60 min across the wrap
+    }
 
     // SG/rule descriptions: ASCII from the EC2-allowed set only (cdk-stacks.md network pitfall).
     const sg = new ec2.SecurityGroup(this, 'CacheSg', { vpc, allowAllOutbound: false,
@@ -1098,6 +1302,13 @@ export class CacheStack extends Stack {
           ...cache.parameters,
         },
       });
+    // Name it with the prefix at FIRST creation. Unnamed, CloudFormation generated
+    // 'dryrun-cache-rjsouic6f79d' (prefix truncated). The L1 has no prop for it; the override was
+    // accepted at create time live (2026-10-28) although the registry schema lists
+    // CacheParameterGroupName as read-only, so confirm the name after the first deploy. Never rename
+    // a deployed group in place (UPDATE_FAILED "Internal Failure" + wrong physical id in state):
+    // new logical id + new name, then delete the orphan under its own approval block.
+    paramGroup?.addPropertyOverride('CacheParameterGroupName', `${cache.id}-pg`);
 
     // RBAC: one generated secret per user (Secrets Manager dynamic reference — never a literal in
     // the template). VALKEY-engine groups need no "default" user; REDIS-engine groups do.
@@ -1156,6 +1367,7 @@ export class CacheStack extends Stack {
         transitEncryptionMode: cache.transitEncryption ? (cache.transitEncryptionMode ?? 'required') : undefined,
         userGroupIds: cache.transitEncryption && userGroup ? [userGroup.ref] : undefined,
         snapshotArns: cache.snapshotArns, snapshotRetentionLimit: cache.snapshotRetentionDays,
+        preferredMaintenanceWindow: cache.preferredMaintenanceWindow,   // clear of the cutover interval
         autoMinorVersionUpgrade: true,
       });
       rg.applyRemovalPolicy(RemovalPolicy.RETAIN);   // holds production data once replication starts
@@ -1220,6 +1432,7 @@ export class CacheStack extends Stack {
         cacheSubnetGroupName: subnetGroup!.ref, vpcSecurityGroupIds: [sg.securityGroupId],
         cacheParameterGroupName: paramGroup?.ref,
         transitEncryptionEnabled: cache.transitEncryption,   // 1.6.12+, creation-time only
+        preferredMaintenanceWindow: cache.preferredMaintenanceWindow,   // clear of the cutover interval
       });
       new CfnOutput(this, 'ConfigurationEndpoint', { value: mc.attrConfigurationEndpointAddress });
       const dims = { CacheClusterId: cache.id };
@@ -1267,10 +1480,10 @@ if (constants.CACHE.snapshotArns) cache.addDependency(seed);   // seed stack dep
 ```
 
 For C2/C3 the **source** SG must allow 6379 inbound from the cache subnets (a source-side
-change — A2, or the customer's network team); C3 also needs the target SG egress above. Phase 5 verification: synth, the SG-description check, then after deploy
+change — A2, or the customer's network team); C3 also needs the target SG egress above. Phase 5 verification: synth, `predeploy_check.py`, then after deploy
 `describe-replication-groups` / `describe-serverless-caches` (status, TLS, Multi-AZ,
-parameter group, user group) and `describe-cache-parameters` for the effective values —
-recorded in the plan.
+parameter group **name carries the prefix**, user group, maintenance window) and
+`describe-cache-parameters` for the effective values — recorded in the plan.
 
 ## scripts/ contract
 
@@ -1283,16 +1496,40 @@ previous stage's completion marker is absent in `migration-plan.md`. `05-cutover
 [../templates/rollback-runbook.md](../templates/rollback-runbook.md)) with real values —
 no placeholders left at generation time.
 
-`02-deploy.sh` runs `cdk synth` and then this **security-group description check** before
-any `cdk deploy` (see the network-stack pitfall — synth does not catch it):
+`02-deploy.sh` runs `cdk synth` and then the **pre-deploy template check** before every
+`cdk deploy` — rehearsal and re-deploys included. A non-zero exit means **do not deploy**:
 
 ```bash
-python3 -c 'import json,glob,re,sys;ok=re.compile(r"[a-zA-Z0-9. _\-:/()#,@\[\]+=&;{}!$*]{0,255}");bad=[(f,k,v) for f in glob.glob("cdk.out/*.template.json") for k,r in json.load(open(f)).get("Resources",{}).items() for v in ([r.get("Properties",{}).get("GroupDescription")]+[x.get("Description") for x in r.get("Properties",{}).get("SecurityGroupIngress",[])+r.get("Properties",{}).get("SecurityGroupEgress",[])] if r.get("Type")=="AWS::EC2::SecurityGroup" else [r.get("Properties",{}).get("Description")] if r.get("Type") in ("AWS::EC2::SecurityGroupIngress","AWS::EC2::SecurityGroupEgress") else []) if isinstance(v,str) and not ok.fullmatch(v)];[print("INVALID SG description:",*b) for b in bad];sys.exit(1 if bad else 0)'
+npx cdk synth --quiet
+python3 -B <skill>/shared/scripts/predeploy_check.py --prefix "$PREFIX" cdk.out   # FAIL -> exit 1, stop
+# with CfnParameters: pass the same values cdk deploy gets, e.g.
+#   --parameters Engine=mysql --parameters dryrun5-dms:SslMode=verify-ca --parameters AWS::Region=ap-northeast-2
 ```
 
-It exits non-zero and names the template, logical id and offending text; fix the string in
-code (ASCII from the allowed set), re-synth, re-check. Token-valued descriptions (e.g.
-`Fn::Join`) are not strings in the template and are skipped — keep those to ASCII literals.
+It is stdlib-only, scans every `*.template.json` under `cdk.out/` (nested assemblies too;
+an empty scan exits 2 — never a pass) and reports template, logical id, property and value.
+`--parameters` applies to top-level stacks only; each nested-stack resource instance is
+checked separately with its own Defaults plus the parent's actual assignments (an
+intrinsic-built `Parameters` map makes the child's parameters `UNRESOLVED`):
+
+| Code | Level | What it catches (each one hit live) |
+|---|---|---|
+| `SG-CHARSET` | FAIL | SG `GroupDescription` / `GroupName` / rule `Description` outside the EC2 charset (network-stack pitfall), after resolving `Fn::Join`/`Fn::Sub` (incl. the substitution map) and parameter values |
+| `DMS-SSL` | FAIL | `AWS::DMS::Endpoint` with `EngineName` `mysql`/`mariadb`/`aurora` and `SslMode: require` — also when either comes from a parameter default or `--parameters` |
+| `NAME-PREFIX` | FAIL | a physical-name property (cluster/cache/DMS ids, parameter/subnet groups, launch template, bucket, secret, role, function, log group, topic, alarm, alias, …) not starting with the prefix — e.g. CDK's `HelperLaunchTemplate` |
+| `NAME-GENERATED` | WARN | an unnamed resource of a §Physical names rule-2 class (CloudFormation would generate the name) |
+| `UNRESOLVED` | WARN | a check that cannot be decided before deploy — the property and its unknown tokens are named: a resource `Ref`/`GetAtt`, a parameter without a default or `--parameters` value, an unknown stack name, the prefix followed directly by a token (`dryrun5` + `${Suffix}`: the boundary is unknown), a non-literal SG text or DMS engine/mode. Fails under `--strict` |
+| `STACK-PREFIX` | WARN | the **known** stack name lacks the prefix — only `manifest.json` stack names count, never a template file name; a CDK nested stack is checked as `<parent>-<LogicalId>-<suffix>` (its parent found via `aws:asset:path`), an orphan nested template stays `UNRESOLVED` |
+
+Warnings do not block by default; resolve or explain each one in the deploy record (and use
+`--strict` for engagements whose naming rule is mandatory). `--json` gives the same findings
+for the plan/dashboard; `--allow-name NAME` admits another IAM name AWS requires verbatim. Fix
+in code, re-synth, re-check. Identifiers AWS stores lowercase (RDS, ElastiCache, DMS ids, S3)
+are compared case-insensitively; the name must be the prefix or continue with a
+non-alphanumeric character (`dryrun5-x` passes for `dryrun5`, `Dryrun5Helper…` does not). Log
+groups are checked after an explicit AWS service path (`/aws/lambda/`, `/aws/vendedlogs/states/`,
+`/aws/rds/cluster/`, … — `LOG_GROUP_SERVICE_PREFIXES` in the script), never after an arbitrary
+path component: `/aws/lambda/dryrun5-app/service` passes, `/aws/lambda/other-app/dryrun5-x` fails.
 
 ## Post-stabilization changes (the CDK project owns day-2)
 

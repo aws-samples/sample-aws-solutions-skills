@@ -41,7 +41,7 @@ on-premises, another cloud) or already on RDS/ElastiCache. A *self-managed targe
 scope** — see hard constraint 10. Cache engagements run the same phases, gates and
 safety model with the content in `shared/reference/elasticache-migration.md`.
 
-> **Language**: respond in the user's language (Korean → Korean). Code, CLI, CDK, SQL,
+> **Language**: respond in the user's language (Korean → Korean) — **every** message, above all the final one of each turn, even after long tool-heavy, resumed or interrupted turns (re-check before sending; English tool output never switches it). Code, CLI, CDK, SQL,
 > and resource names stay in English.
 
 ## 🔴 Hard constraints (never violate)
@@ -115,7 +115,7 @@ safety model with the content in `shared/reference/elasticache-migration.md`.
    a block the user didn't explicitly and fully accept, stop and ask.
 4. **No credentials in argv or in files you generate.** `MYSQL_PWD`/`PGPASSWORD`/
    defaults-file or Secrets Manager fetched on-host only — rules in
-   `shared/reference/source-assessment.md`.
+   `shared/reference/source-assessment.md`. Sole exception: authorized app config staged on the customer's app host itself (never the workstation, repo or evidence), same owner/mode as the live file, verified by redacted diff only, removed/reverted after cutover or rollback close — `cutover-procedures.md` §Credential delivery.
 5. **DMS ≠ default.** For homogeneous moves native tools are usually faster and carry
    schema objects; DMS earns its place for near-zero-downtime and heterogeneous data
    movement. Follow the decision matrix, top row first match.
@@ -169,6 +169,8 @@ safety model with the content in `shared/reference/elasticache-migration.md`.
     blocking exists only in prose. Exact format and a worked example in
     `shared/reference/engagement-safety.md` §Surfacing what's needed from the user. Never
     write the customer's answer yourself — end the turn with the question.
+    **Headless / non-interactive turns** (detail: `engagement-safety.md` §Surfacing — Headless turns): the LAST message carries the complete status, answers to every customer question and this checklist, in the customer's language (only it is delivered). **Waiting for customer input never happens inside a turn: presenting a block, or reaching anything that needs their input, ENDS THE TURN in that same message.** Supervising an already-authorized operation (deploy polling, a DMS load, a health hold, a confirmed soak) may continue in the turn — bounded, with the hard-constraint-1 dashboard checkpoints, never while a block is unanswered; a detached long watch (fully detached: `setsid nohup … </dev/null &` or `systemd-run`, never a plain `&` loop — PID + stop command in the plan) keeps that publication contract and is verified next turn. Handle explicit customer requests (or present their block) before any wait.
+    **A1 (read-only source access) and every read-only host inspection (DB host, app server) are explicit presented blocks for every engagement type, caches included** — a discovery answer can motivate a block, never confirm it. **An A3 block enumerates every stack it deploys, rehearsal/stand-in stacks included; every deploy — redeploys of an existing stack too — needs one. A block counts as confirmed only when the customer accepts the text as presented in chat.**
 13. **A genuine surprise is never saved up for the next gate.** Silence between gates is
     fine for routine, expected work — that's what the autonomous half of the Execution
     model table above is for. But the moment you discover something that contradicts a
@@ -346,10 +348,10 @@ A follow-up live Phase 6 run confirmed the loop, but exposed work omitted from i
    (Translate this into the user's conversation language — see the Language rule; the quote above is the English form of the template, not a literal string.)
 2. **Install integrity — before using any `shared/` file:** in the directory this SKILL.md was
    loaded from, test that `shared/reference/version-upgrades.md`, `shared/templates/migration-plan.md`,
-   `shared/assets/dashboard.js`, `shared/scripts/soak_check.py`,
-   `shared/scripts/dashboard_update.py`, `shared/scripts/execution_step.py`,
-   `shared/scripts/handoff_bundle.py`, `shared/scripts/cross_engine_compare.py` and
-   `shared/scripts/cache_compare.py` exist (`test -r`, don't read them).
+   `shared/assets/dashboard.js` and each `shared/scripts/{soak_check,dashboard_update,execution_step,
+   handoff_bundle,cross_engine_compare,cache_compare,predeploy_check,generate_presigned_urls,
+   dashboard_s3_publish,config_diff}.py`
+   exist (`test -r` each, don't read them).
    Any missing → STOP: the install is incomplete; show the README `install_skill` command. Never
    substitute web search for a missing reference file.
    **Before creating or updating any engagement record**, check for an existing plan,
@@ -485,6 +487,7 @@ replication commands/RDS procedures, replication direction).
 **Engine family changes between MySQL and PostgreSQL (either direction)?** Load
 `shared/reference/mysql-postgresql.md` now and run its read-only §2/§3 assessment queries;
 **application SQL review is mandatory** for this pair (§8 → `app-remediation-findings.md`).
+Any DMS path (either direction, homogeneous too): columns DMS maps to a LOB on tables without PK/UK (A10/P9 confirmed rows) are a GATE 2 blocker — `mysql-postgresql.md` §4.7.
 
 ### Phase 3: Select the method
 
@@ -535,9 +538,10 @@ creating anything, then generate and deploy the CDK project per
 `shared/patterns/cdk-stacks.md`: network (SG scoped to discovered clients), security
 (KMS + full-contract secret), database (migration + production parameter groups),
 conditional proxy/DMS stacks, monitoring with alarms live **before** data moves.
-Cache target: `elasticache-migration.md` §6 + `cdk-stacks.md` §cache-stack.ts instead.
-`cdk synth` must pass, then the SG-description charset check (`cdk-stacks.md` §scripts/
-contract — ASCII only, even in a Korean session; synth doesn't catch it); verify volatile facts via MCP.
+Cache target: `elasticache-migration.md` §6 + §7.10 readiness proofs + `cdk-stacks.md` §cache-stack.ts instead.
+`cdk synth` must pass, then `python3 -B shared/scripts/predeploy_check.py --prefix <prefix> cdk.out`
+(`cdk-stacks.md` §scripts/ contract: SG charset — ASCII only, even in a Korean session; DMS
+MySQL `SslMode require`; un-prefixed physical names) — FAIL = do not deploy; verify volatile facts via MCP.
 Alarms (`preflight-iam-cost.md` §4a): all must EXIST before data moves (already-emitting ones
 seeing data); replication/DMS alarms must show datapoints right after their task's first start, before the load proceeds.
 
@@ -692,7 +696,7 @@ Per `shared/reference/post-migration.md`: refresh statistics, verify production 
 (already applied before Phase 7), scale down, compare against the Phase 2 baseline (required
 table, post-migration.md step 2; IaC drift reconciled, step 11), keep the source +
 reverse replication through the rollback window, then decommission (with constraint 8's
-confirmation); caches: `elasticache-migration.md` §11.4. Hand over the CDK project + plan
+confirmation — always present the A6 block, even if a deferral is expected, and record the deferral); caches: `elasticache-migration.md` §11.4. Hand over the CDK project + plan
 as the customer's operational record. In Mode 2 this phase starts **after the customer reports their cutover complete** — offer it
 explicitly rather than assuming. Verify the final reviewed handoff snapshot per
 `shared/reference/handoff-packaging.md`; keep later save/acceptance receipts separate

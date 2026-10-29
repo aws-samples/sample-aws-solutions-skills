@@ -12,6 +12,10 @@ and conditions}. Reuse that approval within scope; changed scope needs acceptanc
 **Announce on:** {channel}. **Runbook/script revision:** {revision/hash}.
 **Exact source / target / client identities and versions:** {plan evidence reference}.
 **Step budgets:** {per-step measured duration + rehearsal evidence, or estimated basis}.
+**Go/no-go disclosure:** steps added/changed since the last full rehearsal {none / list + how
+tested + what an untested failure could cause}; each timing figure {measured in rehearsal <id> /
+estimate — accepted explicitly}; changes to approved boundaries/parameters {none / list, even if
+safer} (`cutover-procedures.md` §Go/no-go disclosure).
 
 ## Capture and contain
 
@@ -50,6 +54,7 @@ Fill one row per client, including any client whose switch failed midway.
 |---|------|------------------------|
 | ▢ | 4. Verify persistent source config and deployment origin | {all changed layers match approved originals; automation cannot reapply target config} |
 | ▢ | 5. Reload/redeploy and refresh processes/pools while writes remain fenced | {effective runtime uses source; only read-safe clients/probes started; startup writers remain stopped} |
+| ▢ | 5b. **Trigger step pair (rollback half — heterogeneous / DMS reverse only):** after the reverse task is stopped, re-enable/recreate on the old source the triggers disabled at cutover step 7b {list + saved DDL}; drop or disable the target-side triggers created at cutover if the target stays reachable | {trigger inventory = pre-cutover source state; one app-path write fires each trigger exactly once} |
 | ▢ | 6. Verify data and both-side sessions | {data branch resolved, high-water marks checked, source read/auth healthy, target writers contained, inventory reconciled} |
 | ▢ | 7. Release SOURCE application fence | {exact command}; only after steps 1–6 pass within accepted A5 scope |
 | ▢ | 8. Verify authorized source write/read and clients; exit maintenance | {write probe and session evidence; target stays isolated} |

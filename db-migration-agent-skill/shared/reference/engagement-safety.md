@@ -334,6 +334,24 @@ static-validation-window alternative instead; CDC in play → MySQL ↔ PostgreS
 automated checklist in cross-family mode, other pairs a manual/agent-reviewed process).
 Say which applies before quoting [N].
 
+## Confirmation integrity (A-blocks, gates, waivers)
+
+- A block is **confirmed only by a customer message that accepts that block's text as it was
+  presented in chat**. A block drafted only in `authorizations.md`, inferred from a discovery
+  answer, or shown in a different form is not confirmed — live (OBS-78): an A1b block was marked
+  confirmed without ever being shown. Present it, end the turn, record the date only after the reply.
+- **Every deploy is an A3 change needing its block — including a redeploy of an existing stack**,
+  a "no-op" `cdk deploy`, or an alarm-only stack update (live, OBS-79: an alarm stack was redeployed
+  without a block after the customer had asked to see one). Reuse an accepted A3 only within its
+  exact stack list and change description.
+- Anything executed without its block is an after-the-fact record (`authorizations.md`), reported
+  in the same turn and in the final report's "Corrections and incidents".
+- **Every presented block is also recorded in `authorizations.md` before the action it covers** —
+  refresh / re-acceptance blocks (e.g. a GATE 3 refresh), waivers and amendments included — in the
+  existing date-only, no-name format (live, OBS-82: a GATE 3 refresh accepted in chat was never
+  written down). Chat acceptance without the record is incomplete; the record without chat
+  acceptance is not a confirmation.
+
 ## Waiver protocol
 
 When the customer declines a recommended parameter (rehearsal, parallel-run length,
@@ -345,6 +363,15 @@ reverse replication):
 3. Recover what value you can (e.g. declined rehearsal → component-test every
    freeze-window command against the real target; see execution-runbooks.md §Rehearsal).
 4. Never silently skip. A waiver the customer doesn't remember confirming is a failure.
+5. **A waiver of alert subscribers (no SNS subscriber / no pager) states in its text: "nobody is
+   paged — alarms change state silently".** While such a waiver **and** a rollback window are both
+   active, the agent runs a detached monitor (§Surfacing — Headless turns, rules 7–8) that checks
+   rollback-path health on a stated cadence — reverse task status, `LastFailureMessage`, CDC
+   latency, the rollback-path alarms' state **with datapoints** — publishes it to the dashboard, and
+   the next turn reads it first. A broken or unmonitored rollback path is a hard-constraint-13
+   surprise: reported in the next message, with the RPO it implies (live, OBS-77: a reverse task
+   stalled ≈ 50 min after a VPN outage; nobody was paged and the agent learned it from the
+   customer).
 
 Use [method-readiness.md](method-readiness.md) for lab reuse and method applicability.
 A lab label grants no waiver, and a shortened window never turns unobserved time into
@@ -484,6 +511,82 @@ constraint 11 — those report progress, this requests a decision. The block abo
 English form of the template — translate the header and every item into the user's
 conversation language (the Language rule in `SKILL.md` applies here too); keep the box
 characters, emoji, and `[ ]`/numbering exactly as shown.
+
+### Headless turns: when a turn must end
+
+In a headless / non-interactive session (`claude -p`, `kiro-cli` scripted turns, any harness that
+delivers only the turn's final message) the customer can neither see nor answer anything until
+the turn ends. Live (OBS-39): an agent marked two approval blocks "presented" only in files, kept
+the turn running, then started — and at 18:18Z **re-armed** — a one-hour post-soak sync watch
+"while waiting for soak-exit/GATE 4": a deadlock the customer broke by interrupting after 3 h
+22 min; the customer's request for the shareable dashboard link, made at the start, sat
+unanswered for the same 3 h 22 min. The rules:
+
+Two different kinds of waiting — never confuse them:
+
+**(a) Waiting for the customer's input — never inside a turn.**
+1. **Presenting a block (GATE, A-block, waiver, soak-exit) or reaching any point that needs the
+   customer's input ends the turn in that same message** — the final message carries the block,
+   the full status and the §Surfacing checklist. A block written to a file but not ended-on is
+   not presented.
+2. **Never start, extend or re-arm a wait or watch loop after presenting a block, or while any
+   block is unanswered.** Waiting for an answer is the end of the turn, not a loop.
+3. **Handle explicit customer requests before any wait starts** — do it, or present its block
+   (e.g. the shareable-dashboard A3), in the message that ends the turn; never park a request
+   behind a wait.
+
+**(b) Supervising an operation that is already authorized — allowed inside the turn, bounded.**
+Deployment polling (`cdk deploy` / stack status), a DMS full load to completion, the reverse-task
+health hold, an `execution_step.py` supervision run, a soak window whose block was accepted
+beforehand: these are work, not waiting, and continue in the turn under these conditions:
+4. **Bounded** — a stated end condition and a maximum duration (the step's measured/estimated
+   budget); when it is reached, the turn ends with the result, or with the deviation presented.
+5. **Hard constraint 1 still applies** — the active-work dashboard checkpoints (`in_progress` with
+   elapsed time and progress, then the result) keep being published at the SKILL.md cadence;
+   supervision is never silent.
+6. **Never while a block is unanswered** — if the operation's outcome raises a question (a
+   failure, a deviation, the next gate), present it and end the turn; a confirmed soak window
+   ends the turn with its result and the soak-exit block — no follow-on watch.
+7. **A long watch runs detached and keeps the supervisor's contract**: it **itself publishes**
+   its checkpoints to the dashboard/status (`dashboard_update.py`, rolling summary lines below)
+   and writes its evidence file; the final message states where it logs, what it publishes, its
+   PID/unit and stop command, and the next check time (UTC); the next turn **reads and verifies**
+   the log, the published status and the evidence before relying on any of it
+   (`execution-control.md` — a detached job's own "done" is a claim, not a result). Say plainly
+   that nothing notifies the customer in between unless a confirmed alerting path exists (below).
+8. **"Detached" means fully detached from the agent's shell — never a plain `&` loop or a
+   backgrounded tool shell.** Live (OBS-48): an agent started `while true; sleep 60` (pushing
+   `status.json` to S3) as a background shell from its own tool; the headless turn waits for
+   children still attached to its shell, so it never ended — 77+ min, no output. A job that must
+   outlive the turn is started in its own session with no inherited stdin/stdout/stderr:
+   `setsid nohup sh -c 'echo $$ > <pidfile>; exec <cmd>' > <log> 2>&1 < /dev/null &` (the job writes
+   its own PID — `$!` can name a `setsid` that forked and exited; on a remote host via SSM the same
+   form), or
+   `systemd-run --user --unit <prefix>-<name> <cmd>`, or a scheduled task — or a tool that
+   detaches itself (`execution_step.py` workers; `dashboard_s3_publish.py --detach`). Record its
+   PID or unit **and its stop command** (`kill <that PID>` / `systemctl --user stop <unit>` — never
+   `pkill`/`killall` by pattern: other sessions' processes may share the host) in the plan; prefer a **bounded** job that exits by itself
+   when its window ends (`--until`) over an unbounded `while true`. **Before ending the turn**,
+   confirm nothing still holds it open: no foreground or `&` child of the tool shell
+   (`jobs -l` empty; the job's `ps -o sid=` differs from the shell's), and the job's output goes
+   to its own log. Stop every such job at the end of its window and at Phase 9 cleanup.
+
+9. **Say upfront what a headless runner can and cannot show during long work.** When the
+   customer's runner or wrapper delivers only the turn's final message (a property of the runner —
+   `claude -p --output-format stream-json --include-partial-messages` can stream), per-step chat
+   updates inside one turn are impossible (live,
+   OBS-61: the customer asked for per-step updates during the cutover). At GATE 4 (and before any
+   long supervised step) state it plainly: live per-step progress is on the dashboard (step-level
+   `in_progress` checkpoints under hard constraint 1), the chat gets the result when the turn ends.
+   Offer to split the work into separate turns at **safe checkpoints only** — points where the
+   runbook may pause without extending a write freeze or leaving a half-applied step; never split
+   inside the freeze.
+
+**Periodic probes are summarized, not logged one by one.** A watch that probes every 45 s must
+not append a plan-log line per probe (live: 600+ near-identical lines). Record **one rolling
+summary line per interval** in `migration-plan.md` / the activity log (interval UTC, probes run,
+min/max/last of the measured values, failures, link to the evidence file) and keep the per-probe
+detail in the evidence file (`dashboard.md` §activity log).
 
 **Never promise a notification you cannot deliver.** "I'll let you know immediately if
 anything goes wrong" (live: said with no schedule and no subscription) is a claim about a

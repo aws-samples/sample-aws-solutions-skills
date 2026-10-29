@@ -30,6 +30,10 @@ import generate_presigned_urls as presign  # noqa: E402
 import soak_check  # noqa: E402
 import pymysql  # noqa: E402
 import soak_check_lambda as L  # noqa: E402
+
+# The live-table re-check (apply_rechecks) waits recheck.delay_seconds between re-reads; tests
+# never sleep — RecheckTests asserts the configured delays explicitly.
+soak_check.RECHECK_SLEEP = L.RECHECK_SLEEP = lambda seconds: None
 from decimal import Decimal  # noqa: E402
 
 # A SHOW REPLICA STATUS column list shaped like 8.4 (Seconds_Behind_Source deliberately NOT
@@ -955,7 +959,7 @@ class PresignCredentialLifetimeTests(unittest.TestCase):
         self.assertEqual(eff, cred_exp)
         self.assertEqual(secs, 58 * 60)
         self.assertIn("TEMPORARY", warn)
-        self.assertIn("re-issue on demand", warn)
+        self.assertIn("REFRESH the credentials first", warn)
         self.assertIn("A3", warn)
 
     def test_temporary_with_unknown_expiry_is_unknown_never_precise(self):
@@ -1020,6 +1024,40 @@ class PresignCredentialLifetimeTests(unittest.TestCase):
         self.assertIn(f"EFFECTIVE EXPIRY: {soon.isoformat(timespec='seconds')}", out.getvalue())
         self.assertIn("limited by temporary signing credentials", out.getvalue())
         self.assertIn("CUSTOMER LINK:", out.getvalue())
+        self.assertIn("embeds the role session token", out.getvalue())   # OBS-40: why the link is ~2 KB
+        self.assertIn("before it expires during a long soak", out.getvalue())
+        self.assertIn("REFRESH the credentials first", out.getvalue())
+
+    def test_must_cover_until_refuses_a_link_the_credentials_cannot_cover(self):
+        # review r8 #3: re-running with the same STS session cannot extend the link
+        now = datetime.datetime(2026, 10, 28, 18, 25, tzinfo=datetime.timezone.utc)
+        cred = now + datetime.timedelta(hours=6)
+        eff, secs, _ = presign.effective_expiry(604800, True, cred, now=now)
+        err = presign.coverage_error(eff, now + datetime.timedelta(hours=12), secs < 604800)
+        self.assertIn("SIGNING CREDENTIALS", err)
+        self.assertIn("same credentials cannot extend", err)
+        self.assertIsNone(presign.coverage_error(eff, now + datetime.timedelta(hours=5), True))
+        self.assertIn("UNKNOWN", presign.coverage_error(None, now, True))
+        self.assertIn("--expires-seconds", presign.coverage_error(now + datetime.timedelta(hours=1),
+                                                                 now + datetime.timedelta(hours=2), False))
+        self.assertIsNone(presign.coverage_error(eff, None, True))
+
+    def test_cli_must_cover_until_stops_before_issuing(self):
+        client = mock.MagicMock()
+        soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=50)
+        need = (soon + datetime.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out = io.StringIO()
+        with mock.patch.object(presign, "resolve_bucket_region", return_value="ap-northeast-2"), \
+             mock.patch.object(presign, "make_signing_client", return_value=client), \
+             mock.patch.object(presign, "credential_lifetime", return_value=(True, soon)), \
+             mock.patch.object(sys, "argv", ["x", "--bucket", "b", "--expires-seconds", "172800",
+                                             "--must-cover-until", need]), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                presign.main()
+        self.assertIn("NOT ISSUED", str(cm.exception))
+        self.assertNotIn("CUSTOMER LINK", out.getvalue())
+        client.generate_presigned_url.assert_not_called()
 
 
 class PresignRegionTests(unittest.TestCase):
@@ -1417,6 +1455,465 @@ class CrossFamilyPreflightTests(Stubbed):
         self.assertEqual(rows["target_db_watermark shop.items"]["result"], "Error")
         self.assertIn("every day RED", rows["target_db_watermark shop.items"]["message"])
 
+
+class PassDb(FakeTableDb):
+    """FakeTableDb whose ids change per comparison pass: ids_by_pass[n] is served from the
+    n-th MAX(pk) read on (0-based; the last entry repeats) — a pass = one re-read."""
+
+    def __init__(self, ids_by_pass, **kw):
+        super().__init__(ids_by_pass[0], **kw)
+        self.ids_by_pass, self.passes = [list(x) for x in ids_by_pass], 0
+
+    def answer(self, sql):
+        if sql.strip().upper().startswith("SELECT MAX("):
+            self.ids = self.ids_by_pass[min(self.passes, len(self.ids_by_pass) - 1)]
+            self.passes += 1
+        return super().answer(sql)
+
+
+FULL = range(1, 100001)
+NO_500 = [i for i in FULL if i != 500]           # source DELETEd old row 500; target still has it
+
+
+class RecheckTests(unittest.TestCase):
+    """OBS-42: a count difference on a LIVE table is re-checked in fresh snapshots before it can
+    be RED; static tables are exact; persistent differences stay RED with evidence."""
+
+    def lam(self, src, tgt, **over):
+        return L.run_day({**WM_CFG, **over}, DbConn(src), DbConn(tgt), "2026-10-28")
+
+    def std(self, src, tgt, **over):
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "mysql", "host": "t"},
+               "tables": ["shop.orders"], "checksum_tables": ["shop.orders"], "watermark": {"pk_margin": 1000}, **over}
+        with mock.patch.object(soak_check, "run_batch",
+                               side_effect=WatermarkStandaloneTests.fake_batch(None, {"s": src, "t": tgt})):
+            return soak_check.run_day(cfg, "2026-10-28")
+
+    def both(self, mk_src, mk_tgt, **over):
+        return [run(mk_src(), mk_tgt(), **over) for run in (self.lam, self.std)]
+
+    def test_target_ahead_by_one_converges_and_is_not_red(self):
+        sleeps = []
+        with mock.patch.object(L, "RECHECK_SLEEP", sleeps.append), mock.patch.object(soak_check, "RECHECK_SLEEP", sleeps.append):
+            days = self.both(lambda: FakeTableDb(NO_500), lambda: PassDb([FULL, NO_500]),
+                             recheck={"attempts": 3, "delay_seconds": 7})
+        self.assertEqual(sleeps, [7, 7], "one re-read per script, after the configured delay")
+        for day in days:
+            self.assertIs(day["checks"]["row_count"], True)
+            self.assertIs(day["checks"]["checksum"], True)
+            d = day["detail"]["row_count"]["shop.orders"]
+            rc = d["recheck"]
+            self.assertEqual(rc["result"], "converged")
+            self.assertEqual(rc["first"]["rows"], {"source": 98999, "target": 99000, "match": False})
+            self.assertEqual([a["match"] for a in rc["attempts"]], [True])
+            self.assertIs(d["match"], True)
+            self.assertEqual(day["detail"]["checksum"]["shop.orders"]["recheck"]["result"], "converged")
+        self.assertEqual(days[0]["detail"]["row_count"], days[1]["detail"]["row_count"], "both scripts agree")
+
+    def test_persistent_difference_is_red_with_every_reading(self):
+        for day in self.both(lambda: FakeTableDb(NO_500), lambda: FakeTableDb(FULL)):
+            self.assertIs(day["checks"]["row_count"], False)
+            self.assertEqual(day["overall"], "red")
+            rc = day["detail"]["row_count"]["shop.orders"]["recheck"]
+            self.assertEqual((rc["result"], len(rc["attempts"]), rc["delay_seconds"]), ("persistent", 2, 20))
+            self.assertTrue(all(a["rows"] == {"source": 98999, "target": 99000, "match": False} for a in rc["attempts"]))
+
+    def test_static_table_difference_is_red_immediately(self):
+        dbs = []
+
+        def tgt():
+            dbs.append(PassDb([FULL, NO_500]))
+            return dbs[-1]
+        for day in self.both(lambda: FakeTableDb(NO_500), tgt, static_tables=["shop.orders"]):
+            self.assertIs(day["checks"]["row_count"], False)
+            rc = day["detail"]["row_count"]["shop.orders"]["recheck"]
+            self.assertEqual((rc["result"], rc["attempts"]), ("static_table_exact", []))
+        self.assertEqual([db.passes for db in dbs], [1, 1], "a static table is never re-read")
+
+    def test_tolerance_applies_only_after_rechecks_and_never_to_checksums(self):
+        # whole-table mode (watermark off): target keeps one extra row (id 0, value 0 -> same CHECKSUM)
+        src, tgt = (lambda: FakeTableDb(range(1, 101))), (lambda: FakeTableDb(range(0, 101)))
+        for day in self.both(src, tgt, watermark={"enabled": False}, row_count_tolerance={"shop.orders": 1}):
+            self.assertIs(day["checks"]["row_count"], True)
+            self.assertTrue(day["detail"]["row_count"]["shop.orders"]["recheck"]["result"].startswith("within_tolerance (1 <= 1)"))
+        for day in self.both(src, lambda: FakeTableDb(range(-1, 101)), watermark={"enabled": False},
+                             row_count_tolerance={"shop.orders": 1}):
+            self.assertIs(day["checks"]["row_count"], False, "2 > tolerance 1")
+        for day in self.both(lambda: FakeTableDb(range(1, 101)), lambda: FakeTableDb(range(1, 102)),
+                             watermark={"enabled": False}, row_count_tolerance={"shop.orders": 5}):
+            self.assertIs(day["checks"]["checksum"], False, "a checksum difference is never tolerated")
+            self.assertIs(day["checks"]["row_count"], False)
+
+    def test_attempts_zero_is_needs_review_not_red(self):
+        for day in self.both(lambda: FakeTableDb(NO_500), lambda: FakeTableDb(FULL), recheck={"attempts": 0}):
+            self.assertIsNone(day["checks"]["row_count"])
+            self.assertTrue(day["needs_agent_review"])
+            self.assertIn("needs_recheck", day["detail"]["row_count"]["shop.orders"]["recheck"]["result"])
+
+    @staticmethod
+    def _seq_rerun(*steps):
+        """rerun() returning (row_check, checksum_check) per step; an exception class raises."""
+        it = iter(steps)
+
+        def rerun(_tables):
+            step = next(it)
+            if isinstance(step, type) and issubclass(step, BaseException):
+                raise step("re-read timed out")
+            s_, t_ = step
+            return ({"pass": s_ == t_, "detail": {"t": {"source": s_, "target": t_, "match": s_ == t_}}},
+                    {"pass": True, "detail": {}})
+        return rerun
+
+    def test_failed_final_reread_is_inconclusive_never_persistent_or_tolerated(self):
+        # review r11 #2: reread 1 -> 5/6, reread 2 raises TimeoutError. The earlier reading is
+        # kept as evidence, but the table is inconclusive (None) — neither RED-by-persistence
+        # (tolerance 0) nor within_tolerance (tolerance 1).
+        row = {"pass": False, "detail": {"t": {"source": 5, "target": 6, "match": False}}}
+        for mod in (L, soak_check):
+            for tol in (0, 1):
+                with mock.patch.object(mod, "RECHECK_SLEEP", lambda _s: None):
+                    r, _ = mod.apply_rechecks({"row_count_tolerance": {"t": tol}}, json.loads(json.dumps(row)),
+                                              {"pass": True, "detail": {}}, self._seq_rerun((5, 6), TimeoutError))
+                d = r["detail"]["t"]
+                self.assertIsNone(d["match"], (mod.__name__, tol))
+                self.assertIsNone(r["pass"], (mod.__name__, tol))
+                self.assertTrue(d["recheck"]["result"].startswith("inconclusive (final re-read failed: TimeoutError"),
+                                (mod.__name__, tol, d["recheck"]["result"]))
+                att = d["recheck"]["attempts"]
+                self.assertEqual(att[0]["rows"], {"source": 5, "target": 6, "match": False}, "earlier reading kept")
+                self.assertEqual((att[1]["attempt"], att[1]["error"][:12]), (2, "TimeoutError"))
+                self.assertEqual(d["recheck"]["first"]["rows"]["target"], 6)
+
+    def test_failure_then_success_is_resolved_by_the_final_reading(self):
+        row = {"pass": False, "detail": {"t": {"source": 5, "target": 6, "match": False}}}
+        for mod in (L, soak_check):
+            with mock.patch.object(mod, "RECHECK_SLEEP", lambda _s: None):
+                r, _ = mod.apply_rechecks({}, json.loads(json.dumps(row)), {"pass": True, "detail": {}},
+                                          self._seq_rerun(TimeoutError, (6, 6)))
+                self.assertEqual((r["detail"]["t"]["recheck"]["result"], r["detail"]["t"]["match"], r["pass"]),
+                                 ("converged", True, True), mod.__name__)
+                r, _ = mod.apply_rechecks({"row_count_tolerance": {"t": 1}}, json.loads(json.dumps(row)),
+                                          {"pass": True, "detail": {}}, self._seq_rerun(TimeoutError, (5, 6)))
+                self.assertTrue(r["detail"]["t"]["recheck"]["result"].startswith("within_tolerance (1 <= 1)"), mod.__name__)
+                r, _ = mod.apply_rechecks({}, json.loads(json.dumps(row)), {"pass": True, "detail": {}},
+                                          self._seq_rerun(TimeoutError, (5, 6)))
+                self.assertEqual((r["detail"]["t"]["recheck"]["result"], r["detail"]["t"]["match"]),
+                                 ("persistent", False), mod.__name__)
+
+    def test_failed_rereads_are_needs_review(self):
+        row = {"pass": False, "detail": {"t": {"source": 1, "target": 2, "match": False}}}
+        ck = {"pass": True, "detail": {}}
+        for mod in (L, soak_check):
+            r, c = mod.apply_rechecks({}, json.loads(json.dumps(row)), dict(ck), lambda sub: 1 / 0)
+            self.assertIsNone(r["pass"])
+            self.assertEqual(r["detail"]["t"]["recheck"]["result"], "recheck_failed")
+            self.assertIn("ZeroDivisionError", r["detail"]["t"]["recheck"]["attempts"][0]["error"])
+
+    def test_no_difference_means_no_reread(self):
+        calls = []
+        row = {"pass": True, "detail": {"t": {"source": 1, "target": 1, "match": True}}}
+        r, _ = L.apply_rechecks({}, row, {"pass": True, "detail": {}}, lambda sub: calls.append(sub))
+        self.assertEqual((calls, r["pass"], "recheck" in r["detail"]["t"]), ([], True, False))
+
+    def test_config_is_validated(self):
+        for bad in ({"recheck": {"attempts": -1}}, {"recheck": {"attempts": True}}, {"recheck": {"delay_seconds": "5"}},
+                    {"recheck": {"attemps": 2}}, {"static_tables": "shop.orders"},
+                    {"row_count_tolerance": {"t": -1}}, {"row_count_tolerance": {"t": 1}, "static_tables": ["t"]}):
+            for mod in (L, soak_check):
+                with self.assertRaises(ValueError, msg=bad):
+                    mod.recheck_config(bad)
+        env = {**ENV, "RECHECK": '{"attempts": 1, "delay_seconds": 5}', "STATIC_TABLES": '["shop.lookup"]',
+               "ROW_COUNT_TOLERANCE": '{"shop.orders": 3}'}
+        with mock.patch.dict(os.environ, env):
+            cfg = L._load_config()
+        self.assertEqual((cfg["recheck"], cfg["static_tables"], cfg["row_count_tolerance"]),
+                         ({"attempts": 1, "delay_seconds": 5}, ["shop.lookup"], {"shop.orders": 3}))
+        with mock.patch.dict(os.environ, {**env, "RECHECK": '{"attempts": 9}'}), self.assertRaises(ValueError):
+            L._load_config()
+
+    def test_recheck_helpers_are_identical_in_both_scripts(self):
+        import inspect
+        for name in ("recheck_config", "_combine_states", "_recheck_reading", "apply_rechecks",
+                     "expected_schema_differences_config", "apply_expected_differences",
+                     "_declared_side_family", "matching_catalog_columns"):
+            self.assertEqual(inspect.getsource(getattr(L, name)), inspect.getsource(getattr(soak_check, name)), name)
+        self.assertEqual(L.RECHECK_DEFAULTS, soak_check.RECHECK_DEFAULTS)
+        self.assertEqual((L.EXPECTED_DIFF_KEYS, L.EXPECTED_DIFF_KINDS),
+                         (soak_check.EXPECTED_DIFF_KEYS, soak_check.EXPECTED_DIFF_KINDS))
+
+    def test_tolerance_never_overrides_null_count_or_inconclusive_evidence(self):
+        # review r9 #1, both scripts: (a) count-only table, totals 101/101 but NULL counts 1/0,
+        # tolerance 0 — the failure is the NULL count, not a total difference; (b) the re-read is
+        # an inconclusive 0/0 with unexamined tail rows — unknown coverage is never tolerated.
+        null_first = {"source": 101, "target": 101, "match": False, "null_rows": {"source": 1, "target": 0}}
+        inconclusive = {"source": 0, "target": 0, "match": None, "tail_rows": {"source": 3, "target": 3}}
+        for mod in (L, soak_check):
+            with mock.patch.object(mod, "RECHECK_SLEEP", lambda s: None):
+                r, _ = mod.apply_rechecks({"row_count_tolerance": {"t": 0}},
+                                          {"pass": False, "detail": {"t": dict(null_first)}}, {"pass": True, "detail": {}},
+                                          lambda sub: ({"detail": {"t": dict(null_first)}}, {"detail": {}}))
+                self.assertIs(r["detail"]["t"]["match"], False, mod.__name__)
+                self.assertEqual(r["detail"]["t"]["recheck"]["result"], "persistent")
+                self.assertIs(r["pass"], False)
+                r, _ = mod.apply_rechecks({"row_count_tolerance": {"t": 5}},
+                                          {"pass": False, "detail": {"t": {"source": 5, "target": 6, "match": False}}},
+                                          {"pass": True, "detail": {}},
+                                          lambda sub: ({"detail": {"t": dict(inconclusive)}}, {"detail": {}}))
+                self.assertIsNone(r["detail"]["t"]["match"], mod.__name__)
+                self.assertEqual(r["detail"]["t"]["recheck"]["result"], "inconclusive")
+                self.assertEqual(r["detail"]["t"]["tail_rows"], {"source": 3, "target": 3}, "final reading published")
+                self.assertIsNone(r["pass"])
+                # a conclusive total-only difference is still tolerated
+                r, _ = mod.apply_rechecks({"row_count_tolerance": {"t": 1}},
+                                          {"pass": False, "detail": {"t": {"source": 5, "target": 6, "match": False}}},
+                                          {"pass": True, "detail": {}},
+                                          lambda sub: ({"detail": {"t": {"source": 5, "target": 6, "match": False}}}, {"detail": {}}))
+                self.assertIs(r["detail"]["t"]["match"], True)
+                self.assertTrue(r["detail"]["t"]["recheck"]["result"].startswith("within_tolerance (1 <= 1)"))
+
+    def test_rereads_publish_the_final_readings_diagnostics(self):
+        # review r9 #2: key 2 (DELETEd on the source, still on the target) converges on the
+        # re-read; key 3 differs on every reading. The published checksum detail must name key 3
+        # — the final reading's digests/mismatches/examples/verdict — with the first under `first`.
+        def sides():
+            s = MemSide("mysql", mysql_table([r for r in src_rows(30) if int(r["id"]) != 2]), "source")
+            rows = tgt_rows(30)
+            for r in rows:
+                if int(r["id"]) == 3:
+                    r["price"] = Decimal("999.5")
+            t = MemSide("postgres", pg_table(rows), "target")
+            begins, orig = [0], t.query
+
+            def query(sql, *a, **k):
+                if sql.strip().upper().startswith("BEGIN"):
+                    begins[0] += 1
+                    if begins[0] == 2:
+                        live = t.tables[("shop", "items")]["rows"]
+                        live[:] = [r for r in live if int(r["id"]) != 2]
+                return orig(sql, *a, **k)
+            t.query = query
+            return s, t
+        lam = L.run_day(dict(X_CFG), *map(MemConn, sides()), "2026-10-28")
+        std = CrossFamilySoakTests.std(self, sides())
+        for day in (lam, std):
+            self.assertIs(day["checks"]["checksum"], False)
+            ck = day["detail"]["checksum"]["shop.items"]
+            self.assertEqual((ck["recheck"]["result"], ck["verdict"], ck["match"]), ("persistent", "MISMATCH", False))
+            ex = ck["mismatches"]["examples"]
+            self.assertEqual([e["key"] for e in ex["different"]], [["3"]])
+            self.assertEqual(ex["extra_on_target"], [], "key 2 converged: not reported as the persistent failure")
+            self.assertEqual(ck["rows"], {"source": 24, "target": 24})
+            first = ck["recheck"]["first"]["checksum_detail"]
+            self.assertEqual(first["mismatches"]["examples"]["extra_on_target"], [["2"]])
+            self.assertNotEqual(first["target"], ck["target"], "digests come from the final reading")
+            reread = ck["recheck"]["attempts"][-1]["checksum_detail"]
+            self.assertEqual(reread["target"], ck["target"])
+            self.assertIs(day["detail"]["row_count"]["shop.items"]["match"], True)
+        self.assertEqual(lam["detail"]["checksum"], std["detail"]["checksum"])
+
+    def test_cross_family_live_drift_converges(self):
+        # source DELETEd item 2; the target still has it on the first read, not on the re-read
+        def sides():
+            s = MemSide("mysql", mysql_table([r for r in src_rows(30) if int(r["id"]) != 2]), "source")
+            t = MemSide("postgres", pg_table(tgt_rows(30)), "target")
+            begins, orig = [0], t.query
+
+            def query(sql, *a, **k):
+                if sql.strip().upper().startswith("BEGIN"):
+                    begins[0] += 1
+                    if begins[0] == 2:
+                        rows = t.tables[("shop", "items")]["rows"]
+                        rows[:] = [r for r in rows if int(r["id"]) != 2]
+                return orig(sql, *a, **k)
+            t.query = query
+            return s, t
+        lam = L.run_day(dict(X_CFG), *map(MemConn, sides()), "2026-10-28")
+        std = CrossFamilySoakTests.std(self, sides())
+        for day in (lam, std):
+            self.assertEqual((day["checks"]["row_count"], day["checks"]["checksum"]), (True, True))
+            rc = day["detail"]["row_count"]["shop.items"]["recheck"]
+            self.assertEqual((rc["result"], rc["first"]["rows"]["match"]), ("converged", False))
+        self.assertEqual(lam["detail"]["row_count"], std["detail"]["row_count"])
+
+
+
+GEN_COL = {"table": "shop.items", "column": "open_invoice_no", "side": "target", "kind": "extra_column",
+           "reason": "generated column of the partial-unique-index emulation (mysql-postgresql.md §4.3)"}
+
+
+class ExpectedSchemaDifferenceTests(unittest.TestCase):
+    """OBS-53: an intentional schema difference (the partial-unique-index recipe's generated
+    column on the target) is reported as expected, never RED; anything undeclared still fails."""
+
+    def sides(self, extra=("open_invoice_no",)):
+        cat = pg_table([])[("shop", "items")]["catalog"] + [(c, "text", "b", "S", "YES", None) for c in extra]
+        return x_sides(catalog=cat)
+
+    def days(self, cfg_over, extra=("open_invoice_no",)):
+        lam = L.run_day({**X_CFG, **cfg_over}, *map(MemConn, self.sides(extra)), "2026-10-28")
+        std = CrossFamilySoakTests.std(self, self.sides(extra), **cfg_over)
+        return lam, std
+
+    def test_obs53_generated_column_is_expected_not_red(self):
+        undeclared = self.days({})
+        for day in undeclared:
+            self.assertIs(day["checks"]["schema_drift"], False, "without the declaration it is drift")
+        for day in self.days({"expected_schema_differences": [GEN_COL]}):
+            self.assertIs(day["checks"]["schema_drift"], True)
+            d = day["detail"]["schema_drift"]["shop.items"]
+            self.assertEqual((d["target_only"], d["status"]), ([], "expected"))
+            self.assertEqual(d["expected"][0]["status"], f"expected ({GEN_COL['reason']})")
+
+    def test_an_undeclared_extra_column_still_fails(self):
+        for day in self.days({"expected_schema_differences": [GEN_COL]}, extra=("open_invoice_no", "surprise")):
+            self.assertIs(day["checks"]["schema_drift"], False)
+            d = day["detail"]["schema_drift"]["shop.items"]
+            self.assertEqual(d["target_only"], ["surprise"])
+            self.assertEqual([e["column"] for e in d["expected"]], ["open_invoice_no"])
+
+    def test_same_family_shapes_type_kind_and_unexplained_failures(self):
+        cfg = {"tables": ["t", "u", "v"], "expected_schema_differences": [
+            {"table": "t", "column": "Amount", "side": "target", "kind": "type", "reason": "widened on purpose"},
+            {"table": "u", "column": "x", "side": "target", "kind": "extra_column", "reason": "r"},
+            {"table": "v", "column": "x", "side": "target", "kind": "extra_column", "reason": "r"}]}
+        for mod in (L, soak_check):
+            drift = {"pass": False, "detail": {
+                "t": {"source_only": [], "target_only": [], "mismatched_attributes": {"amount": {"source": {}, "target": {}}}}}}
+            self.assertIs(mod.apply_expected_differences(json.loads(json.dumps(cfg)), drift)["pass"], True)
+            # no columns read at all (empty fingerprints) is never explained away
+            drift = {"pass": False, "detail": {"u": {"source_only": [], "target_only": [], "mismatched_attributes": {}}}}
+            self.assertIs(mod.apply_expected_differences(json.loads(json.dumps(cfg)), drift)["pass"], False)
+            # a cross-family planning failure (note) stays a failure
+            drift = {"pass": False, "detail": {"v": {"source_only": [], "target_only": ["x"], "mismatched_attributes": {},
+                                                    "note": "could not plan"}}}
+            self.assertIs(mod.apply_expected_differences(json.loads(json.dumps(cfg)), drift)["pass"], False)
+            # the declaration names the target side; the same column on the source side is not covered
+            drift = {"pass": False, "detail": {"u": {"source_only": ["x"], "target_only": [], "mismatched_attributes": {}}}}
+            self.assertIs(mod.apply_expected_differences(json.loads(json.dumps(cfg)), drift)["pass"], False)
+            # green / unknown drift is never touched
+            for state in (True, None):
+                self.assertIs(mod.apply_expected_differences(cfg, {"pass": state, "detail": {}})["pass"], state)
+
+    @staticmethod
+    def _cfgs(table, decl, side="target", engine="postgres"):
+        """The same declaration in both scripts' config shapes."""
+        item = {"table": table, "column": decl, "side": side, "kind": "extra_column", "reason": "generated"}
+        std = {"tables": [table], "expected_schema_differences": [item], side: {"engine": engine}}
+        lam = {"tables": [table], "expected_schema_differences": [item], f"{side}_engine": engine}
+        return ((soak_check, std), (L, lam))
+
+    def test_review13_unquoted_declaration_never_hides_a_distinct_quoted_pg_column(self):
+        # declaring open_invoice_no must not also remove the distinct PG column "Open_Invoice_No"
+        for mod, cfg in self._cfgs("t", "open_invoice_no"):
+            drift = {"pass": False, "detail": {"t": {"source_only": [], "target_only": ["open_invoice_no", "Open_Invoice_No"],
+                                                     "mismatched_attributes": {}}}}
+            r = mod.apply_expected_differences(cfg, drift)
+            self.assertIs(r["pass"], False, mod.__name__)
+            self.assertEqual(r["detail"]["t"]["target_only"], ["Open_Invoice_No"])
+            self.assertEqual([e["column"] for e in r["detail"]["t"]["expected"]], ["open_invoice_no"])
+        # through the cross-family run as well
+        for day in self.days({"expected_schema_differences": [GEN_COL]}, extra=("open_invoice_no", "Open_Invoice_No")):
+            self.assertIs(day["checks"]["schema_drift"], False)
+            self.assertEqual(day["detail"]["schema_drift"]["shop.items"]["target_only"], ["Open_Invoice_No"])
+
+    def test_quoted_pg_declaration_matches_exactly_and_unquoted_folds(self):
+        for mod, cfg in self._cfgs("t", '"Open_Invoice_No"'):
+            drift = {"pass": False, "detail": {"t": {"source_only": [], "target_only": ["Open_Invoice_No"],
+                                                     "mismatched_attributes": {}}}}
+            self.assertIs(mod.apply_expected_differences(cfg, drift)["pass"], True, mod.__name__)
+        for mod, cfg in self._cfgs("t", "Open_Invoice_No"):          # unquoted folds to open_invoice_no
+            drift = {"pass": False, "detail": {"t": {"source_only": [], "target_only": ["Open_Invoice_No"],
+                                                     "mismatched_attributes": {}}}}
+            self.assertIs(mod.apply_expected_differences(cfg, drift)["pass"], False, mod.__name__)
+
+    def test_mysql_declaration_is_case_insensitive_single_match(self):
+        for mod, cfg in self._cfgs("t", "open_invoice_no", engine="mysql"):
+            drift = {"pass": False, "detail": {"t": {"source_only": [], "target_only": ["OPEN_INVOICE_NO"],
+                                                     "mismatched_attributes": {}}}}
+            r = mod.apply_expected_differences(cfg, drift)
+            self.assertIs(r["pass"], True, mod.__name__)
+            self.assertEqual(r["detail"]["t"]["status"], "expected")
+
+    def test_ambiguous_declaration_fails_and_suppresses_nothing(self):
+        for mod, cfg in self._cfgs("t", "open_invoice_no", engine="mysql"):
+            drift = {"pass": False, "detail": {"t": {"source_only": [], "target_only": ["open_invoice_no", "OPEN_INVOICE_NO"],
+                                                     "mismatched_attributes": {}}}}
+            r = mod.apply_expected_differences(cfg, drift)
+            self.assertIs(r["pass"], False, mod.__name__)
+            self.assertEqual(r["detail"]["t"]["target_only"], ["open_invoice_no", "OPEN_INVOICE_NO"])
+            self.assertIn("ambiguous: matches 2", r["detail"]["t"]["expected_ambiguous"][0]["status"])
+
+    @staticmethod
+    def _type_cfgs(table, decl, side):
+        """A `type` declaration with MySQL source / PostgreSQL target, in both config shapes."""
+        item = {"table": table, "column": decl, "side": side, "kind": "type", "reason": "intentional type change"}
+        std = {"tables": [table], "expected_schema_differences": [item],
+               "source": {"engine": "mysql"}, "target": {"engine": "postgres"}}
+        lam = {"tables": [table], "expected_schema_differences": [item],
+               "source_engine": "mysql", "target_engine": "postgres"}
+        return ((soak_check, std), (L, lam))
+
+    @staticmethod
+    def _type_drift(src_name, tgt_name):
+        # cross-family shape: keyed by the SOURCE name, each side carries its catalog name
+        return {"pass": False, "detail": {"t": {"source_only": [], "target_only": [], "mismatched_attributes": {
+            src_name: {"source": {"name": src_name, "type": "decimal(10,2)"},
+                       "target": {"name": tgt_name, "type": "numeric(12,4)"}, "finding": "type differs"}}}}}
+
+    def test_review14_target_type_declaration_matches_the_target_catalog_name(self):
+        # MySQL `Amount` -> PG `amount`: a target-side declaration `amount` is the approved one
+        for mod, cfg in self._type_cfgs("t", "amount", "target"):
+            r = mod.apply_expected_differences(cfg, self._type_drift("Amount", "amount"))
+            self.assertIs(r["pass"], True, mod.__name__)
+            self.assertEqual(r["detail"]["t"]["mismatched_attributes"], {})
+            self.assertEqual(r["detail"]["t"]["status"], "expected")
+
+    def test_review14_quoted_pg_target_name_needs_a_quoted_declaration(self):
+        # MySQL `amount` -> PG "Amount": the quoted declaration matches, the unquoted one does not
+        for mod, cfg in self._type_cfgs("t", '"Amount"', "target"):
+            r = mod.apply_expected_differences(cfg, self._type_drift("amount", "Amount"))
+            self.assertIs(r["pass"], True, mod.__name__)
+        for mod, cfg in self._type_cfgs("t", "amount", "target"):
+            r = mod.apply_expected_differences(cfg, self._type_drift("amount", "Amount"))
+            self.assertIs(r["pass"], False, mod.__name__)
+            self.assertIn("amount", r["detail"]["t"]["mismatched_attributes"])
+
+    def test_source_side_type_declarations_still_match_the_source_name(self):
+        for mod, cfg in self._type_cfgs("t", "AMOUNT", "source"):     # MySQL: case-insensitive
+            r = mod.apply_expected_differences(cfg, self._type_drift("Amount", "amount"))
+            self.assertIs(r["pass"], True, mod.__name__)
+        for mod, cfg in self._type_cfgs("t", "other", "source"):
+            r = mod.apply_expected_differences(cfg, self._type_drift("Amount", "amount"))
+            self.assertIs(r["pass"], False, mod.__name__)
+        # same-family shape (no per-side names): the shared key is the catalog name on both sides
+        same = {"pass": False, "detail": {"t": {"source_only": [], "target_only": [], "mismatched_attributes": {
+            "amount": {"source": {"type": "int"}, "target": {"type": "bigint"}}}}}}
+        for mod, cfg in self._type_cfgs("t", "amount", "target"):
+            r = mod.apply_expected_differences(cfg, json.loads(json.dumps(same)))
+            self.assertIs(r["pass"], True, mod.__name__)
+
+    def test_config_is_validated_before_any_connection(self):
+        base = dict(GEN_COL)
+        bad_items = [{**base, "extra": 1}, {k: v for k, v in base.items() if k != "reason"}, {**base, "reason": "  "},
+                     {**base, "side": "both"}, {**base, "kind": "rename"}, {**base, "table": "shop.other"}, "x"]
+        for mod in (L, soak_check):
+            for bad in bad_items + ["not-a-list"]:
+                cfg = {"tables": ["shop.items"], "expected_schema_differences": bad if bad == "not-a-list" else [bad]}
+                with self.assertRaises(ValueError, msg=(mod.__name__, bad)):
+                    mod.recheck_config(cfg)
+        cfg = {"source": {"engine": "mysql", "host": "s"}, "target": {"engine": "postgres", "host": "t"},
+               "tables": ["shop.items"], "expected_schema_differences": [{**base, "reason": ""}]}
+        with mock.patch.object(soak_check, "_cross_connect") as conn, self.assertRaises(ValueError):
+            soak_check.run_day(cfg, "2026-10-28")
+        conn.assert_not_called()
+        env = {**ENV, "EXPECTED_SCHEMA_DIFFERENCES": json.dumps([{**base, "table": "shop.orders"}])}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(L._load_config()["expected_schema_differences"][0]["table"], "shop.orders")
+        with mock.patch.dict(os.environ, {**env, "EXPECTED_SCHEMA_DIFFERENCES": json.dumps([{**base, "kind": "x"}])}), \
+                self.assertRaises(ValueError):
+            L._load_config()
+        with mock.patch.dict(os.environ, {**env, "EXPECTED_SCHEMA_DIFFERENCES": ""}):
+            self.assertEqual(L._load_config()["expected_schema_differences"], [])
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

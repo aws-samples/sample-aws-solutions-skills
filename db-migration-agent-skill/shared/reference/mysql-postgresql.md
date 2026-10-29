@@ -37,6 +37,9 @@
 5. **Validate with normalized comparison, not checksums.** `CHECKSUM TABLE` and
    `md5(string_agg(...))` can never match across engines; use
    `shared/scripts/cross_engine_compare.py` (§9) plus DMS data validation.
+6. **A column DMS treats as a LOB on a table without a PK/UK is a GATE 2 blocker for every
+   DMS path, both directions and the reverse task** (§4.7 — confirmed blockers vs checks): DMS drops the column, every row arrives
+   NULL, row counts still match. Never let `change-data-type` stand unproven (§4.4).
 
 ## 1. Decision inputs (both directions)
 
@@ -114,7 +117,8 @@ SELECT table_schema, table_name, column_name, column_type,
     WHEN data_type = 'bit' THEN 'BIT(n): BIT(n) or BOOLEAN for BIT(1)'
     WHEN data_type IN ('float', 'double') THEN 'approximate numeric - compare at fixed digits'
     WHEN data_type IN ('geometry','point','linestring','polygon','multipoint','multilinestring','multipolygon','geometrycollection','geomcollection') THEN 'spatial: PostGIS, manual'
-    WHEN data_type IN ('tinyblob','blob','mediumblob','longblob','tinytext','text','mediumtext','longtext') THEN 'LOB: DMS LOB mode decides truncation'
+    WHEN data_type IN ('mediumblob','longblob','mediumtext','longtext') THEN 'DMS LOB (BLOB/NCLOB): LOB mode decides truncation; no PK/UK -> A10 blocker'
+    WHEN data_type IN ('tinyblob','blob','tinytext','text') THEN 'DMS BYTES/WSTRING (not a LOB): size the target column; no PK/UK -> A10 check'
   END AS concern
 FROM information_schema.columns
 WHERE table_schema NOT IN ('mysql', 'sys', 'information_schema', 'performance_schema')
@@ -122,7 +126,8 @@ HAVING concern IS NOT NULL
 ORDER BY table_schema, table_name, column_name;
 
 -- A2. Zero / partial-zero dates (legacy data written under a lax sql_mode). Generates one
---     COUNT per date column; run the generated statements. DMS and pgloader write NULL.
+--     COUNT per date column; run the generated statements. pgloader writes NULL; DMS
+--     wrote '0101-01-01' on Aurora PostgreSQL 17 in a live run (§4.2 zero dates).
 SELECT CONCAT('SELECT ''', table_schema, '.', table_name, '.', column_name, ''' AS col, COUNT(*) AS zero_or_partial_dates FROM `',
               table_schema, '`.`', table_name, '` WHERE `', column_name, '` IS NOT NULL AND (MONTH(`', column_name,
               '`) = 0 OR DAYOFMONTH(`', column_name, '`) = 0);') AS stmt
@@ -146,7 +151,8 @@ WHERE s.non_unique = 0 AND c.collation_name IS NOT NULL AND c.collation_name NOT
 GROUP BY s.table_schema, s.table_name, s.index_name;
 
 -- A5. Tables without a primary key (DMS CDC/validation/batch apply need one; the reverse
---     task from PostgreSQL needs REPLICA IDENTITY FULL for them — §10.1)
+--     task from PostgreSQL needs REPLICA IDENTITY FULL for them — §10.1). Any of them with
+--     a LOB-class column is a GATE 2 blocker: A10.
 SELECT t.table_schema, t.table_name, t.engine, t.table_rows
 FROM information_schema.tables t
 LEFT JOIN information_schema.table_constraints k
@@ -203,15 +209,45 @@ WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('mysql', 'sys', 'inform
 GROUP BY table_schema, engine, table_collation;
 SHOW GLOBAL VARIABLES WHERE Variable_name IN ('log_bin', 'binlog_format', 'binlog_row_image', 'binlog_expire_logs_seconds',
   'server_id', 'gtid_mode', 'binlog_transaction_compression', 'log_replica_updates', 'log_slave_updates', 'require_secure_transport');
+
+-- A10. LOB-class columns on a table with no PRIMARY KEY and no UNIQUE key — DMS removes LOB
+--      columns of such tables (§4.7). dms_lob = 1: a DMS LOB type (JSON = CLOB, MEDIUM/
+--      LONGTEXT = NCLOB, MEDIUM/LONGBLOB and spatial = BLOB) -> GATE 2 BLOCKER for every DMS
+--      path, both directions. 0: TEXT/BLOB/TINY* (the DMS doc maps them to WSTRING/BYTES) — a
+--      conditional check, proven by the §4.7 post-load non-null check.
+SELECT c.table_schema, c.table_name,
+       GROUP_CONCAT(CONCAT(c.column_name, ' ', c.column_type) ORDER BY c.ordinal_position SEPARATOR ', ') AS lob_columns,
+       MAX(c.data_type IN ('json', 'mediumtext', 'longtext', 'mediumblob', 'longblob', 'geometry', 'point', 'linestring',
+           'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection')) AS dms_lob
+FROM information_schema.columns c
+JOIN information_schema.tables t
+  ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+WHERE c.data_type IN ('json', 'tinytext', 'text', 'mediumtext', 'longtext', 'tinyblob', 'blob', 'mediumblob', 'longblob',
+        'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection')
+  AND c.table_schema NOT IN ('mysql', 'sys', 'information_schema', 'performance_schema')
+  AND NOT EXISTS (SELECT 1 FROM information_schema.table_constraints k
+                  WHERE k.table_schema = c.table_schema AND k.table_name = c.table_name
+                    AND k.constraint_type IN ('PRIMARY KEY', 'UNIQUE'))
+GROUP BY c.table_schema, c.table_name
+ORDER BY c.table_schema, c.table_name;
 ```
 
 Record per finding: object, decision (target type / rewrite / accept), owner. A4 rows need
 an explicit choice: `citext`, a unique index on `lower(col)`, or a nondeterministic ICU
 collation (PG 12+; `LIKE` on nondeterministic collations only from PG 18; slower, no B-tree
 deduplication). A7 `fk_cascade` rows: DMS does not replicate cascade effects from a MySQL
-source (no binlog events for cascaded changes) — keep the target FK with the same action in
-place during CDC, or reconcile children before cutover; the FK-orphan check
-(`validation-patterns.md` §2.4) must run after the final drain.
+source (InnoDB writes no binlog events for cascaded child changes *[live]*), **and** the PG
+target's own FK action does not fire for DMS either — the DMS session runs with
+`session_replication_role = replica` (§5), which skips FK triggers *[live]*. So a parent
+DELETE/UPDATE on MySQL leaves orphan (or stale-key) children on PG, in the forward task and in
+any MySQL → PG reverse task (§10). Choose per FK at GATE 2 — **prefer (a)**: before the
+load, replace the MySQL cascade by explicit, binlogged behaviour (app-side child deletes, or a
+`BEFORE DELETE` trigger + `RESTRICT` FK — trigger-written rows *are* in the ROW binlog
+*[live]*; §10 recipe); or (b) accept it and **reconcile every child table reachable through a
+cascade (§10 R2) with a keyed normalized compare against MySQL** after the final drain, before
+GATE 3, and again at the freeze — the R1 orphan count is only a quick detector (§10). A10 rows with `dms_lob = 1` are
+**GATE 2 blockers** for a DMS method (§4.7 remedy menu) — not a REPLICA IDENTITY question;
+`dms_lob = 0` rows are conditional checks (§4.7).
 
 ## 3. Read-only assessment — PostgreSQL source (PostgreSQL → MySQL)
 
@@ -250,6 +286,7 @@ SELECT * FROM (
 -- P2. Tables without a primary key, with their REPLICA IDENTITY (d=default, f=full,
 --     n=nothing, i=index). Without a PK, DMS IGNORES their UPDATE/DELETE unless
 --     REPLICA IDENTITY FULL (test_decoding only; not with pglogical) — an A2 source change.
+--     REPLICA IDENTITY does NOT save their LOB columns: P9.
 SELECT n.nspname, c.relname, c.relreplident, c.reltuples::bigint AS approx_rows
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
@@ -333,11 +370,37 @@ WHERE name IN ('wal_level', 'max_replication_slots', 'max_wal_senders', 'wal_sen
 SELECT slot_name, plugin, slot_type, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots;
 SELECT datname, pg_encoding_to_char(encoding) AS encoding, datcollate, datctype, datlocprovider
 FROM pg_database WHERE datname = current_database();
+
+-- P9. LOB-class columns on a table with no PRIMARY KEY and no (non-partial) UNIQUE index —
+--     DMS removes LOB columns of such tables (§4.7). dms_lob = true: a DMS LOB type per the
+--     PostgreSQL-source mapping (TEXT, CITEXT, JSON/JSONB, arrays, HSTORE, composite = NCLOB;
+--     XML, TSVECTOR/TSQUERY, PATH/POLYGON = CLOB; BYTEA = BLOB) -> GATE 2 BLOCKER for every DMS
+--     path. false: VARCHAR without length or > 16387 — a conditional check (LOB only if the
+--     endpoint sets MapLongVarcharAs to clob/nclob; prove with the §4.7 post-load check).
+SELECT n.nspname AS sch, c.relname AS tbl,
+       string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum) AS lob_columns,
+       c.reltuples::bigint AS approx_rows, bool_or(t.typname <> 'varchar') AS dms_lob
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+  AND (t.typname IN ('text', 'citext', 'bytea', 'json', 'jsonb', 'xml', 'hstore', 'tsvector', 'tsquery', 'path', 'polygon')
+       OR t.typcategory = 'A' OR t.typtype = 'c'
+       OR (t.typname = 'varchar' AND (a.atttypmod = -1 OR a.atttypmod - 4 > 16387)))
+  AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid
+                  AND (i.indisprimary OR (i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL)))
+GROUP BY n.nspname, c.relname, c.reltuples
+ORDER BY 1, 2;
 ```
 
 P7 collisions are a hard blocker for a `_ci` target column: choose `utf8mb4_bin` (or
 `utf8mb4_0900_as_cs`) for that column, or resolve the duplicates with the data owner. A
-`citext` source column is the opposite case: give it a `_ci` collation on MySQL.
+`citext` source column is the opposite case: give it a `_ci` collation on MySQL. P9 rows
+with `dms_lob = true` are **GATE 2 blockers** for a DMS method (§4.7; `false` rows are checks) — `REPLICA IDENTITY FULL` (A2) fixes
+UPDATE/DELETE capture for a key-less table, not its LOB columns. P4 partial unique indexes:
+§4.3 recipe.
 
 ## 4. Schema conversion
 
@@ -361,23 +424,46 @@ P7 collisions are a hard blocker for a `_ci` target column: choose `utf8mb4_bin`
 | `FLOAT` / `DOUBLE` | `REAL` / `DOUBLE PRECISION` | same | values outside ±2.23E-308..1.79E+308 map to STRING |
 | `DATETIME[(fsp)]` | `TIMESTAMP` (scale 0–6; 7–9 → VARCHAR(37)), **no TZ conversion** | `TIMESTAMP(fsp)` (naive) — or `TIMESTAMPTZ` only with an agreed zone | decide: naive wall-clock values or instants in a known zone |
 | `TIMESTAMP[(fsp)]` | `TIMESTAMP`, **values converted to UTC** | `TIMESTAMPTZ(fsp)` | MySQL TIMESTAMP is a UTC instant; range 1970–2038 |
-| `DATE` | `DATE` | `DATE` | zero dates → NULL (A2) |
+| `DATE` | `DATE` | `DATE` | zero dates: **not** NULL under DMS — see below (A2) |
 | `TIME` | `VARCHAR` (STRING) | `TIME`, or `INTERVAL` for > 24 h / negative | MySQL TIME spans ±838 h |
 | `YEAR` | `SMALLINT` (INT2) | `SMALLINT` | |
-| `CHAR/VARCHAR/TEXT` | `VARCHAR`/`TEXT` (LOB for `*TEXT`) | `VARCHAR(n)`/`TEXT`; `CITEXT` or `lower()` unique index for ci-unique columns (A4) | PG compares case-sensitively by default |
+| `CHAR/VARCHAR/TEXT` | `VARCHAR`/`TEXT` (DMS: `TEXT`/`TINYTEXT` = WSTRING; `MEDIUMTEXT`/`LONGTEXT` = NCLOB, i.e. LOB) | `VARCHAR(n)`/`TEXT`; `CITEXT` or `lower()` unique index for ci-unique columns (A4) | PG compares case-sensitively by default |
 | `ENUM` | `VARCHAR` (WSTRING) — constraint lost | `CREATE TYPE … AS ENUM` or `TEXT` + `CHECK` | |
 | `SET` | `VARCHAR` — constraint lost | `TEXT[]` + `CHECK (col <@ ARRAY[...])` or a child table | no SET type in PG |
 | `JSON` | `TEXT` (CLOB) | `JSONB` (or `JSON` to keep text form) | JSONB normalizes key order/whitespace/duplicates |
-| `BINARY/VARBINARY/BLOB` | `BYTEA` (BLOB) | `BYTEA` | LOB mode |
+| `BINARY/VARBINARY/TINYBLOB/BLOB` | `BYTEA` (DMS BYTES — not a LOB) | `BYTEA` | `MEDIUMBLOB`/`LONGBLOB` are DMS BLOB: LOB mode and the §4.7 key rule apply |
 | `BIT(1)` / `BIT(n)` | `BOOLEAN` / `BYTEA` | `BOOLEAN` / `BIT(n)` | |
 | `GEOMETRY`/`POINT`… | `BYTEA` | PostGIS `geometry` (manual) | DMS spatial = homogeneous only |
-| `AUTO_INCREMENT` | attribute dropped | `GENERATED … AS IDENTITY` | reset after load (§4.5) |
+| `AUTO_INCREMENT` | attribute dropped | `GENERATED BY DEFAULT AS IDENTITY` — never `ALWAYS` on a table DMS writes (forward target or reverse source) | DMS apply INSERTs carry explicit ids; `ALWAYS` rejects them unless `OVERRIDING SYSTEM VALUE`; reset after load (§4.5) |
+
+**Zero dates under DMS — observed behaviour contradicts the DMS doc.** The DMS MySQL-source
+page says zero `DATETIME`/`TIMESTAMP` values "are recorded as null on the target" when the
+target can't hold them. In a live run (DMS 3.6.1 → Aurora PostgreSQL 17.11, pre-created
+`timestamptz`/`date` columns, `DO_NOTHING`) DMS wrote **`0101-01-01 00:00:00`** for all
+1,950 zero values; DMS validation then reported them as mismatches and only the normalized
+compare named the cause. Verify on your DMS/target version in the rehearsal; plan for
+`0101-01-01` either way:
+1. **Preferred — clean the source under A2 before the full load** (`UPDATE … SET col = NULL
+   WHERE col = '0000-00-00 …'` on nullable columns; the customer accepts NULL = "not set" at
+   GATE 2; the app must stop writing zero dates — strict `sql_mode` with `NO_ZERO_DATE`).
+2. **Otherwise — a per-key target UPDATE after the full load and again after the final drain
+   at the freeze**: only the keys whose **source** value is a zero date (list them on the
+   source with the A2 predicate: `SELECT <pk> FROM t WHERE MONTH(col) = 0 OR DAYOFMONTH(col) = 0`, or take the `keys` of the
+   compare tool's paired findings) — `UPDATE t SET col = NULL WHERE <pk> IN (…) AND col =
+   '0101-01-01'`. Never a blanket `WHERE col = '0101-01-01'`: a genuine `0101-01-01` value would
+   be erased. Then **re-validate right before cutover**. One post-load UPDATE is not enough: any
+   CDC UPDATE to a row whose source column is still zero re-applies the full after-image and
+   brings `0101-01-01` back.
+3. `cross_engine_compare.py` reports a target `0101-01-01` against a source zero date **on the
+   same key** as its own finding, with the keys — never as equal to NULL; unpaired observations
+   (key-less tables) are "inconclusive", never a finding (§9). Reverse DMS writes NULL back, not
+   a zero date.
 
 ### 4.3 Type mapping — PostgreSQL → MySQL
 
 | PostgreSQL | DMS default on MySQL (DMS type) | Recommended MySQL type | Why / fix |
 |---|---|---|---|
-| `BOOLEAN` | `VARCHAR(5)` holding `'true'`/`'false'` (CHAR(5)) | `TINYINT(1)` | MySQL has no BOOLEAN; DMS says use a transformation rule; `MapBooleanAsBoolean` is a PostgreSQL→Redshift setting and does not help a MySQL target |
+| `BOOLEAN` | `VARCHAR(5)` holding `'true'`/`'false'` (CHAR(5)) | `TINYINT(1)` + `change-data-type` → **`boolean`** (proven live) — **never `int1`** | MySQL has no BOOLEAN; DMS says use a transformation rule; an `int1` rule converted every `'true'` to **0** in a live run (§4.4); `MapBooleanAsBoolean` is a PostgreSQL→Redshift setting and does not help a MySQL target |
 | `SMALLINT/INTEGER/BIGINT` | same | same | |
 | `NUMERIC(p,s)` (p ≤ 65) | `DECIMAL(p,s)` | same | |
 | `NUMERIC` (no p,s) | **`NUMERIC(28,6)` on the DMS source side — truncation** (e.g. 0.611111104488373 → 0.611111) | a wider target `DECIMAL` alone **does not help** — see the note below | fix it on the source, or accept the loss with evidence |
@@ -385,7 +471,7 @@ P7 collisions are a hard blocker for a `_ci` target column: choose `utf8mb4_bin`
 | `REAL`/`DOUBLE PRECISION` | `FLOAT`/`DOUBLE` | same | |
 | `TEXT` / `CITEXT` | `TEXT`, or `LONGTEXT` with **ucs2** charset (> 64K or full LOB) | `TEXT`/`LONGTEXT` utf8mb4; `VARCHAR(n)` when indexed; `CITEXT` → `_ci` collation | ucs2 cannot hold 4-byte characters (inference) — pre-create utf8mb4 |
 | `VARCHAR(n)` | `VARCHAR(n)` | same; unique index ≤ 3072 bytes (DYNAMIC) | `VARCHAR(1000)` utf8mb4 unique fails |
-| `UUID` | `VARCHAR` | `CHAR(36)` (or `BINARY(16)`) | |
+| `UUID` | `VARCHAR` | `CHAR(36)` (or `BINARY(16)`) | **reverse task (MySQL → PG `uuid`)**: `change-data-type` → `string` length 36 on every uuid column, or the values arrive garbled and the rows are not applied (§10.2, live) |
 | `JSON`/`JSONB` | `TEXT`/`LONGTEXT` (NCLOB) | `JSON` | jsonb operators/GIN → generated columns + indexes |
 | `ARRAY` | `TEXT` holding the PG literal `{a,b}` | `JSON` array, or a child table | the literal is not JSON *[live]* |
 | `HSTORE`/composite | `TEXT` | `JSON` / redesign | |
@@ -419,6 +505,66 @@ So, per column found by P1:
    tests use scripted, DMS-*shaped* loads (`scripts/test_cross_engine_compare.py`); they validate
    the comparison tool, **not** DMS's conversion.
 
+**Fractional seconds (PG → MySQL) — a GATE 2 decision, not a residual risk.** PostgreSQL `now()` /
+`CURRENT_TIMESTAMP` carry microseconds and `timestamp`/`timestamptz` keep them (precision up to
+6). MySQL's `NOW()` / `CURRENT_TIMESTAMP` / `SYSDATE()` take an optional `fsp` 0–6 and return **no
+fractional part without it**, and a `DATETIME`/`TIMESTAMP` column without `(fsp)` has precision
+0 ("If omitted, the default precision is 0"); a value with more digits is **rounded** silently
+("No warning or error is given when such rounding occurs"; `TIME_TRUNCATE_FRACTIONAL` truncates
+instead). Live (OBS-52): after a PG → MySQL cutover, new rows lost µs because the app's SQL
+used `NOW()`; the agent accepted it as "app change only". Detect it before GATE 2: grep the app
+SQL / ORM defaults for `now()`, `current_timestamp`, `localtimestamp`, `clock_timestamp()`,
+`statement_timestamp()` and server-side defaults, and list every PG column with
+`timestamp`/`timestamptz`/`time` and a `DEFAULT now()`/`CURRENT_TIMESTAMP`. Present the options at
+GATE 2:
+1. **Column precision everywhere** — `DATETIME(6)` (or `TIMESTAMP(6)`) for every PG timestamp
+   column, so client-supplied values keep µs (this skill's §4.3 mapping).
+2. **Column default** for inserts that **omit** the column — `DEFAULT CURRENT_TIMESTAMP(6)` [`ON
+   UPDATE CURRENT_TIMESTAMP(6)` where PG had an `updated_at` trigger]; the precision must be the
+   same throughout the definition ("the same value must be used throughout the column
+   definition").
+3. **App SQL** — `NOW(6)` / `CURRENT_TIMESTAMP(6)` where the app passes the function explicitly
+   (an explicit `NOW()` is fsp 0 even into a `DATETIME(6)` column *[live]*).
+4. **Last resort** — a `BEFORE INSERT` trigger that sets `NEW.col = NOW(6)` for function-valued
+   inserts (it cannot tell a deliberate whole-second value from `NOW()` — document the rule it uses).
+Choose explicitly, with the customer, which applies to each column (*[live]* proof:
+`scripts/test_hetero_recipes.py` `FractionalSeconds`). Reverse direction (MySQL → PG): PG's
+precision (µs) covers MySQL's maximum `fsp` 6 — nothing to do beyond mapping `DATETIME(n)` to
+`timestamp(n)`/`timestamp`.
+
+**Partial unique index (P4) → generated column + UNIQUE.** MySQL has no partial index. For
+`CREATE UNIQUE INDEX … ON invoices (account_id, invoice_no) WHERE NOT is_void`:
+
+```sql
+ALTER TABLE invoices
+  ADD COLUMN open_invoice_no VARCHAR(32)
+      GENERATED ALWAYS AS (CASE WHEN is_void = 0 THEN invoice_no END) STORED,
+  ADD UNIQUE KEY uq_invoices_open_no (account_id, open_invoice_no);
+```
+
+The generated key must be **NULL for every row outside the predicate** — MySQL UNIQUE allows
+any number of NULLs, so many voided invoices may share a number with one open invoice. The
+recipe is only as good as the predicate column's values: in a live run the boolean arrived
+through an `int1` rule as 0 for every row, every voided invoice claimed the open key, and the
+MySQL full-load path (`LOAD DATA LOCAL` = `IGNORE` semantics: duplicates become warnings)
+**silently dropped the colliding rows** — the table came up short by exactly the 1,500 voided
+invoices, DMS reported 0 error rows, only the count/compare caught it. *Which* rows vanish
+depends on load order (the first row per key survives — with void rows loaded first, the real
+open invoice is the one lost) *[live]*, so a count proof is not enough. Proof before GATE 3,
+per emulated index: source `SELECT count(*) FILTER (WHERE NOT <pred>), count(*) FROM t` equals
+the target `SELECT SUM(open_key IS NULL), COUNT(*) FROM t`, the boolean distribution per column
+(`SELECT is_void, count(*) … GROUP BY 1` both sides), **and per-key predicate membership**
+(the normalized compare over the PK with the predicate column included). Reverse task (MySQL
+→ PG): DMS does not capture generated-column changes — add a `remove-column` transformation
+for `open_invoice_no`. **Soak:** declare the generated column in the soak config's
+`expected_schema_differences` (`{"table": "billing.invoices", "column": "open_invoice_no", "side":
+"target", "kind": "extra_column", "reason": "partial-unique-index emulation"}`; Lambda env
+`EXPECTED_SCHEMA_DIFFERENCES`) — otherwise every soak interval's schema-drift check is RED (live,
+OBS-53); `cross_engine` `ignore_columns` would hide it silently instead of reporting it as
+expected, so prefer the declaration (the normalized compare itself only notes an extra target
+column as a warning and does not fail on it). Lab proof: `scripts/test_hetero_recipes.py` (rows
+outside the predicate, surviving ids under both load orders).
+
 ### 4.4 Making DMS load into the converted schema
 
 - **Pre-create, then `DO_NOTHING` or `TRUNCATE_BEFORE_LOAD`.** `TargetTablePrepMode` values:
@@ -428,20 +574,26 @@ So, per column found by P1:
 - **Value conversion DMS must do** (e.g. PG `BOOLEAN` → MySQL `TINYINT(1)`): a
   `change-data-type` transformation rule on that column (DMS supports `boolean`, `int1`…`int8`,
   `uint1`…`uint8`, `numeric` with `precision`/`scale`, `string` with `length`, `datetime`,
-  `date`, `time`, `bytes`, `blob`, `clob`, `nclob`, …):
+  `date`, `time`, `bytes`, `blob`, `clob`, `nclob`, …). For a PG boolean (DMS: CHAR(5)
+  `'true'`/`'false'`) use **`boolean`** — proven live PG → MySQL (exact distributions after full
+  load + CDC), and the same rule carried MySQL `TINYINT(1)` → PG `boolean` (normalized compare MATCH):
 
   ```json
-  {"rule-type": "transformation", "rule-id": "10", "rule-name": "flag-to-int1",
+  {"rule-type": "transformation", "rule-id": "10", "rule-name": "flag-to-boolean",
    "rule-action": "change-data-type", "rule-target": "column",
    "object-locator": {"schema-name": "public", "table-name": "accounts", "column-name": "active"},
-   "data-type": {"type": "int1"}}
+   "data-type": {"type": "boolean"}}
   ```
 
-  Limits: one transformation action per object; column/table names case-sensitive; columns
-  mapped to BLOB/CLOB can only be dropped; no special characters in column names. A
-  pre-created target column of the right type plus a value DMS writes in a compatible text
-  form (PG accepts `'1'`/`'0'` for BOOLEAN input) may work without a rule — **prove it in
-  the rehearsal** with the compare tool, for full load *and* CDC.
+  **Never rely on a `change-data-type` rule without a proof query.** The doc: "AWS DMS can
+  apply transformations from one type to another ONLY in supported formats". In live runs an
+  `int1` rule turned `'true'` into **0** (941,177 `is_active` rows and every `is_void` — which
+  then dropped 1,500 rows, §4.3 partial index), and a `string` rule on a JSON/TEXT column of a
+  key-less table was ignored ("the only supported transformation for columns that are mapped to
+  BLOB/CLOB data types is to drop the column on the target"; §4.7). Proof = per converted
+  column, value distribution source vs target (`GROUP BY col` counts) after the rehearsal full
+  load **and** after a CDC UPDATE, before GATE 3. Other limits: one transformation action per
+  object; column/table names case-sensitive; no special characters in column names.
 - **Identifier case:** PG folds unquoted names to lower case, MySQL table-name case follows
   `lower_case_table_names`; use `convert-lowercase` rules (schema/table/column) so DMS writes
   to the names you pre-created.
@@ -462,8 +614,13 @@ So, per column found by P1:
    the final drain (cutover step 7), reset:
    - PG target: `SELECT setval(pg_get_serial_sequence('shop.items', 'id'), COALESCE(MAX(id), 1)) FROM shop.items;`
      (identity columns: `ALTER TABLE … ALTER COLUMN id RESTART WITH <max+1>`).
-   - MySQL target: `ALTER TABLE accounts AUTO_INCREMENT = <max+1>;` (verify with `SHOW CREATE
-     TABLE`; `information_schema.TABLES.AUTO_INCREMENT` is cached — `validation-patterns.md` §4).
+   - MySQL target: `ALTER TABLE accounts AUTO_INCREMENT = <max+1>;`. Verify with `SHOW CREATE
+     TABLE` (`AUTO_INCREMENT=<n>` > `MAX(pk)`), or read `information_schema.TABLES.AUTO_INCREMENT`
+     only after `SET SESSION information_schema_stats_expiry = 0` — MySQL 8 serves that column from
+     a statistics cache ("By default, MySQL retrieves cached values for those columns",
+     `information_schema_stats_expiry` default 86400 s), and a live run read a stale value after
+     the reseed (OBS-60); `SELECT MAX(id)` plus a test insert proves it **in rehearsal only**
+     (`validation-patterns.md` §4).
 
 ### 4.6 Procedures, triggers, functions, events, views — rewrite checklist
 
@@ -483,6 +640,82 @@ So, per column found by P1:
 - [ ] Generated columns re-declared (`GENERATED ALWAYS AS (…) STORED` both sides; MySQL VIRTUAL
       has no PG equivalent before PG 18 — verify on the target major).
 
+### 4.7 LOB columns on tables without a PK/UK — GATE 2 blocker (both directions)
+
+DMS: "A table must have a primary key or a unique key for DMS to migrate LOBs" (premigration
+assessment `table-with-lob-but-without-primary-key-or-unique-constraint`). It **removes the
+column** — task log `Column 'payload' was removed from table definition …: the column data type
+is LOB and the table has no primary key or unique index` — and the load still "succeeds". Live,
+in limited LOB mode, both directions: MySQL `audit_log.payload` (JSON) all NULL; PostgreSQL
+`payment_events.kind/payload` (text/jsonb) empty on all 505k rows in the **production** target,
+full load and CDC; the reverse task dropped the same column on rollback. Row counts and DMS
+validation (no PK → not validated) cannot see it.
+
+**Confirmed blocker vs conditional check** — decided from the column's *effective* DMS type
+under the endpoint settings actually used (DMS source data-type tables):
+
+| Class | MySQL source (A10) | PostgreSQL source (P9) | Action |
+|---|---|---|---|
+| **Confirmed blocker** | `dms_lob = 1`: JSON (CLOB), MEDIUMTEXT/LONGTEXT (NCLOB), MEDIUMBLOB/LONGBLOB and spatial (BLOB) | `dms_lob = true`: **text and citext too**, json/jsonb, arrays, hstore, composite (NCLOB); xml, tsvector/tsquery, path/polygon (CLOB); bytea (BLOB) — plus `varchar(n > 16387)` / unbounded `varchar` **if** the endpoint sets `MapLongVarcharAs` to `clob`/`nclob` | resolved at GATE 2, before any DMS full load — remedy menu below |
+| **Conditional check** | `dms_lob = 0`: TEXT, TINYTEXT (WSTRING), BLOB, TINYBLOB (BYTES) | `dms_lob = false`: unbounded or > 16387 `varchar` under the default `MapLongVarcharAs` (`wstring`) | not a blocker by itself: the rehearsal full load + post-load non-null check (below) must show the column arrived; a drop promotes it to a blocker |
+
+Confirmed blockers — remedy menu:
+
+| Remedy | How | Measured / caveats |
+|---|---|---|
+| **Surrogate key on the source (A2)** — preferred | MySQL `ALTER TABLE t ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, ALGORITHM=INPLACE, LOCK=SHARED` (the minimum for an auto-increment column: writes to that table wait for the rebuild; `SET SESSION lock_wait_timeout=5`); PG `ALTER TABLE t ADD COLUMN id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY` (rewrites the table under `ACCESS EXCLUSIVE`); same key on the target DDL; stop the task → ALTER → reload that table (DMS does not replicate PK definition changes) | 16.4 s for 307k rows on MySQL (longest app write gap 10.6 s), 919.7 ms for 505k rows / 49 MB on PG, both under live writes — measure on the rehearsal clone first. `BY DEFAULT`, not `ALWAYS` (reverse DMS inserts ids). Grep app/trigger code for column-list-less `INSERT … VALUES` first; grant sequence `USAGE` to roles whose triggers insert |
+| **Pre-create + backfill at the freeze** | key-less table stays in the task for its scalar columns; after the final drain copy the LOB columns (or the whole table) with a dedicated script inside the write pause | costs window time — measure in rehearsal; only for small or append-only tables |
+| **Exclude + separate copy** | exclude the table from DMS; copy history before cutover and the delta at the freeze by a watermark (append-only tables), or leave history on the old system with the customer's written acceptance | no rollback coverage unless the reverse direction is handled the same way |
+
+**Not remedies** (each tried live or ruled out by the doc): `change-data-type` to `string` (the
+column is still removed — only "drop" is supported for BLOB/CLOB-mapped columns), `REPLICA
+IDENTITY FULL` (UPDATE/DELETE capture only), `MapJsonbAsClob` (JSONB → CLOB instead of NCLOB:
+still a LOB), full LOB mode (needs the key too). `MapLongVarcharAs` (default `wstring`) only
+decides whether a long `VARCHAR(n > 16387)` becomes a LOB (`clob`/`nclob`) — keep the default
+for key-less tables; it does not turn text/jsonb into non-LOBs.
+
+**Mandatory post-full-load quick check — before indexes, validation, rehearsal or anything
+else:** for **every LOB-class column, whatever the table's keys are now** — a table repaired
+with a surrogate key (the §4.7 remedy) must stay in scope, so the generator below does **not**
+filter on current PK/UK; at minimum it must cover every row of the A10/P9 inventory saved at
+assessment (confirmed blockers *and* conditional checks: MySQL TEXT/BLOB/TINY*, PG
+long/unbounded `varchar`; same type lists) — compare its `col` list against that saved
+inventory and add any missing column —
+the non-null count source vs target (any target 0 or materially below source = stop; a
+conditional-check column that dropped becomes a blocker), plus a grep of the task log for `was
+removed from table definition`. Run the generator on the **source**; it emits the matching
+source and target statement per column (target identifiers as DMS writes them — lower-case on
+PG after `convert-lowercase`; edit the schema if a rule renames it). Run each pair back to back:
+
+```sql
+-- MySQL source (A10 types, every table) -> source_stmt on MySQL, target_stmt on PostgreSQL
+SELECT CONCAT(c.table_schema, '.', c.table_name, '.', c.column_name) AS col, c.column_type,
+       CONCAT('SELECT COUNT(*), COUNT(`', c.column_name, '`) FROM `', c.table_schema, '`.`', c.table_name, '`;') AS source_stmt,
+       CONCAT('SELECT count(*), count("', LOWER(c.column_name), '") FROM "', LOWER(c.table_schema), '"."',
+              LOWER(c.table_name), '";') AS target_stmt
+FROM information_schema.columns c
+JOIN information_schema.tables t
+  ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+WHERE c.data_type IN ('json', 'tinytext', 'text', 'mediumtext', 'longtext', 'tinyblob', 'blob', 'mediumblob', 'longblob',
+        'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection')
+  AND c.table_schema IN ('shop')
+ORDER BY 1;
+-- PostgreSQL source (P9 types, every table) -> source_stmt on PostgreSQL, target_stmt on MySQL
+SELECT n.nspname || '.' || c.relname || '.' || a.attname AS col, format_type(a.atttypid, a.atttypmod) AS type,
+       format('SELECT count(*), count(%I) FROM %I.%I;', a.attname, n.nspname, c.relname) AS source_stmt,
+       format('SELECT COUNT(*), COUNT(`%s`) FROM `%s`.`%s`;', a.attname, n.nspname, c.relname) AS target_stmt
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
+WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+  AND n.nspname IN ('shop')
+  AND (t.typname IN ('text', 'citext', 'bytea', 'json', 'jsonb', 'xml', 'hstore', 'tsvector', 'tsquery', 'path', 'polygon')
+       OR t.typcategory = 'A' OR t.typtype = 'c'
+       OR (t.typname = 'varchar' AND (a.atttypmod = -1 OR a.atttypmod - 4 > 16387)))
+ORDER BY 1;
+```
+
 ## 5. DMS execution — MySQL → PostgreSQL
 
 **Source (MySQL) CDC prerequisites** (self-managed): `server_id` ≥ 1, `log-bin` on,
@@ -495,7 +728,8 @@ unsupported. Privileges: `REPLICATION CLIENT`, `REPLICATION SLAVE`, `SELECT`; XA
 migrated, prefix indexes not created, cascade effects not replicated (§2 A7), generated-column
 changes not captured, invisible columns not migrated, DROP/RENAME TABLE and
 default/nullability/charset DDL not replicated, LOBs disabled → MEDIUM/LONG TEXT/BLOB
-columns skipped. Binlog state gate: `method-selection.md` §Binlog State Gate.
+columns skipped, **LOB-class columns of key-less tables removed (§4.7)**. Binlog state gate:
+`method-selection.md` §Binlog State Gate.
 
 **Endpoints.** Source `engineName: mysql` (or `aurora`), `SslMode` `verify-ca`/`verify-full`
 (`require` is unsupported for MySQL endpoints — `dms-best-practices.md` §Endpoint TLS);
@@ -529,7 +763,8 @@ Secrets Manager credentials. Target `engineName: aurora-postgresql`/`postgres`,
   failures; no views. Hash-based "enhanced" validation (3.5.4) is **not** available for this
   pair. Use `override-validation-function` rules (not on PK columns) when a column is
   deliberately transformed. Collation differences in PK ordering can break validation (the
-  doc warns for Oracle → PG; analogous for `_ci` vs deterministic — test).
+  doc warns for Oracle → PG; analogous for `_ci` vs deterministic — test). **JSON columns: §9
+  "DMS validation and JSON"** — exclude them from DMS validation.
 
 **Common errors:** `Incorrect integer value 'true'` (PG→MySQL boolean without conversion);
 `value too long for type character varying` (DMS-created VARCHAR shorter than the multibyte
@@ -554,7 +789,9 @@ read replicas cannot be CDC sources.
 
 - **Tables without PK** (P2): UPDATE/DELETE are **ignored** unless `ALTER TABLE …
   REPLICA IDENTITY FULL` (more WAL; works with `test_decoding`, not with pglogical) — an A2
-  source change. No PK also disables batch apply, full LOB and validation for that table.
+  source change. No PK also disables batch apply, full LOB and validation for that table —
+  and DMS **removes its LOB-class columns (text, citext, jsonb, bytea, arrays…) even with
+  REPLICA IDENTITY FULL**: GATE 2 blocker, §4.7.
 - **Idle-slot WAL:** set `HeartbeatEnable=true` (`HeartbeatFrequency` minutes, default 5;
   `HeartbeatSchema`) so `restart_lsn` keeps moving; alarm on source free storage /
   `ReplicationSlotDiskUsage`. A non-default `max_slot_wal_keep_size` can invalidate a lagging
@@ -573,6 +810,41 @@ Target `engineName: aurora`/`mysql`, `SslMode verify-full` with the RDS CA (Auro
 rejects `none`), `MySqlSettings.AfterConnectScript` / `Initstmt=SET FOREIGN_KEY_CHECKS=0`
 for the full load, target `local_infile=1`. Task settings as §5 plus the `change-data-type`
 rules for booleans (§4.4).
+
+**MySQL target `sql_mode` — a GATE 2 parameter, set explicitly** (also for a MySQL new primary
+that is the reverse source in §10.2). Live (Aurora MySQL 8.4.8): the target's custom
+parameter groups left `sql_mode` non-strict, so bad values were silently truncated or written as `''`
+instead of failing. Unlike community MySQL, the **RDS/Aurora engine defaults are not strict**
+(`describe-engine-default-parameters`, ap-northeast-2, 2026-10-28: `mysql8.0`/`mysql8.4` =
+`NO_ENGINE_SUBSTITUTION`; `aurora-mysql8.0`/`8.4` instance-level = `0`; on Aurora `sql_mode` is
+an **instance**-level parameter, absent from the cluster parameter group — a cluster-only group
+leaves it at the non-strict default; re-check on your version). Set the MySQL
+8.0/8.4 community default explicitly in the parameter group
+(`cdk-stacks.md`): `ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,
+ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`, and read it back after apply/reboot with
+`SELECT @@GLOBAL.sql_mode` (a session inherits the global value at connect — recycle pools).
+It is an **application-behaviour decision**: rehearse the converted app SQL and views under
+strict mode (`ONLY_FULL_GROUP_BY` rejects loose `GROUP BY`; strict rejects over-long strings,
+out-of-range numbers, invalid dates) and record it at GATE 2. What strict mode does and does
+not protect *[live]*:
+- **CDC apply** (`INSERT`/`UPDATE`) — a bad value **fails** *[live]* (task log /
+  `awsdms_apply_exceptions`) instead of being adjusted. Watch the exceptions table after every probe.
+- **Full load** uses `LOAD DATA LOCAL`, which is **non-restrictive whatever `sql_mode` says**
+  (MySQL: data interpretation "is restrictive if the SQL mode is restrictive and neither the
+  IGNORE nor the LOCAL modifier is specified") — truncation and invalid dates become warnings
+  *[live]*.
+  Only the normalized compare (§9) and the post-load checks catch them.
+- **Dates:** PostgreSQL `date`/`timestamp` values after `9999-12-31` or `±infinity` have no
+  MySQL value — strict CDC apply rejects them *[live]*; non-strict apply and the full load write
+  a **zero date** (`0000-00-00`) *[live]*, which `NO_ZERO_DATE` then makes un-writable by the
+  app. Values before `1000-01-01` are outside MySQL's *supported* range but were accepted
+  *[live]* ("earlier values might work, but are not guaranteed") — treat them as a check. Count
+  them on the source before GATE 2 (`SELECT count(*) FROM t WHERE col < '1000-01-01' OR col >
+  '9999-12-31' OR NOT isfinite(col)`) and decide (clean, clamp with acceptance, or exclude).
+- MySQL → PostgreSQL forward: the source's own `sql_mode` (A3) is the app's contract on the
+  old side and governs reverse-apply writes into it (§10.1) — leave it unchanged; a lax source
+  `sql_mode` means reverse-applied values are adjusted silently there, so the rollback rehearsal
+  compare must cover every type class.
 
 ## 7. Monitoring (both directions)
 
@@ -603,10 +875,14 @@ Every item was checked on live engines unless marked; MySQL default `sql_mode` a
 | Integer division | `5/2` = `2.5000`; `DIV` for integer division *[live]* | `5/2` = `2` *[live]* |
 | Implicit casts | `'1' + 1` = `2` (double) *[live]*; `DATE + 1` = `20260102` (a number!) *[live]* | `'1' + 1` = `2` (unknown literal); `date + 1` = next day; no implicit text↔int in general |
 | String comparison | default `utf8mb4_0900_ai_ci`: `'abc' = 'ABC'` true, `LIKE` case-insensitive *[live]*; UCA-9.0 collations NO PAD (older `utf8mb4_general_ci`/`unicode_ci`/`bin` PAD SPACE: trailing spaces ignored) | deterministic: case/accent-sensitive; `ILIKE`, `citext`, `lower()` |
+| `citext` vs typed parameters | (`_ci` collation applies to every comparison) | `citext = 'X'` (untyped literal or a `citext` value) is case-insensitive, but against a **text/varchar-typed** value the operator resolves to `text = text` — **case-sensitive** (`= CAST(:e AS text)` / `AS varchar` → 0 rows) *[live]*. pgJDBC sends `setString()` as `varchar` by default (`stringtype`), and many drivers/report tools type parameters as text: cast to `::citext` or compare `lower()` both sides; `LIKE` stayed case-insensitive *[live]* |
+| `ORDER BY` an ENUM | sorts by the **definition index** (`ENUM('pending','paid',…)` order, not alphabetical) *[live]* | `VARCHAR`/`TEXT` sorts by collation (alphabetical); a PG `ENUM` type sorts by declaration order — keep an enum type, or `ORDER BY array_position(ARRAY[…], col)` *[live]* |
 | `NULL` in UNIQUE | multiple NULLs allowed | same; `UNIQUE NULLS NOT DISTINCT` (PG 15+) has no MySQL equivalent |
 | Functions | `IFNULL`, `GROUP_CONCAT`, `DATE_FORMAT`, `STR_TO_DATE`, `NOW()` | `COALESCE` (`IFNULL` does not exist *[live]*), `string_agg`, `to_char`, `to_timestamp`, `now()` |
 | Isolation default | **REPEATABLE READ** (InnoDB) | **READ COMMITTED** — re-test concurrency-sensitive code paths |
+| `sql_mode` (PG → MySQL target) | set explicitly strict (§6); app SQL and views rehearsed under it — `ONLY_FULL_GROUP_BY`, strict truncation/date errors | PostgreSQL is always strict: an app that relied on PG errors keeps that behaviour on MySQL only with strict `sql_mode` |
 | Time zones | `TIMESTAMP` converted session-TZ ↔ UTC; `DATETIME` naive | `timestamptz` stored UTC, rendered in session `TimeZone`; `timestamp` naive |
+| Fractional seconds | `NOW()`/`CURRENT_TIMESTAMP`/`SYSDATE()` and `DATETIME`/`TIMESTAMP` default to **fsp 0** — `NOW(6)`, `DATETIME(6)`, `DEFAULT CURRENT_TIMESTAMP(6)` *[live]* | `now()` and timestamps carry µs — a PG → MySQL move needs the §4.3 fractional-seconds decision at GATE 2 |
 | JSON | `->`, `->>`, `JSON_EXTRACT`, `JSON_CONTAINS`; keys returned sorted | `->`, `->>`, `@>`, `jsonb_path_*`; `jsonb` normalizes |
 | CHECK | enforced from 8.0.16 (parsed and ignored before) | enforced |
 | Sequences | `AUTO_INCREMENT` only | sequences are objects (`nextval`, identity) |
@@ -618,6 +894,23 @@ Deliver findings as `app-remediation-findings.md` with file:line, construct, rep
 and severity; never edit the customer's application from this skill.
 
 ## 9. Validation across engines
+
+**DMS validation and JSON (both directions).** DMS row validation compares the two engines'
+representations of a JSON/jsonb value, and those differ for equal data — number formatting
+(PG `jsonb` 6558.930000 vs MySQL `JSON` 6558.93), key order, whitespace. Live (OBS-54): validation
+of `payment_events` ended in `Table error` on exactly that, and continuous validation of the table
+was lost. Keep DMS validation off the JSON columns and validate them with the normalized compare
+(`cross_engine_compare.py` canonicalizes JSON):
+- per column: a `validation` rule with `"rule-action": "override-validation-function"` (documented;
+  not allowed on PK columns) whose `source-function` and `target-function` both return the same
+  constant (e.g. `"'json-excluded'"`), so DMS stops comparing that column — the constant-function
+  use is **verify in rehearsal** (confirm the table reaches `Validated` and a real non-JSON change
+  is still caught);
+- per table, if needed: disable validation on the replication task and run a separate
+  **validation-only task** whose selection rules omit the table (documented: validation-only tasks
+  with their own table mappings);
+- record every excluded column/table as **"not continuously validated by DMS — covered by the
+  normalized compare at <times>"** in GATE 3's "does NOT prove" column.
 
 **Why naive checksums differ even for perfect data:** the engines render the same value
 differently — `1` vs `t`, `2026-01-01 09:00:00` (DATETIME) vs `2026-01-01 00:00:00+00`
@@ -660,7 +953,68 @@ budget exhausted, ordering disagreement, unsupported column) / **NOT_APPLICABLE*
 normalization, a comparison that finishes past it is NEEDS_REVIEW (never MATCH), and every
 statement also gets a server-side timeout of the same length (MySQL `max_execution_time`,
 MariaDB `max_statement_time`, PostgreSQL `statement_timeout` — psycopg connections set it at
-connect, since psycopg has no read timeout).
+connect, since psycopg has no read timeout). Snapshots: PostgreSQL `BEGIN … REPEATABLE READ READ
+ONLY`; MySQL-family sides first run `SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+because `WITH CONSISTENT SNAPSHOT` is silently ignored under any other isolation level — a target
+parameter group with `transaction_isolation=READ-COMMITTED` produced 78 spurious money
+mismatches in a live run before this fix (the soak scripts do the same).
+
+**Throughput, workers, progress.** Measured on this repo's host (8 vCPU Graviton, MySQL 8.0 →
+PostgreSQL 16 in local Docker, 1,000,000 rows of bigint PK + varchar + DECIMAL(20,6) +
+DATETIME(6)→timestamptz + JSON→jsonb + TINYINT(1)→boolean + text, pg8000): **16.7k rows/s**
+single-threaded before the v2 fast paths, **25.7k rows/s** after (33k with the psycopg binary
+driver, `pg_driver: "psycopg"`), **51k / 98k / 162k rows/s** with `--workers 2 / 4 / 8`. Live
+small helpers are far slower — a t4g.small did ~7k rows/s (27 min for one 12M-row table), so
+measure on the real helper in rehearsal and budget Phase 7 as `rows ÷ rows_per_s × 1.2`; size the
+compare host (≥ 4–8 vCPU) for the window rather than the compare for the host. `--workers N`
+splits each table with one integer key into 4×N key ranges (first/last unbounded, so every row is
+covered), each read by a worker process **in its own snapshot pair** — per-range snapshots,
+**not a single consistent cut** (report `consistency: "per_range_snapshots"`). Identical results
+to one scan while writes are frozen, which the run must declare with `--writes-frozen` (or the
+config's `"writes_frozen": true` — a JSON boolean only; `"false"`, `0`, `null` are config errors,
+exit 3; recorded as `writes_frozen`). On live data a row written between two ranges' snapshots can show as a
+difference, and a row whose key moves from a not-yet-read range into an already-read one is
+**missed** — so without `--writes-frozen` an all-ranges MATCH is reported as `NEEDS_REVIEW`
+(`unproven_verdict: "MATCH"`, exit 2), never as proof. A range that fails, outlives the budget, starts
+after it, or could not be submitted (worker pool broke mid-submission) becomes a `range_errors`
+entry while the submitted ranges keep their evidence (MISMATCH still wins);
+the coordinator enforces `--max-seconds` itself and terminates stuck workers. Tables without
+one integer key run sequentially in one snapshot (noted). Progress goes to stderr every
+`--progress-interval` s (rows compared / catalog estimate / rows per s / ETA; a timed heartbeat
+even when no worker reports) and, with `--progress-file`, to an atomically replaced JSON
+(`table, rows_compared, rows_total_estimate, rows_per_s, eta_s, updated_at, workers, state`) the
+agent mirrors into the dashboard step text.
+
+**In-window quick check vs post-switch full compare.** Live: a rehearsal write pause of
+**29.7 min**, of which **27 min** was a full normalized compare run inside the freeze — the switch
+itself took 163 s (the rollback drill: 29.3 min, switch 144 s). Budget the freeze from the
+**measured rehearsal timings** of each step, and keep the full compare out of it unless its
+measured time (sized on a quiesced rehearsal run) fits. Say the split at GATE 4:
+- *In the freeze (minutes) — quick checks only:* exact `COUNT(*)` per table both sides;
+  watermark / last-key per table (`MAX(<pk>)`, `MAX(updated_at)` both sides); per-column non-NULL
+  counts (`COUNT(col)` — catches conversions **to NULL** only: DMS's silent LOB drop on key-less
+  tables, §4.7, and zero dates turned into NULL); **zero dates written as the non-NULL sentinel
+  `0101-01-01` are invisible to counts** — check them **paired by key**: list the zero-date keys on
+  the source (§2 A2 predicate) and read exactly those keys on the target (`SELECT <pk>, col FROM t
+  WHERE <pk> IN (…)` — expect the agreed NULL), or use the compare tool's paired zero-date
+  findings from an earlier full scan re-checked at the freeze; a `tail_keys` scan usually
+  excludes these old keys; `SUM()` of money/quantity columns; and a **keyed compare of the
+  hot tables' newest keys** — per hot table `"tables": {"<t>": {"tail_keys": N}}` (or
+  `"key_range": [lo, hi]`, meaning (lo, hi]) with `--tables <hot> --writes-frozen` (legitimately
+  true during the freeze). These are reported `coverage: partial` with the compared key range —
+  evidence for those keys only. A full `--workers N --writes-frozen` compare belongs here only
+  for tables whose measured time fits the budget.
+- *Coverage statement:* the quick check proves row counts, NULL-ness per column and aggregate
+  totals; it does **not** prove per-row equality (swapped/truncated values that keep the sums,
+  case or time-zone shifts, JSON/text content).
+- *Right after the switch:* a full compare while the reverse path is still inside the rollback
+  window — but on live data it is **not completed proof by itself**. Both sides move (app writes
+  on the new primary, reverse DMS onto the old one): a `--workers N` scan is per-range snapshots
+  (NEEDS_REVIEW at best, rows can be missed), and even a single-snapshot `--workers 1` scan sees
+  differences on keys written after the switch as lag. Proof = the frozen in-window compare, or
+  a `--workers 1` single-snapshot scan **plus per-key reconciliation** of every reported key
+  (re-read both sides: it converged, or it is a real difference). Every row untouched since the
+  freeze must match exactly; a difference there is a rollback decision, not a ticket.
 
 | Value kind | Canonical form (both engines) |
 |---|---|
@@ -674,7 +1028,7 @@ connect, since psycopg has no read timeout).
 | JSON/JSONB/arrays (and JSON stored as text) | key-sorted compact JSON with canonical numbers (MySQL JSON text is parsed; PG drivers already return parsed values) |
 | UUID ↔ CHAR(36)/BINARY(16) | lowercase hyphenated |
 | binary | lowercase hex; BIT(n) zero-padded bit string |
-| DATE | `YYYY-MM-DD`; MySQL zero/partial-zero dates → NULL (`zero_date: null`, what DMS and pgloader write) or `!zero:` (`distinct`), counted per side |
+| DATE | `YYYY-MM-DD`; MySQL zero/partial-zero dates → NULL (`zero_date: null` — what pgloader writes; the DMS doc says NULL too, but DMS 3.6.1 wrote `0101-01-01` on Aurora PG 17, §4.2) or `!zero:` (`distinct`), counted per side. A target `0101-01-01` (date, or midnight datetime/timestamptz) against a source zero date **for the same key** is reported as its own finding class `zero_date_as_0101` (`mismatches.zero_date_as_0101` per column, `zero_date_findings[].keys` + a note) — never as equal to NULL. Only paired per-key evidence counts: a key-less (multiset) table that shows both is `zero_date_inconclusive` (add a `key` and re-run), and a genuine `0101-01-01` that matches on both sides is never flagged. Remediate per key from the listed keys — never a blanket `UPDATE … WHERE col = '0101-01-01'` |
 | DATETIME / timestamp (naive) | interpreted in `naive_timezone`, converted to a UTC instant |
 | MySQL TIMESTAMP / PG timestamptz | UTC instant (sessions run with time zone UTC) |
 | instant rendering | `YYYY-MM-DD HH:MM:SS.ffffff` truncated to `timestamp_precision` (default 6) |
@@ -708,7 +1062,15 @@ application-level checks (`validation-patterns.md` §4) — especially ordering-
 queries (collation), timezone-rendered reports, and aggregates. **Soak (Phase 7.7):**
 `soak_check.py` / `soak_check_lambda.py` run this comparison for a MySQL ↔ PostgreSQL pair
 (watermark-bounded; `cross_engine` options in `soak-config.json` / `CROSS_ENGINE_OPTIONS`);
-native replica-status lag cannot apply across families — configure the DMS task metrics.
+native replica-status lag cannot apply across families — configure the DMS task metrics. The two
+engines are read in separate snapshots, so a live-table count or checksum difference is
+**re-checked in fresh snapshots before it can be RED** (`recheck`; only a persistent difference
+is RED, a converged one is green with its readings kept); `static_tables` compare exactly, and
+an optional `row_count_tolerance` applies to the remaining count difference only
+(`execution-runbooks.md` §soak config — live, a one-shot non-atomic count of a live table cost a
+soak-window restart). Intentional schema differences (a converted schema's generated or extra
+columns, deliberate type changes) go in `expected_schema_differences` and are reported as
+`expected (reason)` instead of schema drift; any undeclared difference still fails.
 
 ## 10. Cutover and rollback — reverse DMS
 
@@ -720,7 +1082,141 @@ PostgreSQL: forward full load + CDC A → B; at cutover record **B's** CDC posit
 below is a GATE 4 / A4b precondition with evidence (`cutover-procedures.md` §Reverse-CDC
 prerequisites).
 
+**Both directions — learned from live rehearsals:**
+- **"running" is not proof.** A reverse task failed 28 s after start while the drill had
+  already recorded the transient `running` as success. Healthy = a hold of **≥ 60 s** with
+  `Status=running` on every poll (no `LastFailureMessage`) **and** a probe write on the new
+  primary (INSERT/UPDATE/DELETE on a probe row — on **every** replicated table, covering every
+  type class, §10.2 probe matrix) visible by key **and equal by value** (normalized compare —
+  OBS-69: presence hid 2 h of corrupted booleans) on the old side **and**, per probed table,
+  `AppliedInserts`/`AppliedUpdates`/`AppliedDeletes` (`describe-table-statistics`) increased by
+  that table's probes since the pre-probe reading (a delta, not "> 0"), `TableState` not `Table
+  error`, no apply errors in the task log, `awsdms_apply_exceptions` empty for the window **and** the backlog
+  drained — `CDCIncomingChanges` (changes *waiting* to be applied, not applied work; a healthy
+  drained task reads 0) back to ~0 and `CDCLatencyTarget` low. Only then repoint the application.
+- **The reverse target must be writable for DMS during the freeze.** Its first statement
+  creates `awsdms_control`; `read_only`/`super_read_only` (MySQL) reject it (ERROR 1290), and
+  `super_read_only` also blocks `ALTER USER … ACCOUNT LOCK` even for root *[live]*. Fence the
+  **application accounts**, not the server: MySQL `ALTER USER '<app>'@'<host>' ACCOUNT LOCK` +
+  `KILL` its sessions; PostgreSQL `ALTER ROLE <app> NOLOGIN` + `pg_terminate_backend()` on its
+  sessions. Order when the server is already read-only: `SET GLOBAL super_read_only=OFF`
+  (`read_only` stays ON and still blocks the app) → lock app accounts → kill their sessions →
+  `SET GLOBAL read_only=OFF` → start the reverse task.
+- **Triggers on the reverse target fire on DMS-applied rows** (a rollback duplicated every
+  audit row, 47 → 94). MySQL has no session switch for that (`FOREIGN_KEY_CHECKS=0` covers FKs
+  only): drop the trigger at cutover and recreate it at rollback, or guard it on the writer
+  with `USER()` — inside a trigger `CURRENT_USER()` is the **definer** *[live]*. PostgreSQL:
+  DMS does not change `session_replication_role` by itself; the endpoint's `AfterConnectScript:
+  SET session_replication_role = replica` makes ordinary (`ENABLE`) triggers and FK triggers
+  skip for DMS sessions only *[live]* (the endpoint user needs the right to set it:
+  `rds_superuser`, or `GRANT SET ON PARAMETER session_replication_role` on PG 15+ — DMS documents
+  for `AfterConnectScript` that the task continues whether the statement succeeds or fails, so
+  prove it with a trigger-side count). Either
+  way it is an explicit **disable-at-cutover /
+  re-enable-at-rollback step pair** in `cutover-runbook.md`, rehearsed. Same rule forward: target
+  triggers are created only in the cutover sequence (§4.5).
+- **`GENERATED ALWAYS AS IDENTITY` on any PostgreSQL table DMS writes** (the forward MySQL →
+  PG target, or the old PG source in §10.2) rejects DMS's explicit-id INSERTs. Declare
+  `GENERATED BY DEFAULT` on the target; on a source it is an A2 change
+  (`ALTER TABLE … ALTER COLUMN id SET GENERATED BY DEFAULT`, catalog-only *[live]*, prove on a clone).
+- Key-less tables with LOB-class columns lose those columns in the reverse task too (§4.7).
+- **Cascades on a MySQL primary never reach a PostgreSQL rollback side.** InnoDB writes no
+  binlog events for cascaded child changes, and the reverse apply runs with
+  `session_replication_role = replica`, which also skips the PG side's own FK actions — a parent
+  DELETE on the new MySQL primary leaves orphan children on the rollback PG *[live]*. (PG → MySQL
+  is not affected: PostgreSQL logs cascaded child changes as ordinary rows, and DMS applies them.)
+  Per A7/§3 FK with a cascade action, before cutover either **(a)** convert the MySQL cascade
+  into explicit, binlogged behaviour — the application deletes children itself, or
+
+  ```sql
+  -- MySQL target, created in the cutover sequence with the other deferred triggers
+  ALTER TABLE order_items DROP FOREIGN KEY fk_items_order,
+    ADD CONSTRAINT fk_items_order FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE RESTRICT;
+  CREATE TRIGGER orders_bd_children BEFORE DELETE ON orders FOR EACH ROW
+    DELETE FROM order_items WHERE order_id = OLD.id;   -- row events in the binlog → reverse task carries them
+  ```
+
+  (`ON UPDATE CASCADE` of a key: forbid key updates during the rollback window, or option b) —
+  **(a) is the recommended option**; or **(b)** accept it and **reconcile the affected child
+  tables against the authoritative MySQL side** after every rollback (and after the forward
+  drain for a MySQL → PG forward task), before source writes are released: list every child
+  table reachable through a cascade FK, transitively (R2, on MySQL), and run a keyed normalized
+  compare of exactly those tables (`cross_engine_compare.py --tables <R2 list>`, under the
+  rollback freeze so `--writes-frozen` is true), then repair the listed keys from MySQL. **An
+  orphan count cannot prove equality**: a parent deleted and re-created with the same key
+  leaves the stale child on PG with a valid parent — R1 reports 0 *[live]*. R1 stays as a quick
+  detector (non-zero = certainly broken; zero = nothing proven). Rehearse it: a parent DELETE
+  (and a delete + re-insert of the same key) on the new primary, then R2 + the keyed compare on
+  the stand-in.
+
+  ```sql
+  -- R2. MySQL side: every child table reachable from a parent through CASCADE / SET NULL /
+  --     SET DEFAULT FKs, transitively (a RESTRICT hop stops the chain) — the tables to compare.
+  WITH RECURSIVE casc (sch, parent, child, depth) AS (
+    SELECT constraint_schema, referenced_table_name, table_name, 1
+    FROM information_schema.referential_constraints
+    WHERE constraint_schema IN ('shop')
+      AND (delete_rule IN ('CASCADE', 'SET NULL', 'SET DEFAULT') OR update_rule IN ('CASCADE', 'SET NULL', 'SET DEFAULT'))
+    UNION ALL
+    SELECT r.constraint_schema, r.referenced_table_name, r.table_name, c.depth + 1
+    FROM information_schema.referential_constraints r
+    JOIN casc c ON r.constraint_schema = c.sch AND r.referenced_table_name = c.child
+    WHERE (r.delete_rule IN ('CASCADE', 'SET NULL', 'SET DEFAULT') OR r.update_rule IN ('CASCADE', 'SET NULL', 'SET DEFAULT'))
+      AND c.depth < 16
+  )
+  SELECT DISTINCT sch, child FROM casc ORDER BY sch, child;
+  ```
+
+  ```sql
+  -- R1. Quick DETECTOR only — orphan count per FK on the PostgreSQL side. > 0 = certainly
+  --     broken (reconcile); 0 proves nothing (a re-created parent key hides stale children).
+  SELECT format('SELECT %L AS fk, count(*) AS orphans FROM %s c LEFT JOIN %s p ON %s WHERE %s AND p.ctid IS NULL;',
+                con.conrelid::regclass::text || '.' || con.conname, con.conrelid::regclass, con.confrelid::regclass,
+                string_agg(format('p.%I = c.%I', pa.attname, ca.attname), ' AND '),
+                string_agg(format('c.%I IS NOT NULL', ca.attname), ' AND ')) AS stmt
+  FROM pg_constraint con
+  CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(child_att, parent_att)
+  JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = k.child_att
+  JOIN pg_attribute pa ON pa.attrelid = con.confrelid AND pa.attnum = k.parent_att
+  WHERE con.contype = 'f' AND con.connamespace::regnamespace::text IN ('shop')
+  GROUP BY con.oid, con.conrelid, con.conname, con.confrelid;
+  ```
+
 ### 10.1 MySQL → PostgreSQL: reverse task PostgreSQL → MySQL
+
+**The reverse task of a MySQL → PG engagement is a PostgreSQL-source task** and needs exactly the
+PG-source type handling of a forward PG → MySQL migration (§4.3–§4.4, §10.2): booleans (DMS reads
+PG `boolean` as `CHAR(5)` `'true'`/`'false'` — `change-data-type` → `boolean`, never `int1`;
+`MapBooleanAsBoolean` is a PostgreSQL-**source** endpoint setting documented for **Amazon Redshift
+targets**, and the doc says "Since MySQL does not have a BOOLEAN type, use a transformation rule
+rather than this setting when migrating BOOLEAN data to MySQL" — so it is not the fix here; verify
+the rule's effect in rehearsal), uuid (`string` length 36 where the MySQL side is `CHAR(36)`, OBS-36),
+json/jsonb (NCLOB — LOB settings and the key rule, §4.7), numeric (unbounded `NUMERIC` → `NUMERIC(28,6)`
+on the DMS source side, §4.3), timestamps/timestamptz (zone and fsp, §4.2/§4.3). Live (OBS-69): the
+reverse task silently corrupted **every boolean column for ≈ 2 h of production writes** while the
+rollback was declared "armed/verified" — rehearsals had checked only that INSERT/UPDATE/DELETE
+landed, never the values. **"Armed" therefore requires a value-level proof** (row below), and the
+A5 RPO claim is valid only after it has passed.
+
+**PG boolean → MySQL `TINYINT(1)` in the reverse CDC task — mechanism and recommended rule
+(OBS-76).** Live: the reverse task (PG source, `test_decoding`) delivered booleans as the text `t`/`f`
+during CDC, while full load delivers `true`/`false` (DMS `CHAR(5)`); the `int1` transform turned both
+into `0`, and `MapBooleanAsBoolean` did not help — it is a PostgreSQL endpoint setting ("You must set
+this setting on both the source and target endpoints for it to take effect", DMS API
+`PostgreSQLSettings`), i.e. PG/Redshift targets, never a MySQL target. Letting MySQL coerce the text is
+no fix either (strict apply rejects `'true'`/`'t'` into `TINYINT`; non-strict writes `0`). Recommended
+configuration — **verify in rehearsal with a value-level probe in both forms** (a full-loaded row and
+a CDC INSERT + UPDATE flipping the value):
+1. a `change-data-type` rule to the DMS **`boolean`** type on every PG boolean column (DMS's MySQL
+   target maps DMS `BOOLEAN` → MySQL `BOOLEAN`, i.e. `TINYINT(1)`) — never `int1`;
+2. no `MapBooleanAsBoolean`; plugin left as the forward design chose (`pglogical` instead of
+   `test_decoding` is untested here — do not switch it to fix booleans);
+3. a value probe per boolean column after the rehearsal full load **and** after CDC changes
+   (`SELECT col, count(*) … GROUP BY 1` both sides, plus the keyed compare of the probe rows).
+**Fallback** if the probe still shows `0`/wrong values: a post-hoc boolean realignment from the PG
+source of truth by key — a one-time correction plus a realignment step inside every rollback freeze
+(what the live run did), recorded as a deviation with its RPO effect. Any rule must handle **both**
+text forms (`true`/`false` and `t`/`f`); never assume one.
 
 | ▢ | Prerequisite | Evidence |
 |---|---|---|
@@ -728,10 +1224,12 @@ prerequisites).
 | ▢ | Reverse source account: set up with `rds_superuser` (DDL artefacts), endpoint uses an account with `rds_replication` + SELECT | `\du`, grants |
 | ▢ | Tables without PK on the new PG side: `REPLICA IDENTITY FULL` (test_decoding) or their UPDATE/DELETE never reach MySQL | P2 query on the target |
 | ▢ | `HeartbeatEnable=true` on the reverse source endpoint; free-storage / `ReplicationSlotDiskUsage` alarm | endpoint settings, alarm |
-| ▢ | **Start point = a logical slot created at the freeze.** PostgreSQL sources do not support a custom CDC start *time*: after the forward drain and before repoint, `SELECT * FROM pg_create_logical_replication_slot('dms_rollback', 'test_decoding');` returns the slot's LSN *[live]*; the reverse source endpoint carries `SlotName=dms_rollback`, the task starts with `--cdc-start-position <confirmed_flush_lsn>` (not older than it) | slot row in `pg_replication_slots`, LSN in the runbook |
-| ▢ | Old MySQL source writable for the dedicated reverse writer (`cutover-procedures.md` grants incl. `awsdms_control`), `local_infile=1`, `Initstmt=SET FOREIGN_KEY_CHECKS=0`, `read_only`/`super_read_only` off for that account only | `SHOW GRANTS`, rehearsal write |
-| ▢ | Rollback-side tables keep their **original MySQL DDL**; reverse task `TargetTablePrepMode: DO_NOTHING`, plus `change-data-type` rules (PG boolean → `int1`) so values land in the original types | reverse table mappings |
+| ▢ | **Start point = a logical slot created at the freeze.** PostgreSQL sources do not support a custom CDC start *time*: after the forward drain and before repoint, `SELECT * FROM pg_create_logical_replication_slot('dms_rollback', 'test_decoding');` returns the slot's LSN *[live]*; the reverse source endpoint carries `SlotName=dms_rollback`, the task starts with `--cdc-start-position <confirmed_flush_lsn>` (not older than it) — **mandatory**: with `SlotName` and no LSN the task fails (`When working with Configured Slotname, user must specify LSN`, live) | slot row in `pg_replication_slots`, LSN in the runbook |
+| ▢ | Old MySQL source writable for the dedicated reverse writer (`cutover-procedures.md` grants incl. `awsdms_control`), `local_infile=1`, `Initstmt=SET FOREIGN_KEY_CHECKS=0`; `read_only`/`super_read_only` are **global** — OFF before the reverse task starts, the app fenced by `ACCOUNT LOCK` (above) | `SHOW GRANTS`, rehearsal write, `SELECT @@read_only, @@super_read_only` |
+| ▢ | MySQL triggers on the old source that the app's writes fire (audit, `updated_at`): dropped or `USER()`-guarded at cutover, restored at rollback (above) | runbook step pair, rehearsal audit count |
+| ▢ | Rollback-side tables keep their **original MySQL DDL**; reverse task `TargetTablePrepMode: DO_NOTHING`, plus `change-data-type` rules (PG boolean → **`boolean`**, never `int1` — §4.4) so values land in the original types; boolean distribution checked after the rehearsal | reverse table mappings, `GROUP BY` counts |
 | ▢ | Reverse task actually run on the rehearsal pair: INSERT/UPDATE/DELETE on PG each confirmed on the MySQL stand-in, compare tool MATCH | rehearsal evidence |
+| ▢ | **Value-level reverse proof (gates "armed" and the A5 RPO):** probe rows on the new PG primary covering every type class in use (boolean, uuid, json, numeric/decimal, timestamps, text/enum/arrays), applied by the reverse task, then compared **by value** across engines — `cross_engine_compare.py --tables <probed tables>` with `key_range`/`tail_keys` on the probe keys, MATCH required — not presence or counts; repeated after any reverse-task restart and at cutover step 8 | compare report on the probe keys; boolean/uuid distributions both sides |
 | ▢ | Drop the slot when the rollback window closes (it pins WAL) | decommission checklist |
 
 ### 10.2 PostgreSQL → MySQL: reverse task MySQL → PostgreSQL
@@ -742,8 +1240,13 @@ prerequisites).
 | ▢ | `CALL mysql.rds_set_configuration('binlog retention hours', 24);` (or more) — NULL purges binlogs ASAP | `CALL mysql.rds_show_configuration;` |
 | ▢ | Reverse source account on MySQL: `REPLICATION CLIENT`, `REPLICATION SLAVE`, `SELECT`; TLS `verify-full` (8.4: `none` rejected) | `SHOW GRANTS` |
 | ▢ | Start position captured at the freeze: `SHOW BINARY LOG STATUS` (8.4) / `SHOW MASTER STATUS` (8.0) on the new MySQL → `--cdc-start-position "<file>:<pos>"` (a start *time* also works for MySQL sources) | coordinates in the runbook |
-| ▢ | Old PG source writable by a dedicated reverse writer; `AfterConnectScript: SET session_replication_role = replica` (FK/trigger bypass) — only if source triggers must not fire on rollback writes | grants, endpoint setting |
+| ▢ | Old PG source writable by a dedicated reverse writer (app roles fenced with `NOLOGIN`, not `default_transaction_read_only`); `AfterConnectScript: SET session_replication_role = replica` so source triggers (audit, event rows) and FK triggers don't fire on rollback writes — or disable them at cutover, re-enable at rollback | grants, endpoint setting, rehearsal trigger-side count |
+| ▢ | **Reverse cascades:** every FK with `ON DELETE/UPDATE CASCADE` (or `SET NULL`) on the new MySQL primary is either converted to binlogged behaviour (app or `BEFORE DELETE` trigger + `RESTRICT`) before cutover — preferred — or covered by the accepted reconciliation after rollback: keyed normalized compare of every R2 child table against MySQL (R1 orphans only as a detector) — the replica role also skips PG's own FK actions | per-FK decision; rehearsal: parent DELETE and delete + re-insert of the same key on MySQL → keyed compare of the R2 tables on the PG stand-in = MATCH (a) / repaired to MATCH (b) |
+| ▢ | Identity columns DMS writes on the old PG source are `GENERATED BY DEFAULT` (A2 if `ALWAYS`) | `SELECT attname, attidentity FROM pg_attribute WHERE attidentity = 'a'` empty |
+| ▢ | MySQL generated columns of the converted schema (partial-unique emulation, §4.3) removed from the reverse task (`remove-column`) | reverse table mappings |
 | ▢ | Rollback-side PG tables keep their original types (`DO_NOTHING`; `change-data-type` → `boolean` for TINYINT(1)) | reverse table mappings |
+| ▢ | **uuid columns:** `change-data-type` → `{"type": "string", "length": 36}` on every MySQL `CHAR(36)` column that is `uuid` on PG. Live (Aurora MySQL 8.4.8 → PG 16 reverse task): without it, `CHAR(36)` utf8mb4 arrived as WSTRING and landed garbled (`d 4 a d …`) — the PG `uuid` input failed, every change to `accounts`/`ledger_entries` went **unapplied**, visible **only in the task log** while the task stayed `running`. The exact DMS conversion path is **verify in rehearsal** | reverse table mappings; rehearsal probe on each uuid table applied |
+| ▢ | **Reverse proof covers every table × every type class:** a probe row INSERT + UPDATE (+ DELETE) on **each** replicated table of the new MySQL primary, spanning uuid, boolean, numeric/decimal, json, timestamps (+ text, enum, arrays where used), each verified on PG by key **by value** with the normalized compare (MATCH — presence is not proof; this gates "armed" and the A5 RPO); per table `describe-table-statistics` (`TableState` not `Table error`, `Applied*` deltas), the task log for apply errors, and `awsdms_apply_exceptions` (on the PG side, if present) empty for the probe window — the task status and the overall counters are not evidence. After restarting a reverse task from the recorded cutover position, expect duplicate-key (`23505`) apply errors for rows already applied; reconcile them by key, never by count | probe matrix + per-table evidence in the rehearsal record |
 | ▢ | Rehearsed run + compare tool MATCH, as above | rehearsal evidence |
 
 ### 10.3 What reverse replication cannot carry — the RPO statement
@@ -860,6 +1363,12 @@ covers serials), and time the rehearsal — that is the outage.
 7. PG tables without PK silently drop UPDATE/DELETE in CDC unless `REPLICA IDENTITY FULL`.
 8. DMS does not carry secondary indexes, FKs, defaults, identity, views, routines, triggers,
    users — and does not move sequences during CDC.
+9. DMS **removes LOB-class columns of tables without a PK/UK** (MySQL JSON/MEDIUM/LONG
+   TEXT/BLOB; PG text/citext/jsonb/bytea/arrays) — silently, counts match (§4.7). GATE 2 blocker.
+10. MySQL zero dates arrived as **`0101-01-01`**, not NULL (DMS 3.6.1 → Aurora PG 17, live);
+    CDC UPDATEs bring them back after a one-time fix (§4.2).
+11. `change-data-type` → `int1` on a PG boolean turns `'true'` into 0; use `boolean` and prove
+    every rule with value distributions (§4.4). Rules on BLOB/CLOB-mapped columns are ignored.
 
 ## Sources
 
@@ -872,6 +1381,7 @@ AWS DMS — [MySQL source](https://docs.aws.amazon.com/dms/latest/userguide/CHAP
 [CDC / bidirectional / native start points](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Task.CDC.html) ·
 [Full-load task settings (TargetTablePrepMode)](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TaskSettings.FullLoad.html) ·
 [Transformation rules (change-data-type)](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.CustomizingTasks.TableMapping.SelectionTransformation.Transformations.html) ·
+[Premigration assessments (LOBs without PK/UK)](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.AssessmentReport.Assessments.All.html) ·
 [Data validation](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html) ·
 [Best practices](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_BestPractices.html) ·
 [Troubleshooting](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Troubleshooting.html) ·
@@ -896,7 +1406,16 @@ MySQL 8.4 manual — [identifier case](https://dev.mysql.com/doc/refman/8.4/en/i
 [InnoDB limits](https://dev.mysql.com/doc/refman/8.4/en/innodb-limits.html) ·
 [isolation levels](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html) ·
 [ON DUPLICATE KEY UPDATE](https://dev.mysql.com/doc/refman/8.4/en/insert-on-duplicate.html) ·
-[CHECK constraints](https://dev.mysql.com/doc/refman/8.0/en/create-table-check-constraints.html).
+[CHECK constraints](https://dev.mysql.com/doc/refman/8.0/en/create-table-check-constraints.html) ·
+[ENUM sorting](https://dev.mysql.com/doc/refman/8.0/en/enum.html) ·
+[fractional seconds](https://dev.mysql.com/doc/refman/8.4/en/fractional-seconds.html) ·
+[TIMESTAMP/DATETIME initialization (fsp must match)](https://dev.mysql.com/doc/refman/8.4/en/timestamp-initialization.html) ·
+[NOW()/SYSDATE() fsp](https://dev.mysql.com/doc/refman/8.4/en/date-and-time-functions.html) ·
+[LOAD DATA (LOCAL = IGNORE)](https://dev.mysql.com/doc/refman/8.0/en/load-data.html) ·
+[read_only / super_read_only](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_read_only) ·
+[information_schema_stats_expiry (cached TABLES.AUTO_INCREMENT)](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_information_schema_stats_expiry) ·
+[CURRENT_USER() in triggers](https://dev.mysql.com/doc/refman/8.0/en/information-functions.html#function_current-user) ·
+[online DDL (auto-increment column)](https://dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html).
 PostgreSQL — [lexical structure (identifiers)](https://www.postgresql.org/docs/current/sql-syntax-lexical.html) ·
 [collations](https://www.postgresql.org/docs/current/collation.html) ·
 [citext](https://www.postgresql.org/docs/current/citext.html) ·
@@ -905,6 +1424,9 @@ PostgreSQL — [lexical structure (identifiers)](https://www.postgresql.org/docs
 [INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html) ·
 [transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html) ·
 [sequence functions](https://www.postgresql.org/docs/current/functions-sequence.html) ·
+[CREATE TABLE (GENERATED ALWAYS / BY DEFAULT)](https://www.postgresql.org/docs/current/sql-createtable.html) ·
+[session_replication_role](https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-SESSION-REPLICATION-ROLE) ·
+[pgJDBC stringtype](https://jdbc.postgresql.org/documentation/use/) ·
 [pg_get_keywords / system information functions](https://www.postgresql.org/docs/current/functions-info.html) ·
 [PG 15 release (NULLS NOT DISTINCT)](https://www.postgresql.org/docs/release/15.0/) ·
 [PG 18 release](https://www.postgresql.org/docs/release/18.0/).

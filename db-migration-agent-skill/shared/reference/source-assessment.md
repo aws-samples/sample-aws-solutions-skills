@@ -47,6 +47,7 @@ Before choosing a migration method or target, assess whether the source workload
 | **PostgreSQL** | C-language extensions (custom compiled) | Cannot install on Aurora | Check `pg_available_extensions`; rewrite or remove |
 | **PostgreSQL** | Direct pg_hba.conf access | No filesystem access | Use RDS security groups + IAM auth + SSL settings |
 | **Compressed tables** | InnoDB compressed row_format (Aurora) | Not supported on Aurora | `ALTER TABLE t ROW_FORMAT=DYNAMIC` before migration |
+| **DMS + LOBs** (any DMS path, homogeneous or heterogeneous, forward and reverse) | LOB-class column (MySQL JSON / MEDIUM-LONG TEXT/BLOB / spatial; PG text, citext, jsonb, bytea, arrays…) on a table with **no PRIMARY KEY and no UNIQUE key** | DMS removes the column: every row arrives NULL, the load "succeeds", row counts match (live: 505k payment payloads lost in a production target) | GATE 2 blocker for a DMS method when the column's effective DMS type is a LOB (confirmed rows; TEXT/BLOB on MySQL are conditional checks): surrogate key under A2, backfill at the freeze, or exclude + separate copy; mandatory post-full-load non-null check — [mysql-postgresql.md](mysql-postgresql.md) §4.7 (queries A10/P9 work for homogeneous sources too) |
 
 ### 1.2 Adjustments — Require Changes But Not Blocking
 
@@ -282,6 +283,15 @@ out over DX/VPN), and reverse replication for rollback works the same way in the
 direction — but confirm the customer's firewall allows the DB port inbound from the VPC
 CIDR for that reverse path.
 
+> **Keep SSM Send-Command payloads small — stage scripts on the host.** Inline only a short
+> launcher; put the script itself on the host first (downloaded from S3 by the host's own role,
+> or a file staged in an earlier, reviewed step) and verify its hash there. Large inline payloads
+> fail: SSM documents are limited to 64 KB ("Document size 64 KB per document" — AWS Systems
+> Manager quotas, https://docs.aws.amazon.com/general/latest/gr/ssm.html), and a live run's
+> ≈ 97 KB `send-command` was rejected outright (OBS-71; the exact SendCommand parameter limit is
+> not documented — verify, never rely on headroom). Never inline secrets either (§Credential
+> Handling).
+
 > **Default recommendation for an isolated/private-subnet source: SSM.** Port forwarding when you have a local client; **Send-Command when you don't** (run the client that already exists on the DB host). This avoids opening the DB to new networks just to migrate it. The same path is reused for the `mysqldump`/`pg_dump` export (execution-runbooks.md) and the processlist cross-checks (cutover-procedures.md).
 
 ### Credential Handling — Never Put Passwords in `argv`
@@ -290,7 +300,9 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
 
 - **Never** pass `-p<password>` or `--password=<pw>` on the command line.
 - Use **`MYSQL_PWD`** in the on-host environment, or an existing customer-managed
-  `--defaults-extra-file` (chmod 600); never generate a credential file.
+  `--defaults-extra-file` (chmod 600); never generate a credential file (the only exception —
+  authorized app config staged on the customer's app host — is `cutover-procedures.md`
+  §Credential delivery).
 - **Preferred:** fetch the secret **on the DB host** using the instance's IAM role, so the plaintext never transits your machine or appears in argv:
   ```bash
   # Run on the DB host (e.g. via SSM Send-Command); password stays on the host, out of argv.
@@ -317,18 +329,25 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
   (chmod 600); never generate a credential file.
 - **Creating or rotating a credential (`CREATE USER … IDENTIFIED BY`, `ALTER USER … IDENTIFIED BY`,
   a replication user for reverse-replication arming, etc.) is a different case from
-  authenticating with one** — there is no existing secret to fetch on-host; the new
-  plaintext value must appear somewhere for the statement to run, and if that statement is
-  delivered via SSM Send-Command (the normal path when the target has no host-side
-  Secrets Manager access, e.g. a hybrid-activated or no-instance-profile host), the literal
-  value **will** land in SSM command history/CloudTrail regardless of env-var or
-  defaults-file tricks — those only protect against `ps -ef`/shell-history exposure, not
-  against the command document itself. Confirmed live during reverse-replication arming
-  against a no-instance-profile source. Treat the value as burned the moment that command
-  runs: generate it freshly for this one use, and rotate it immediately after the
-  statement executes — never reuse a value that has already transited a command history
-  this way, and say so plainly in the plan (this is exactly the kind of thing hard
-  constraint 13 wants surfaced immediately, not saved for the next gate).
+  authenticating with one** — the new value must reach the statement. **Never put it in an
+  SSM Send-Command document or parameters**: the literal lands in SSM command history and
+  CloudTrail regardless of env-var or defaults-file tricks (those only protect `ps -ef`/shell
+  history) — confirmed live during reverse-replication arming against a no-instance-profile
+  source (`cutover-procedures.md` §Credential delivery). Normal paths, in order:
+  1. **Generate it in Secrets Manager** (CDK `generateSecretString`, or `get-random-password`
+     straight into `put-secret-value` — never echoed) and run the statement **from a host whose
+     own role can read that secret** — the migration helper / bastion with its instance profile,
+     connecting to the DB over TLS. The SSM command carries only the secret ARN; the helper
+     fetches the value on-host (the `MYSQL_PWD=$(aws secretsmanager …)` pattern above) and
+     builds the statement locally.
+  2. **The DB host fetches it itself** — only if its role already has that read in scope (never
+     widen a shared/un-prefixed host role to get there; check the customer's prefix rule first and
+     present any IAM change as its own A3 block).
+  3. **Customer-operated** — the customer's operator runs the statement with the value from their
+     own approved channel (a recorded customer action, timed in rehearsal).
+  **Burn-and-rotate is only the remedy for accidental exposure:** if a value ever does transit a
+  command document, history or log, treat it as burned — rotate it immediately (by one of the
+  paths above), never reuse it, record it, and tell the customer right away (hard constraint 13).
 
 ### Information to Collect
 
@@ -338,7 +357,8 @@ Every command below (assessment, dump, cutover) needs DB credentials. **Password
 | Total size | Data + indexes in GB | See queries below |
 | Table count | Number of tables, top 10 largest | `information_schema.tables` |
 | Schema objects | Stored procs, triggers, views, events, functions | `information_schema.routines`, `pg_proc` — **privileged account required, see warning below** |
-| LOB columns | BLOB/TEXT/JSON columns, max sizes | Profile actual data sizes |
+| LOB columns | BLOB/TEXT/JSON columns, max sizes, **and which of their tables lack a PK/UK** (DMS blocker, §1.1) | Profile actual data sizes; A10/P9 in mysql-postgresql.md |
+| `sql_mode` expectations | MySQL source: `SELECT @@GLOBAL.sql_mode` **plus** what the app sets per session (grep connection strings / pool init for `sessionVariables=sql_mode`, `init_command`, `SET SESSION sql_mode`, ORM dialect options). PostgreSQL source → MySQL target: the app relies on PG's always-strict behaviour | The target parameter group carries the source's effective mode (homogeneous), or the explicit strict MySQL 8 default (PG → MySQL) — RDS/Aurora engine defaults are **not** strict; GATE 2 decision, rehearsed with the app SQL; read back `@@GLOBAL.sql_mode` on every instance (`mysql-postgresql.md` §6) |
 | Replication readiness | Binary logging (MySQL) / wal_level (PostgreSQL) | `SHOW VARIABLES LIKE 'log_bin'` / `SHOW wal_level` |
 | Current connections | Typical/peak concurrent connections | `SHOW STATUS LIKE 'Threads_connected'` |
 | Source location | EC2 (same VPC? same region?), on-premises, other cloud? | User input |

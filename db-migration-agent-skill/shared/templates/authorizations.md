@@ -57,10 +57,12 @@ Tags in use, appended as they arise:
 
 - **Mode 3 warnings** — stated and accepted (only if Mode 3 chosen; see
   `engagement-safety.md` §Mode 3 warnings for the required content of this block).
-- **A1** — Read-only source access (assessment).
+- **A1** — Read-only source access (assessment) — presented explicitly for every engagement
+  type, caches included; read-only host inspection (e.g. an app server) is its own block.
 - **A2** — Source write (each one individually — a blocker fix, migration-user creation
   — never bundled).
-- **A3** — Target/production infrastructure deploy.
+- **A3** — Target/production infrastructure deploy (lists every stack it creates by name,
+  rehearsal / stand-in stacks included, with their cost and cleanup).
 - **GATE 2** — Method, cost, architecture, rollback strategy approved.
 - **GATE 3** — Validation evidence accepted.
 - **Soak-exit** — the approved method's readiness evidence and remaining conditions

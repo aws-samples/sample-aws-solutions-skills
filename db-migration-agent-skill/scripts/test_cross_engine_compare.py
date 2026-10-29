@@ -44,6 +44,7 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 
 import cross_engine_compare as cec  # noqa: E402
 import soak_check  # noqa: E402
+soak_check.RECHECK_SLEEP = lambda seconds: None   # live-table re-check delays are not waited in tests
 
 UTC = dt.timezone.utc
 OPTS = cec.merge_options({})
@@ -267,7 +268,7 @@ class NormalizerTests(unittest.TestCase):
         m = mcol(("d", "date", "date", None, None, None, "YES"))
         p = pcol(("d", "date", "b", "D", "YES", None))
         self.assertEqual(self.c(dt.date(2026, 1, 2), m, "date"), self.c(dt.date(2026, 1, 2), p, "date"))
-        self.assertIsNone(self.c("0000-00-00", m, "date"))           # what DMS/pgloader write: NULL
+        self.assertIsNone(self.c("0000-00-00", m, "date"))           # pgloader writes NULL (DMS: 0101-01-01, below)
         self.assertIsNone(self.c("2026-00-10", m, "date"))           # partial zero date
         self.assertEqual(self.n.zero_dates["source"], 2)
         n2 = cec.Normalizer(cec.merge_options({"zero_date": "distinct"}))
@@ -322,6 +323,472 @@ class NormalizerTests(unittest.TestCase):
     def test_null_vs_empty_hash_differently(self):
         self.assertNotEqual(cec.row_digest([None]), cec.row_digest([""]))
         self.assertNotEqual(cec.row_digest(["a", "bc"]), cec.row_digest(["ab", "c"]))
+
+
+def _zero_date_tables(target_value, kind="date"):
+    mtype = ("date", "date", None) if kind == "date" else ("datetime", "datetime(6)", 6)
+    ptype = "date" if kind == "date" else "timestamp(6) without time zone"
+    mcat = [("id", "bigint", "bigint", 19, 0, None, "NO"), ("d", mtype[0], mtype[1], None, None, mtype[2], "YES")]
+    pcat = [("id", "bigint", "b", "N", "NO", None), ("d", ptype, "b", "D", "YES", None)]
+    zero = "0000-00-00" if kind == "date" else "0000-00-00 00:00:00"
+    ok = dt.date(2026, 1, 2) if kind == "date" else dt.datetime(2026, 1, 2, 3, 4, 5)
+    src = [{"id": i, "d": zero if i in (3, 7) else ok} for i in range(1, 11)]
+    tgt = [{"id": i, "d": target_value if i in (3, 7) else ok} for i in range(1, 11)]
+    return ({("shop", "z"): {"catalog": mcat, "pk": ["id"], "rows": src}},
+            {("shop", "z"): {"catalog": pcat, "pk": ["id"], "rows": tgt}})
+
+
+class ZeroDate0101Tests(unittest.TestCase):
+    """OBS-9: DMS wrote MySQL zero dates as 0101-01-01 on Aurora PG 17 — an explicit finding."""
+
+    def test_zero_date_as_0101_is_its_own_finding_date_and_datetime(self):
+        for kind, val in (("date", dt.date(101, 1, 1)), ("datetime", dt.datetime(101, 1, 1)),
+                          ("date", "0101-01-01"), ("datetime", "0101-01-01 00:00:00")):
+            s, t = _zero_date_tables(val, kind)
+            r = compare(s, t, table="shop.z")
+            self.assertEqual(r["verdict"], "MISMATCH", (kind, val))
+            self.assertEqual(r["mismatches"]["zero_date_as_0101"], {"d": 2})
+            self.assertEqual(r["zero_date_findings"][0]["class"], "zero_date_as_0101")
+            self.assertIn("0101-01-01", " ".join(r["notes"]))
+            self.assertEqual(r["zero_date_sentinels"]["target"], 2)
+            self.assertEqual(r["zero_dates"]["source"], 2)
+            f = r["zero_date_findings"][0]
+            self.assertEqual((f["evidence"], f["keys"]), ("paired_by_key", [["3"], ["7"]]))
+            self.assertNotIn("WHERE col = '0101-01-01'", f["message"])   # never a blanket UPDATE
+            self.assertIn("never a blanket UPDATE", f["message"])
+
+    def test_zero_date_vs_null_still_matches_and_has_no_finding(self):
+        s, t = _zero_date_tables(None)
+        r = compare(s, t, table="shop.z")
+        self.assertEqual(r["verdict"], "MATCH")
+        self.assertNotIn("zero_date_findings", r)
+        self.assertNotIn("zero_date_as_0101", r["mismatches"])
+
+    def test_zero_date_vs_other_date_is_a_plain_difference(self):
+        s, t = _zero_date_tables(dt.date(1970, 1, 1))
+        r = compare(s, t, table="shop.z")
+        self.assertEqual(r["verdict"], "MISMATCH")
+        self.assertNotIn("zero_date_findings", r)
+
+    def test_sentinel_detection(self):
+        self.assertTrue(cec.is_0101_sentinel(dt.datetime(101, 1, 1, tzinfo=UTC)))
+        self.assertTrue(cec.is_0101_sentinel("0101-01-01 00:00:00.000000+00"))
+        self.assertFalse(cec.is_0101_sentinel(dt.datetime(101, 1, 1, 0, 0, 1)))
+        self.assertFalse(cec.is_0101_sentinel(dt.date(1101, 1, 1)))
+        self.assertTrue(cec.is_zero_date_raw("0000-00-00 00:00:00"))
+        self.assertFalse(cec.is_zero_date_raw(dt.date(2026, 1, 1)))
+
+    def test_multiset_tables_report_unpaired_sentinels_as_inconclusive(self):
+        s, t = _zero_date_tables(dt.date(101, 1, 1))
+        s[("shop", "z")]["pk"], t[("shop", "z")]["pk"] = [], []
+        r = compare(s, t, table="shop.z")
+        self.assertEqual(r["mode"], "multiset")
+        self.assertEqual(r["verdict"], "MISMATCH")                  # the multisets do differ ...
+        self.assertNotIn("zero_date_findings", r)                   # ... but nothing is paired by key
+        self.assertNotIn("zero_date_as_0101", r["mismatches"])
+        self.assertEqual(r["zero_date_inconclusive"]["evidence"], "unpaired (multiset)")
+        self.assertIn("INCONCLUSIVE", " ".join(r["notes"]))
+        self.assertIn("do not run a blanket UPDATE", r["zero_date_inconclusive"]["message"])
+
+    def test_normalized_zero_date_plus_genuine_0101_row_is_a_match_without_finding(self):
+        # Review case: row 3 is a zero date correctly written as NULL, row 7 is a genuine
+        # 0101-01-01 on BOTH sides. Aggregate counters see "source zero date" and "target
+        # 0101-01-01" — but no key pairs them, so there is no finding and nothing to UPDATE.
+        s, t = _zero_date_tables(None)
+        s[("shop", "z")]["rows"][6]["d"] = dt.date(101, 1, 1)
+        t[("shop", "z")]["rows"][6]["d"] = dt.date(101, 1, 1)
+        for keyless in (False, True):
+            if keyless:
+                s[("shop", "z")]["pk"], t[("shop", "z")]["pk"] = [], []
+            r = compare(s, t, table="shop.z")
+            self.assertEqual(r["verdict"], "MATCH", keyless)
+            self.assertEqual((r["zero_dates"]["source"], r["zero_date_sentinels"]["target"]), (1, 1))
+            self.assertNotIn("zero_date_findings", r)
+            self.assertNotIn("zero_date_inconclusive", r)
+            self.assertNotIn("zero_date_as_0101", r["mismatches"])
+
+
+class FastPathParityTests(unittest.TestCase):
+    """Normalizer.compile (fast paths) must equal canon() for every value; row_digest/JSON
+    fast paths must equal their reference forms (OBS-8 throughput work)."""
+
+    VALUES = [None, 0, 1, -1, 2, 10 ** 30, True, False, Decimal("0"), Decimal("-0.000"), Decimal("1.500"),
+              Decimal("1E+2"), Decimal("NaN"), Decimal("-Infinity"), 1.5, "", "a", " a  ", "Ab", "한글", "0000-00-00",
+              "2026-01-02", "0101-01-01", "2026-01-02 03:04:05.123456", "t", "false", "yes", b"\x01", b"ab",
+              memoryview(b"ab"), dt.date(2026, 1, 2), dt.date(101, 1, 1), dt.date(5, 1, 1),
+              dt.datetime(2026, 1, 2, 3, 4, 5, 678901), dt.datetime(101, 1, 1), dt.datetime(5, 6, 7, 8, 9, 10, 11),
+              dt.datetime(2026, 1, 2, 3, 4, 5, 6, tzinfo=UTC),
+              dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone(dt.timedelta(hours=9))),
+              {"b": 1, "a": "x\"y"}, [1, "é", None], uuid.UUID(int=5)]
+
+    def cols(self):
+        return [mcol(("c", "bigint", "bigint", 19, 0, None, "YES")), mcol(("c", "varchar", "varchar(9)", None, None, None, "YES")),
+                mcol(("c", "datetime", "datetime(6)", None, None, 6, "YES")), mcol(("c", "timestamp", "timestamp(6)", None, None, 6, "YES")),
+                mcol(("c", "date", "date", None, None, None, "YES")), mcol(("c", "json", "json", None, None, None, "YES")),
+                pcol(("c", "timestamp(6) with time zone", "b", "D", "YES", None)), pcol(("c", "jsonb", "b", "U", "YES", None)),
+                pcol(("c", "boolean", "b", "B", "YES", None)), pcol(("c", "character(4)", "b", "S", "YES", None))]
+
+    @staticmethod
+    def outcome(fn, v):      # nonsense type/kind pairs may raise — then both must raise the same
+        try:
+            return fn(v)
+        except Exception as e:
+            return ("raised", type(e).__name__)
+
+    def test_compile_equals_canon_for_every_kind_and_option_set(self):
+        kinds = ["numeric", "text", "char", "str", "bool", "bool_numeric", "date", "ts", "json", "uuid", "binary",
+                 "set", "time", "float:7"]
+        for o in ({}, {"naive_timezone": "+09:00", "timestamp_precision": 3, "text_casefold": True, "text_rstrip": True},
+                  {"timestamp_precision": 0, "zero_date": "distinct"}):
+            opts = cec.merge_options(o)
+            for col in self.cols():
+                for k in kinds:
+                    for side in ("source", "target"):
+                        for cf in (False, True):
+                            n1, n2 = cec.Normalizer(opts), cec.Normalizer(opts)
+                            f = n2.compile(col, k, side, casefold=cf)
+                            for v in self.VALUES:
+                                self.assertEqual(self.outcome(f, v), self.outcome(lambda x: n1.canon(x, col, k, side, casefold=cf), v),
+                                                 (o, col.raw_type, k, v))
+                            self.assertEqual(n1.zero_dates, n2.zero_dates)
+                            self.assertEqual(n1.sentinels_0101, n2.sentinels_0101)
+
+    def test_json_string_fast_path_matches_json_dumps(self):
+        for s_ in ("", "plain", "한글 é", 'q"x', "b\\s", "tab\t", "nl\n", "\x00\x1f", "\u2028", "\udc80"):
+            self.assertEqual(cec._jstr(s_), json.dumps(s_, ensure_ascii=False))
+        self.assertEqual(cec._json_canon({"b": [1, 2.5, True, None], "a": {"y": "é", "x": Decimal("1.0")}}),
+                         '{"a":{"x":1,"y":"é"},"b":[1,2.5,true,null]}')
+
+    def test_row_digest_is_the_documented_byte_stream(self):
+        import hashlib
+        vals = [None, "", "abc", "한글", "\udc80x"]
+        h = hashlib.sha256()
+        for c in vals:
+            if c is None:
+                h.update(b"\x00N;")
+            else:
+                b = c.encode("utf-8", "surrogatepass")
+                h.update(b"\x01" + str(len(b)).encode() + b":" + b)
+        self.assertEqual(cec.row_digest(vals), h.digest())
+
+
+class ParallelRangeTests(unittest.TestCase):
+    def test_key_ranges_cover_everything_without_overlap(self):
+        for lo, hi, parts in ((1, 100, 4), (1, 3, 8), (-50, 50, 7), (5, 5, 4), (1, 1000003, 32)):
+            rg = cec.key_ranges(lo, hi, parts)
+            self.assertIsNone(rg[0][0])
+            self.assertIsNone(rg[-1][1])
+            for (a, b), (c, d) in zip(rg, rg[1:]):
+                self.assertEqual(b, c)
+                self.assertLess(a if a is not None else -10 ** 18, b)
+            probe = list(range(lo - 5, hi + 6))
+            for v in probe:
+                self.assertEqual(sum(1 for a, b in rg if (a is None or v > a) and (b is None or v <= b)), 1, (lo, hi, v))
+
+    def _seq_and_ranges(self, src, tgt, options=None, parts=5, writes_frozen=True):
+        opts = cec.merge_options(options)
+        seq = compare(src, tgt, options)
+        s, t = MemSide("mysql", src, "source"), MemSide("postgres", tgt, "target")
+        plan, _ = cec.plan_table(s, t, "shop.items", opts)
+        self.assertTrue(cec.parallel_eligible(plan))
+        rg = cec.key_ranges(1, 30, parts)
+        reps = [cec.compare_table(s, t, plan, opts, key_range=r) for r in rg]
+        return seq, cec._truncate_examples(cec.merge_range_reports(reps, rg, 3, writes_frozen), int(opts["max_examples"]))
+
+    def assertSameResult(self, seq, par):
+        self.assertEqual(seq["verdict"], par["verdict"])
+        self.assertEqual(seq["rows"], par["rows"])
+        a, b = dict(seq["mismatches"]), dict(par["mismatches"])
+        self.assertEqual(a, b)
+
+    def test_ranges_give_the_same_mismatch_set_as_one_scan(self):
+        t = tgt_rows()
+        t = [dict(r, price=Decimal("9.9")) if int(r["id"]) in (2, 9, 17, 29) else r for r in t if int(r["id"]) not in (5, 23)]
+        t.append({**tgt_rows(31)[-1]})
+        for opts in ({}, {"max_examples": 2}, {"chunk_size": 3}):
+            seq, par = self._seq_and_ranges(mysql_table(src_rows()), pg_table(t), opts)
+            self.assertEqual(seq["verdict"], "MISMATCH")
+            self.assertSameResult(seq, par)
+            self.assertEqual(par["digest_scheme"], "ranges")
+            self.assertIn("ITS OWN snapshot", " ".join(par["notes"]))
+
+    def test_ranges_match_when_equal(self):
+        seq, par = self._seq_and_ranges(mysql_table(src_rows()), pg_table(tgt_rows()))
+        self.assertEqual((seq["verdict"], par["verdict"]), ("MATCH", "MATCH"))
+        self.assertSameResult(seq, par)
+        self.assertEqual(par["digest"]["source"], par["digest"]["target"])
+        self.assertEqual((par["consistency"], par["parallel"]["writes_frozen"]), ("per_range_snapshots", True))
+
+    def test_live_parallel_match_is_not_proof(self):
+        seq, par = self._seq_and_ranges(mysql_table(src_rows()), pg_table(tgt_rows()), writes_frozen=False)
+        self.assertEqual(seq["verdict"], "MATCH")
+        self.assertEqual((par["verdict"], par["check"], par["unproven_verdict"]), ("NEEDS_REVIEW", None, "MATCH"))
+        self.assertEqual(par["consistency"], "per_range_snapshots")
+        self.assertIn("NOT a MATCH-as-proof", " ".join(par["notes"]))
+        one = cec.merge_range_reports([seq], [(None, None)], 1, writes_frozen=False)   # one range = one snapshot
+        self.assertEqual((one["verdict"], one["consistency"]), ("MATCH", "single_snapshot"))
+
+    def test_key_moved_between_ranges_mid_scan_is_missed_but_never_proof(self):
+        # Review reproduction: range 1 is compared, then a row that DIFFERS (id 25, upper range)
+        # gets a new key inside the already-compared lower range on both sides, then range 2
+        # is compared. Per-range snapshots miss the row entirely: every range "matches".
+        src, tgt = mysql_table(src_rows()), pg_table(tgt_rows())
+        tgt[("shop", "items")]["rows"][24]["price"] = Decimal("999.5")        # id 25 differs
+        opts = cec.merge_options({})
+        s, t = MemSide("mysql", src, "source"), MemSide("postgres", tgt, "target")
+        plan, _ = cec.plan_table(s, t, "shop.items", opts)
+        rg = [(None, 15), (15, None)]
+        seq = cec.compare_table(s, t, plan, opts)
+        self.assertEqual(seq["verdict"], "MISMATCH")                          # one snapshot sees it
+        lower = cec.compare_table(s, t, plan, opts, key_range=rg[0])
+        for side, newkey in ((src, 0), (tgt, Decimal(0))):                    # key 25 -> 0 (lower range)
+            row = next(r for r in side[("shop", "items")]["rows"] if int(r["id"]) == 25)
+            row["id"] = newkey
+        upper = cec.compare_table(s, t, plan, opts, key_range=rg[1])
+        self.assertEqual((lower["verdict"], upper["verdict"]), ("MATCH", "MATCH"))
+        live = cec.merge_range_reports([lower, upper], rg, 2, writes_frozen=False)
+        self.assertEqual(live["rows"]["source"], 29)                          # the moved row was never read
+        self.assertEqual((live["verdict"], live["unproven_verdict"]), ("NEEDS_REVIEW", "MATCH"))
+        self.assertNotEqual(cec.VERDICT_CHECK[live["verdict"]], True)
+
+    def test_failed_range_keeps_other_ranges_evidence_and_mismatch_precedence(self):
+        t = tgt_rows()
+        t[3]["price"] = Decimal("1.5")                                        # id 4 differs (range 1)
+        opts = cec.merge_options({})
+        s, tt = MemSide("mysql", mysql_table(src_rows()), "source"), MemSide("postgres", pg_table(t), "target")
+        plan, _ = cec.plan_table(s, tt, "shop.items", opts)
+        rg = [(None, 10), (10, 20), (20, None)]
+        from concurrent.futures import Future
+        futs = []
+        for i, r in enumerate(rg):
+            f = Future()
+            if i == 1:
+                f.set_exception(TimeoutError("statement timeout"))
+            else:
+                f.set_result(cec.compare_table(s, tt, plan, opts, key_range=r))
+            futs.append(f)
+        parts, timed_out = cec.collect_range_results(futs, rg, time.monotonic() + 30)
+        self.assertFalse(timed_out)
+        m = cec.merge_range_reports(parts, rg, 3, writes_frozen=True)
+        self.assertEqual(m["verdict"], "MISMATCH")                            # MISMATCH beats NEEDS_REVIEW
+        self.assertEqual(m["mismatches"]["different_rows"], 1)
+        self.assertEqual(m["mismatches"]["examples"]["different"][0]["key"], ["4"])
+        self.assertEqual(m["range_errors"], [{"range": ["10", "20"], "error": "worker failed (TimeoutError: statement timeout)"}])
+        self.assertEqual(m["rows"]["source"], 20)                             # ranges 1 and 3 kept
+        self.assertEqual(m["parallel"]["ranges_without_evidence"], 1)
+        # all other ranges matching + one failure: NEEDS_REVIEW, never MATCH, even when frozen
+        futs[0] = Future(); futs[0].set_result(cec.compare_table(s, MemSide("postgres", pg_table(tgt_rows()), "target"),
+                                                                 plan, opts, key_range=rg[0]))
+        parts, _ = cec.collect_range_results(futs, rg, time.monotonic() + 30)
+        self.assertEqual(cec.merge_range_reports(parts, rg, 3, writes_frozen=True)["verdict"], "NEEDS_REVIEW")
+
+    def test_coordinator_deadline_is_enforced_with_heartbeats(self):
+        import io
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        release = threading.Event()
+        opts = cec.merge_options({})
+        s, t = MemSide("mysql", mysql_table(src_rows()), "source"), MemSide("postgres", pg_table(tgt_rows()), "target")
+        plan, _ = cec.plan_table(s, t, "shop.items", opts)
+        rg = [(None, 15), (15, None)]
+        done_part = cec.compare_table(s, t, plan, opts, key_range=rg[0])
+        buf = io.StringIO()
+        prog = cec.Progress(stream=buf, interval=0.2, workers=2, tables_total=1)
+        prog.start_table("shop.items", 30)
+        before = buf.getvalue().count("progress ")
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = [ex.submit(lambda: done_part), ex.submit(release.wait, 60)]   # range 2 hangs (blocked query)
+            t0 = time.monotonic()
+            parts, timed_out = cec.collect_range_results(futs, rg, t0 + 1.0, progress=prog, grace=0.5, poll=0.1)
+            took = time.monotonic() - t0
+            release.set()
+        self.assertTrue(timed_out)
+        self.assertLess(took, 2.5)                                            # deadline 1.0 + grace 0.5 + slack
+        self.assertGreaterEqual(buf.getvalue().count("progress ") - before, 3)   # timed heartbeats, no worker messages
+        self.assertIs(parts[0], done_part)                                    # completed evidence kept
+        self.assertIn("time budget exhausted", parts[1]["range_error"]["error"])
+        m = cec.merge_range_reports(parts, rg, 2, writes_frozen=True)
+        self.assertEqual((m["verdict"], m["rows"]["source"]), ("NEEDS_REVIEW", 15))
+
+    def test_writes_frozen_must_be_a_json_boolean(self):
+        # Review-6 #4: "writes_frozen": "false" used to become True via bool() and turn a live
+        # parallel scan into MATCH-as-proof. Only true/false are accepted.
+        for bad in ("false", "true", 0, 1, None, "yes", [], {}):
+            with self.assertRaises(cec.CompareError, msg=repr(bad)) as e:
+                cec.merge_options({"writes_frozen": bad})
+            self.assertIn("JSON boolean", str(e.exception))
+        self.assertIs(cec.merge_options({"writes_frozen": False})["writes_frozen"], False)
+        self.assertIs(cec.merge_options({"writes_frozen": True})["writes_frozen"], True)
+        self.assertIs(cec.merge_options({})["writes_frozen"], False)
+
+    def test_writes_frozen_string_is_a_config_error_from_the_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "c.json"
+            cfg.write_text(json.dumps({"source": {"engine": "mysql", "host": "127.0.0.1", "port": 1, "user": "u",
+                                                  "database": "d", "password_env": "X"},
+                                       "target": {"engine": "postgres", "host": "127.0.0.1", "port": 1, "user": "u",
+                                                  "database": "d", "password_env": "X"},
+                                       "tables": ["shop.items"],
+                                       "cross_engine": {"workers": 2, "writes_frozen": "false"}}))
+            with mock.patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+                rc = cec.main(["--config", str(cfg), "--out", str(Path(d) / "r.json")])
+            self.assertEqual(rc, 3)                                           # config error, never a verdict
+            self.assertIn("writes_frozen must be a JSON boolean", err.getvalue())
+            self.assertFalse((Path(d) / "r.json").exists())
+
+    def test_submit_failure_keeps_submitted_evidence_and_errors_the_rest(self):
+        # Review-6 #5: a worker dies while ranges are still being submitted, so submit() raises
+        # BrokenProcessPool after range 1 already completed with a MISMATCH.
+        from concurrent.futures import Future
+        from concurrent.futures.process import BrokenProcessPool
+        t = tgt_rows()
+        t[3]["price"] = Decimal("1.5")                                        # id 4 differs (range 1)
+        opts = cec.merge_options({})
+        s, tt = MemSide("mysql", mysql_table(src_rows()), "source"), MemSide("postgres", pg_table(t), "target")
+        plan, _ = cec.plan_table(s, tt, "shop.items", opts)
+        rg = [(None, 10), (10, 20), (20, None)]
+
+        class DyingPool:
+            calls = 0
+
+            def submit(self, fn, table, key_range, wall_deadline):
+                DyingPool.calls += 1
+                if DyingPool.calls > 1:
+                    raise BrokenProcessPool("A process in the process pool was terminated abruptly")
+                f = Future()
+                f.set_result(cec.compare_table(s, tt, plan, opts, key_range=key_range))
+                return f
+
+        parts, unusable = cec.submit_and_collect(DyingPool(), cec._worker_range, "shop.items", rg,
+                                                 time.time() + 30, time.monotonic() + 30)
+        self.assertTrue(unusable)
+        self.assertEqual(parts[0]["verdict"], "MISMATCH")
+        self.assertEqual([p["range_error"]["range"] for p in parts[1:]], [["10", "20"], ["20", None]])
+        self.assertIn("not submitted: worker pool failed (BrokenProcessPool", parts[1]["range_error"]["error"])
+        m = cec.merge_range_reports(parts, rg, 3, writes_frozen=True)
+        self.assertEqual(m["verdict"], "MISMATCH")                            # MISMATCH precedence kept
+        self.assertEqual(m["mismatches"]["examples"]["different"][0]["key"], ["4"])
+        self.assertEqual((len(m["range_errors"]), m["parallel"]["ranges_without_evidence"]), (2, 2))
+        self.assertEqual(m["rows"]["source"], 10)
+
+    def test_range_started_after_the_budget_is_a_range_error(self):
+        # Review-6 #9: a queued range whose budget expired before it started used to come back
+        # as an ordinary NEEDS_REVIEW, so ranges_without_evidence stayed 0.
+        opts = cec.merge_options({})
+        s, t = MemSide("mysql", mysql_table(src_rows()), "source"), MemSide("postgres", pg_table(tgt_rows()), "target")
+        plan, _ = cec.plan_table(s, t, "shop.items", opts)
+        rg = [(None, 15), (15, None)]
+        first = cec.compare_table(s, t, plan, opts, key_range=rg[0])
+        with mock.patch.dict(cec._W, {"src": s, "tgt": t, "opts": opts, "q": None}):
+            late = cec._worker_range("shop.items", rg[1], time.time() - 1)   # deadline already passed
+        self.assertEqual(late["range_error"]["range"], ["15", None])
+        self.assertIn("before this range started", late["range_error"]["error"])
+        m = cec.merge_range_reports([first, late], rg, 2, writes_frozen=True)
+        self.assertEqual(m["verdict"], "NEEDS_REVIEW")
+        self.assertEqual((m["parallel"]["ranges_without_evidence"], len(m["range_errors"])), (1, 1))
+
+    def test_kill_pool_terminates_running_workers(self):
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+        fut = pool.submit(time.sleep, 120)
+        deadline = time.monotonic() + 60
+        while not pool._processes and time.monotonic() < deadline:
+            time.sleep(0.05)
+        procs = list(pool._processes.values())
+        time.sleep(0.5)
+        t0 = time.monotonic()
+        cec._kill_pool(pool)
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertTrue(procs and all(not p.is_alive() for p in procs))
+        from concurrent.futures.process import BrokenProcessPool
+        with self.assertRaises((BrokenProcessPool, Exception)):              # never a result from a killed worker
+            fut.result(timeout=10)
+
+    def test_ineligible_plans(self):
+        s, t = MemSide("mysql", mysql_table(src_rows(), pk=()), "source"), MemSide("postgres", pg_table(tgt_rows(), pk=()), "target")
+        plan, _ = cec.plan_table(s, t, "shop.items", OPTS)
+        self.assertFalse(cec.parallel_eligible(plan))
+        with self.assertRaises(cec.CompareError):
+            cec.merge_options({"workers": 0})
+
+
+class PartialScopeTests(unittest.TestCase):
+    """OBS-37: key_range / tail_keys partial scans for in-freeze quick checks on hot tables."""
+
+    def _run(self, table_opts, src=None, tgt=None):
+        src, tgt = src or mysql_table(src_rows()), tgt or pg_table(tgt_rows())
+        s, t = MemSide("mysql", src, "source"), MemSide("postgres", tgt, "target")
+        return cec.compare_tables(s, t, ["shop.items"], {"tables": {"shop.items": table_opts}})
+
+    def test_tail_keys_compares_only_the_newest_keys_and_is_marked_partial(self):
+        tgt = pg_table(tgt_rows())
+        tgt[("shop", "items")]["rows"][4]["price"] = Decimal("999.5")     # id 5: an OLD key differs
+        rep = self._run({"tail_keys": 10}, tgt=tgt)
+        tr = rep["tables"]["shop.items"]
+        self.assertEqual(tr["verdict"], "MATCH", "id 5 is outside the tail (20, +inf)")
+        self.assertEqual((tr["rows"]["source"], tr["coverage"]["key_range"]), (10, ["20", None]))
+        self.assertEqual(rep["coverage"], "partial")
+        self.assertIn("PARTIAL scan", " ".join(tr["notes"]))
+        tgt[("shop", "items")]["rows"][24]["price"] = Decimal("999.5")    # id 25: inside the tail
+        self.assertEqual(self._run({"tail_keys": 10}, tgt=tgt)["tables"]["shop.items"]["verdict"], "MISMATCH")
+
+    def test_key_range_and_full_scan_coverage(self):
+        tr = self._run({"key_range": [None, 5]})["tables"]["shop.items"]
+        self.assertEqual((tr["verdict"], tr["rows"]["source"], tr["coverage"]["key_range"]), ("MATCH", 5, [None, "5"]))
+        full = self._run({})
+        self.assertEqual(full["coverage"], "full")
+        self.assertNotIn("coverage", full["tables"]["shop.items"])
+
+    def test_scope_options_are_validated(self):
+        for bad in ({"key_range": [5, 1]}, {"key_range": ["1", 5]}, {"key_range": [1]}, {"tail_keys": 0},
+                    {"tail_keys": True}, {"tail_keys": "10"}, {"tail_keys": 5, "key_range": [None, 5]}):
+            with self.assertRaises(cec.CompareError, msg=bad):
+                cec.merge_options({"tables": {"shop.items": bad}})
+
+
+class ProgressTests(unittest.TestCase):
+    def test_progress_file_and_stderr_lines(self):
+        import io
+        clock = [0.0]
+        buf = io.StringIO()
+        d = Path(tempfile.mkdtemp(prefix="cec-prog-"))
+        try:
+            path = d / "progress.json"
+            prog = cec.Progress(stream=buf, path=path, interval=5, workers=1, tables_total=1, clock=lambda: clock[0])
+            prog.start_table("shop.items", 1000)
+            for _ in range(10):
+                clock[0] += 1
+                prog.add(50)
+            snap = json.loads(path.read_text())
+            self.assertEqual((snap["table"], snap["rows_compared"], snap["rows_total_estimate"], snap["workers"]),
+                             ("shop.items", 500, 1000, 1))      # emitted at t=0, 5, 10 (every 5 s)
+            self.assertAlmostEqual(snap["rows_per_s"], 50.0)
+            self.assertEqual(snap["eta_s"], 10)
+            for k in ("rows_compared", "rows_total_estimate", "rows_per_s", "eta_s", "updated_at", "workers", "state"):
+                self.assertIn(k, snap)
+            prog.end_table()
+            prog.finish("MATCH")
+            final = json.loads(path.read_text())
+            self.assertEqual((final["state"], final["overall"], final["tables_done"]), ("done", "MATCH", 1))
+            self.assertIn("rows/s", buf.getvalue())
+            self.assertEqual([p.name for p in d.iterdir()], ["progress.json"])     # no temp files left
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_compare_tables_reports_progress_rows(self):
+        got = []
+
+        class P(cec.Progress):
+            def add(self, n):
+                got.append(n)
+                super().add(n)
+        prog = P(stream=None, interval=0, tables_total=1)
+        s, t = MemSide("mysql", mysql_table(src_rows(5000)), "source"), MemSide("postgres", pg_table(tgt_rows(5000)), "target")
+        rep = cec.compare_tables(s, t, ["shop.items"], {}, progress=prog)
+        self.assertEqual(rep["overall"], "MATCH")
+        self.assertEqual(sum(got), 5000)
+        self.assertEqual(prog.tables_done, 1)
 
 
 class ClassifyAndPairTests(unittest.TestCase):
@@ -563,14 +1030,14 @@ class EngineTests(unittest.TestCase):
         rows = [{"id": i, "flag": 1, "price": Decimal("1"), "created": None, "doc": None, "email": f"a{i}"} for i in range(1200)]
         trows = [{"id": Decimal(i), "flag": True, "price": Decimal("1"), "created": None, "doc": None, "email": f"a{i}"}
                  for i in range(1200)]
-        real = cec.Normalizer.canon
+        real = cec.row_digest
 
-        def slow_canon(self, *a, **k):
-            clock[0] += 0.01
-            return real(self, *a, **k)
+        def slow_digest(values):      # per-row normalization + hashing (canon has fast paths)
+            clock[0] += 0.06
+            return real(values)
         opts = cec.merge_options({"max_seconds": 5, "multiset_max_rows": 5000})
         s, t = MemSide("mysql", mysql_table(rows, pk=()), "source"), MemSide("postgres", pg_table(trows, pk=()), "target")
-        with mock.patch.object(cec.time, "monotonic", lambda: clock[0]), mock.patch.object(cec.Normalizer, "canon", slow_canon):
+        with mock.patch.object(cec.time, "monotonic", lambda: clock[0]), mock.patch.object(cec, "row_digest", slow_digest):
             plan, _ = cec.plan_table(s, t, "shop.items", opts)
             r = cec.compare_table(s, t, plan, opts)
         self.assertEqual((r["mode"], r["verdict"]), ("multiset", "NEEDS_REVIEW"))
@@ -1027,6 +1494,68 @@ class DockerIntegration(unittest.TestCase):
         self.assertEqual(p.returncode, 3)
         self.assertIn("never a password", p.stderr)
 
+    # OBS-8 — parallel PK-range workers give the same mismatch set as one scan (static data)
+    def test_parallel_workers_match_sequential(self):
+        cfg = {"source": side_cfg("mysql", "shop"), "target": side_cfg("postgres", "tgt")}
+        for target in ("shop.items", "shop_bad.items", "shop_dms.items"):
+            options = {"tables": {"shop.items": {"target": target}}, "max_examples": 100, "chunk_size": 7}
+            seq = self.cmp("mysql", "shop", "postgres", "tgt", ["shop.items", "shop.events"], options)
+            # static test data = writes frozen; without the flag an all-ranges MATCH is not proof
+            par = cec.compare_tables_parallel(cfg, ["shop.items", "shop.events"],
+                                              {**options, "workers": 3, "writes_frozen": True})
+            a, b = seq["tables"]["shop.items"], par["tables"]["shop.items"]
+            self.assertEqual((a["verdict"], a["rows"], a["mismatches"]), (b["verdict"], b["rows"], b["mismatches"]), target)
+            self.assertEqual((b["parallel"]["workers"], b["consistency"]), (3, "per_range_snapshots"))
+            self.assertEqual((par["consistency"], par["writes_frozen"], seq["consistency"]),
+                             ("per_range_snapshots", True, "single_snapshot"))
+            self.assertEqual(seq["overall"], par["overall"])
+            ev = par["tables"]["shop.events"]                       # key-less: sequential fallback, said so
+            self.assertEqual(ev["verdict"], seq["tables"]["shop.events"]["verdict"])
+            self.assertIn("compared sequentially", " ".join(ev["notes"]))
+
+    def test_cli_workers_and_progress_file(self):
+        cfg = Env.tmp / "cli-par.json"
+        out, prog = Env.tmp / "cli-par-report.json", Env.tmp / "cli-progress.json"
+        cfg.write_text(json.dumps({"source": side_cfg("mysql", "shop"), "target": side_cfg("postgres", "tgt"),
+                                   "tables": ["shop.items"]}))
+        p = _run([sys.executable, "-B", str(ROOT / "shared/scripts/cross_engine_compare.py"), "--config", str(cfg),
+                  "--out", str(out), "--workers", "2", "--writes-frozen", "--progress-file", str(prog),
+                  "--progress-interval", "0"], env={**os.environ})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        rep = json.loads(out.read_text())
+        self.assertEqual((rep["overall"], rep["tables"]["shop.items"]["rows"]["source"]), ("MATCH", 60))
+        final = json.loads(prog.read_text())
+        self.assertEqual((final["state"], final["overall"], final["workers"], final["tables_done"]), ("done", "MATCH", 2, 1))
+        self.assertIn("progress shop.items:", p.stderr)
+        self.assertIn("rows/s", p.stderr)
+        live = _run([sys.executable, "-B", str(ROOT / "shared/scripts/cross_engine_compare.py"), "--config", str(cfg),
+                     "--out", str(out), "--workers", "2", "--no-progress"], env={**os.environ})
+        self.assertEqual(live.returncode, 2, live.stderr)                      # live parallel MATCH = not proof
+        r = json.loads(out.read_text())
+        self.assertEqual((r["overall"], r["writes_frozen"], r["tables"]["shop.items"]["unproven_verdict"]),
+                         ("NEEDS_REVIEW", False, "MATCH"))
+
+    # OBS-9 — the DMS zero-date output (0101-01-01 on Aurora PG 17) is its own finding
+    def test_dms_zero_date_0101_is_flagged(self):
+        t = pg("postgres", "tgt")
+        try:
+            t.run("CREATE SCHEMA IF NOT EXISTS shop_z")
+            t.run("DROP TABLE IF EXISTS shop_z.items")
+            t.run("CREATE TABLE shop_z.items (LIKE shop.items INCLUDING ALL)")
+            t.run("INSERT INTO shop_z.items SELECT * FROM shop.items")
+            t.run("UPDATE shop_z.items SET born = DATE '0101-01-01' WHERE id = 5")      # the zero-date row
+            t.run("GRANT USAGE ON SCHEMA shop_z TO cmp_ro")
+            t.run("GRANT SELECT ON ALL TABLES IN SCHEMA shop_z TO cmp_ro")
+        finally:
+            t.close()
+        rep = self.cmp("mysql", "shop", "postgres", "tgt", ["shop.items"], {"tables": {"shop.items": {"target": "shop_z.items"}}})
+        r = rep["tables"]["shop.items"]
+        self.assertEqual(r["verdict"], "MISMATCH")
+        self.assertEqual(r["mismatches"]["zero_date_as_0101"], {"born": 1})
+        self.assertEqual(r["zero_date_findings"][0]["keys"], [["5"]])               # paired per key
+        self.assertEqual(r["mismatches"]["differing_columns"], {"born": 1})
+        self.assertEqual(r["zero_date_findings"][0]["class"], "zero_date_as_0101")
+
     def test_compare_session_is_read_only(self):
         s = cec.connect_side(side_cfg("mysql", "shop", user="root", pw_env="CEC_IT_ROOT_PW"), "source")
         t = cec.connect_side(side_cfg("postgres", "tgt", user="postgres", pw_env="CEC_IT_ROOT_PW"), "target")
@@ -1218,6 +1747,7 @@ ALTER SCHEMA 'shop' RENAME TO '{schema}'
 
     def test_lambda_run_day_cross_family_matches_standalone(self):
         import soak_check_lambda as L
+        L.RECHECK_SLEEP = lambda seconds: None
         cfg = {"source_engine": "mysql", "target_engine": "aurora-postgresql", "tables": ["shop.items", "shop.events"],
                "checksum_tables": ["shop.items"], "watermark": {"pk_margin": 5}, "cross_engine": {}, "family": "mysql"}
         sconn = my("cmp_ro", "shop", Env.ro_pw)

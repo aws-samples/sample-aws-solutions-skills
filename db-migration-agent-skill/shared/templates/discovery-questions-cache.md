@@ -149,7 +149,9 @@ support TLS, ACL usernames, and cluster mode? I'll also read client names/versio
 For every application/service that connects: where does it get the address — environment
 variable, systemd unit, config file, secret, Sentinel master name, a proxy (twemproxy,
 Envoy), or a hardcoded IP/seed-node list? This decides, at cutover, between "update one
-secret" and "edit a script on a server with no deployment pipeline."
+secret" and "edit a script on a server with no deployment pipeline." **And how does it read
+its credentials** — `EnvironmentFile`, a config file, a secret manager, an environment
+variable? That decides how the new credentials reach the host (planned by GATE 2).
 
 **If any part is unknown, confirm access now:** for each known client, does a writable
 path exist to change and revert its effective cache-address setting (SSM/SSH or the
@@ -182,7 +184,11 @@ Korean PIPA, ISMS-P, network separation)? These decide TLS, RBAC and region.
 **Answer:** {list any, or "none that apply"}
 
 **11a. Current access control.** No password / a single password (`requirepass`) / ACL
-users (which ones) / TLS on? (Never send a password — just say which kind.)
+users (which ones) / TLS on? (Never send a password — just say which kind.) And **how each
+application actually authenticates**: password only (`AUTH <password>`), username + password
+(`AUTH <user> <password>`), or nothing — I'll confirm it from the app's real service unit,
+connection code and client library during the assessment, because a test client that logs in
+differently proves nothing about your app.
 
 **Answer:**
 

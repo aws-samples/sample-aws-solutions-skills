@@ -712,7 +712,8 @@ def compare_redis(cfg, source, target, progress=None, clock=time.monotonic, slee
         entry = {"db": db, "target_db": tdb, "source_keys": s_keys, "target_keys": t_keys,
                  "source_expires": src_ks.get(db, {}).get("expires", 0),
                  "target_expires": tgt_ks.get(tdb, {}).get("expires", 0),
-                 "key_count_match": abs(s_keys - t_keys) <= tol, "sampled": 0, "mismatches": 0,
+                 "key_count_match": abs(s_keys - t_keys) <= tol, "key_count_tolerance": tol,
+                 "sampled": 0, "mismatches": 0,
                  "uncompared": 0, "scan_complete": True}
         keyspaces.append(entry)
         if budget_hit:
@@ -1005,7 +1006,8 @@ def validation_patch(args, report):
             # Merge-patch drops nulls, so the four-state result is also published as a word.
             items.append({"name": f"db{ks['db']}", "keys_source": ks["source_keys"], "keys_target": ks["target_keys"],
                           "sampled": ks["sampled"], "mismatches": ks["mismatches"],
-                          "key_count_match": ks["key_count_match"], "sample_match": ks["sample_match"],
+                          "key_count_match": ks["key_count_match"], "key_count_tolerance": ks.get("key_count_tolerance", 0),
+                          "sample_match": ks["sample_match"],
                           "comparison": {True: "match", False: "mismatch", None: "unknown",
                                          "not_applicable": "not_applicable"}[res],
                           "status": "validated" if res is True else "loaded"})

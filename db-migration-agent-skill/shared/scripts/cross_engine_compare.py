@@ -13,6 +13,11 @@ Used three ways:
      The config has the same `source`/`target` shape as soak-config.json (engine, host,
      port, user, database, password_env | secret_arn, ssl_ca, ssl_insecure) plus an
      optional `cross_engine` options object (DEFAULT_OPTIONS below).
+     --workers N: parallel PK-range worker processes (each range in its own snapshot pair —
+     per-range snapshots, NOT a single consistent cut: a MATCH is proof only with
+     --writes-frozen (cutover freeze); on live data an all-ranges MATCH is NEEDS_REVIEW);
+     --writes-frozen: the caller asserts writes are stopped on both sides for the run;
+     --progress-file: atomically rewritten JSON progress for the dashboard (+ stderr lines).
   2. Library — soak_check.py / soak_check_lambda.py call `soak_checks()` for a
      mysql<->postgres pair (Phase 7.7), with the same watermark concept as their
      homogeneous path (pk <= min(source MAX, target MAX) - margin).
@@ -50,7 +55,8 @@ from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
-VERSION = 1
+VERSION = 3   # v2: REPEATABLE READ before the MySQL snapshot, workers, progress, 0101 zero-date finding
+#              v3: per-range consistency + writes_frozen, range_errors, coordinator deadline, paired-only 0101
 MYSQL_FAMILY = {"mysql", "mariadb", "aurora-mysql"}
 POSTGRES_FAMILY = {"postgres", "postgresql", "aurora-postgresql"}
 VERDICT_CHECK = {"MATCH": True, "MISMATCH": False, "NEEDS_REVIEW": None, "NOT_APPLICABLE": "not_applicable"}
@@ -63,7 +69,10 @@ DEFAULT_OPTIONS = {
     "bool_policy": "strict",         # strict: boolean vs integer/text column pairs are a type MISMATCH
     "tinyint1_as_boolean": True,     # MySQL TINYINT(1)/BOOL is the boolean kind
     "bit1_as_boolean": True,         # MySQL BIT(1) is the boolean kind
-    "zero_date": "null",             # MySQL 0000-00-00 dates: "null" (what DMS/pgloader write) | "distinct"
+    # MySQL 0000-00-00 dates: "null" (equal to a target NULL — what pgloader writes) | "distinct".
+    # DMS 3.6.1 wrote 0101-01-01 on Aurora PG 17 instead: paired per key, that is its own
+    # finding (zero_date_as_0101), never equal to anything.
+    "zero_date": "null",
     "text_casefold": False,          # compare text case-insensitively (collation-sensitive checks)
     "text_rstrip": False,            # ignore trailing spaces on VARCHAR/TEXT (PAD SPACE collations)
     "float4_digits": 7,
@@ -73,6 +82,14 @@ DEFAULT_OPTIONS = {
     "max_seconds": 600,
     "multiset_max_rows": 200000,     # key-less tables: compared as a multiset, bounded
     "max_examples": 20,
+    # CLI only (needs the connection config): >1 = parallel PK-range workers, one process and
+    # one snapshot pair PER RANGE — exact while writes are frozen, but on live data
+    # the ranges' snapshots differ by the scan time (see main() --help and §9).
+    "workers": 1,
+    # The caller asserts that writes are stopped on BOTH sides for the whole run (cutover
+    # freeze). Recorded in the report; with workers > 1 it is the only way a MATCH counts as
+    # proof, because each range is read in its own snapshot pair (not a single cut).
+    "writes_frozen": False,
     "include_values": False,         # report canonical values of differing columns (may be PII)
     "pg_driver": None,               # None = auto (pg8000, psycopg, psycopg2)
     # PG TIME WITH TIME ZONE vs an unzoned TIME/INTERVAL: None (default) = not comparable ->
@@ -81,7 +98,8 @@ DEFAULT_OPTIONS = {
     "timetz_policy": None,
     "tables": {},                    # per-table overrides, see _table_options
 }
-_TABLE_OPTION_KEYS = {"target", "columns", "kinds", "key", "ignore_columns", "casefold_columns", "skip"}
+_TABLE_OPTION_KEYS = {"target", "columns", "kinds", "key", "ignore_columns", "casefold_columns", "skip",
+                      "key_range", "tail_keys"}
 _KINDS = {"int", "decimal", "float4", "float8", "bool", "text", "char", "enum", "set", "json", "uuid",
           "binary", "bits", "date", "datetime", "timestamp_utc", "time", "timetz", "interval", "array", "unknown",
           "unsupported"}
@@ -117,6 +135,11 @@ def merge_options(options):
     unknown = sorted(set(options or {}) - set(DEFAULT_OPTIONS))
     if unknown:
         raise CompareError(f"unknown cross_engine option(s): {unknown}")
+    if "writes_frozen" in (options or {}) and not isinstance(options["writes_frozen"], bool):
+        # An assertion that turns per-range snapshots into proof must be unambiguous: only a
+        # JSON true/false is accepted ("false", 0, null, ... are configuration errors).
+        raise CompareError(f"writes_frozen must be a JSON boolean (true/false), got {options['writes_frozen']!r} "
+                           f"({type(options['writes_frozen']).__name__})")
     opts.update({k: v for k, v in (options or {}).items() if v is not None})
     if opts["bool_policy"] not in ("strict", "numeric"):
         raise CompareError("bool_policy must be 'strict' or 'numeric'")
@@ -124,6 +147,8 @@ def merge_options(options):
         raise CompareError("zero_date must be 'null' or 'distinct'")
     if opts["timetz_policy"] not in (None, "utc", "wallclock"):
         raise CompareError("timetz_policy must be null, 'utc' or 'wallclock'")
+    if not 1 <= int(opts["workers"]) <= 64:
+        raise CompareError("workers must be 1-64")
     if not 0 <= int(opts["timestamp_precision"]) <= 6:
         raise CompareError("timestamp_precision must be 0-6")
     for t, to in (opts["tables"] or {}).items():
@@ -133,8 +158,49 @@ def merge_options(options):
         for col, kind in ((to or {}).get("kinds") or {}).items():
             if kind not in _KINDS:
                 raise CompareError(f"unknown kind {kind!r} for {t}.{col}")
+        _validate_scope(t, to or {})
     _tzinfo(opts["naive_timezone"])  # validate early
     return opts
+
+
+def _validate_scope(table, to):
+    """Per-table partial-scan options (in-freeze quick checks): key_range [lo, hi] = keys in
+    (lo, hi] on the single integer key (null = unbounded), or tail_keys N = the last N key values
+    by the source's MAX(key) at snapshot time. Mutually exclusive; JSON integers only."""
+    kr, tk = to.get("key_range"), to.get("tail_keys")
+    if kr is not None and tk is not None:
+        raise CompareError(f"table {table!r}: key_range and tail_keys are mutually exclusive")
+    if kr is not None:
+        if (not isinstance(kr, list) or len(kr) != 2
+                or any(b is not None and (isinstance(b, bool) or not isinstance(b, int)) for b in kr)):
+            raise CompareError(f"table {table!r}: key_range must be [lo, hi] of JSON integers or null (meaning (lo, hi])")
+        if kr[0] is not None and kr[1] is not None and kr[0] >= kr[1]:
+            raise CompareError(f"table {table!r}: key_range lo must be < hi")
+    if tk is not None and (isinstance(tk, bool) or not isinstance(tk, int) or tk < 1):
+        raise CompareError(f"table {table!r}: tail_keys must be a positive JSON integer")
+
+
+def scope_range(src_side, plan, opts):
+    """(lo, hi] for a table with key_range / tail_keys, else None. Read inside the snapshot."""
+    to = _table_options(opts, plan.table)
+    if to.get("key_range") is None and to.get("tail_keys") is None:
+        return None
+    if not parallel_eligible(plan):
+        raise CompareError("key_range / tail_keys need one integer key column on both sides")
+    if to.get("key_range") is not None:
+        return tuple(to["key_range"])
+    hi = src_side.query(minmax_sql(src_side.dialect, plan.src, plan.key[0].src.name, "MAX"))[0][0]
+    if hi is None:
+        return (None, None)
+    return (int(hi) - int(to["tail_keys"]), None)   # upper end open: keys above the source MAX are compared too
+
+
+def _mark_partial(rep, key_range, to):
+    rng = [None if b is None else str(b) for b in key_range]
+    rep["coverage"] = {"partial": True, "key_range": rng, "tail_keys": to.get("tail_keys")}
+    rep["notes"].append(f"PARTIAL scan: only keys in ({rng[0]}, {rng[1]}] were compared — evidence for that key "
+                        "range only, never a full-table result")
+    return rep
 
 
 # ── Identifiers and literals ────────────────────────────────────────────────────────────
@@ -192,8 +258,16 @@ def literal(dialect, value):
 
 
 _READ_ONLY = re.compile(r"^\s*(SELECT|WITH|SHOW|SET\s+(SESSION\s+)?(time_zone|TimeZone|max_execution_time|max_statement_time"
-                        r"|statement_timeout)\b|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK)\b",
+                        r"|statement_timeout)\b|SET\s+SESSION\s+TRANSACTION\s+ISOLATION\s+LEVEL\s+REPEATABLE\s+READ\s*$"
+                        r"|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK)\b",
                         re.IGNORECASE)
+# MySQL-family snapshot: `START TRANSACTION WITH CONSISTENT SNAPSHOT` is IGNORED unless the
+# session isolation is REPEATABLE READ (MySQL 8.0/8.4 manual, §15.3.1: "For all other isolation
+# levels, the WITH CONSISTENT SNAPSHOT clause is ignored") — a server/parameter group with
+# transaction_isolation=READ-COMMITTED turns the "snapshot" into a moving view (dry run 5:
+# 78 spurious money mismatches). SESSION scope also applies on MariaDB and the Aurora MySQL
+# writer (Aurora readers are always REPEATABLE READ). Shared with soak_check*.py.
+MYSQL_SNAPSHOT_ISOLATION = "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
 
 
 _QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`")
@@ -555,7 +629,30 @@ def dec_str(v):
     return format(d.normalize(_HIGH), "f")
 
 
+_JSON_ESC = re.compile(r'[\x00-\x1f"\\]')
+
+
+def _jstr(s):
+    """json.dumps(s, ensure_ascii=False) without the encoder call for the common case (no
+    character json escapes: control chars, quote, backslash) — identical output."""
+    return '"' + s + '"' if _JSON_ESC.search(s) is None else json.dumps(s, ensure_ascii=False)
+
+
+def _kv_key(kv):
+    return str(kv[0])
+
+
 def _json_canon(o):
+    t = type(o)
+    if t is str:
+        return _jstr(o)
+    if t is int:
+        return str(o)
+    if t is dict:
+        return "{" + ",".join(_jstr(k if type(k) is str else str(k)) + ":" + _json_canon(v)
+                              for k, v in sorted(o.items(), key=_kv_key)) + "}"
+    if t is list:
+        return "[" + ",".join([_json_canon(x) for x in o]) + "]"
     if o is None:
         return "null"
     if o is True:
@@ -615,6 +712,39 @@ def parse_pg_array(text):
 _TIMETZ_TEXT = re.compile(r"^(\d{1,3}):(\d{2}):(\d{2})(\.\d+)?(?:([+-])(\d{2}):?(\d{2})?)?$")
 _ZERO_DATE = re.compile(r"^\d{4}-(00-\d{2}|\d{2}-00)|^0000-00-00")
 _BOOL_TRUE, _BOOL_FALSE = {"1", "t", "true", "y", "yes", "on"}, {"0", "f", "false", "n", "no", "off"}
+# What DMS actually wrote for MySQL zero dates on Aurora PostgreSQL 17 (DMS 3.6.1, dry run 5):
+# 0101-01-01 [00:00:00] — not NULL. Reported as its own finding class, never equal to NULL.
+_SENTINEL_0101 = re.compile(r"^0101-01-01(?:[ T]00:00:00(?:\.0+)?)?(?:Z|[+-]00(?::?00)?)?$")
+ZERO_DATE_0101_MESSAGE = ("MySQL zero date (0000-00-00) landed as 0101-01-01 on the target for the listed keys (paired "
+                          "per key) — DMS behaviour observed on Aurora PostgreSQL 17 / DMS 3.6.1 (not NULL as often "
+                          "assumed). Remediate PER KEY from the reported keys (or a key list re-derived from the source's "
+                          "zero dates) — never a blanket UPDATE on the value, which would also erase genuine 0101-01-01 "
+                          "dates — after full load AND again right before cutover (CDC UPDATEs of rows still holding the "
+                          "zero date re-apply the after-image), then re-validate")
+ZERO_DATE_INCONCLUSIVE_MESSAGE = ("source zero dates and target 0101-01-01 values were both seen in a key-less (multiset) "
+                                  "comparison, so they cannot be paired by key — INCONCLUSIVE, not a zero-date finding: "
+                                  "add a `key` for this table and re-run to get paired evidence; do not run a blanket "
+                                  "UPDATE on the value")
+
+
+def is_zero_date_raw(v):
+    """A MySQL zero/partial-zero date as drivers return it (pymysql: the text)."""
+    if isinstance(v, (bytes, bytearray)):
+        v = bytes(v).decode("ascii", "replace")
+    return isinstance(v, str) and _ZERO_DATE.match(v.strip()) is not None
+
+
+def is_0101_sentinel(v):
+    """0101-01-01 at midnight (date, naive/UTC datetime, or text)."""
+    if isinstance(v, dt.datetime):
+        if v.tzinfo is not None and v.utcoffset():
+            v = v.astimezone(dt.timezone.utc)
+        return (v.year, v.month, v.day, v.hour, v.minute, v.second, v.microsecond) == (101, 1, 1, 0, 0, 0, 0)
+    if isinstance(v, dt.date):
+        return (v.year, v.month, v.day) == (101, 1, 1)
+    if isinstance(v, (bytes, bytearray)):
+        v = bytes(v).decode("ascii", "replace")
+    return isinstance(v, str) and _SENTINEL_0101.match(v.strip()) is not None
 
 
 class Normalizer:
@@ -634,6 +764,7 @@ class Normalizer:
         self.tz = _tzinfo(opts["naive_timezone"])
         self.precision = int(opts["timestamp_precision"])
         self.zero_dates = Counter()
+        self.sentinels_0101 = Counter()     # 0101-01-01 values seen per side (DMS zero-date output)
 
     def canon(self, v, col, as_kind, side="source", casefold=False, bits=None, nofold=False):
         if v is None:
@@ -670,8 +801,12 @@ class Normalizer:
             if k == "bits":
                 return self._bits(v, bits or col.bits or 1)
             if k == "date":
+                if is_0101_sentinel(v):
+                    self.sentinels_0101[side] += 1
                 return self._date(v, side)
             if k == "ts":
+                if is_0101_sentinel(v):
+                    self.sentinels_0101[side] += 1
                 return self._ts(v, col, side)
             if k == "time":
                 return self._time(v)
@@ -682,6 +817,67 @@ class Normalizer:
         except (ValueError, TypeError, ArithmeticError, OverflowError) as e:
             return f"!{k}:{type(e).__name__}:{v!r}"
         return self._text(v)
+
+    def compile(self, col, as_kind, side="source", casefold=False, bits=None, nofold=False):
+        """canon() specialised for one column: exact-type fast paths for the common driver
+        types (int, Decimal, str, bool, date, datetime) and canon() for everything else.
+        Output is identical to canon() for every value (test_cross_engine_compare asserts it)."""
+        canon = self.canon
+
+        def slow(v):
+            return canon(v, col, as_kind, side, casefold, bits, nofold)
+        k = as_kind
+        if k == "numeric":
+            def f(v):
+                t = type(v)
+                if t is int:
+                    return str(v)
+                if t is Decimal and v.is_finite():
+                    return "0" if not v else format(v.normalize(_HIGH), "f")
+                return slow(v)
+            return f
+        if k in ("text", "char", "str"):
+            rstrip = k == "char" or bool(self.opts["text_rstrip"])
+            fold = bool((casefold or self.opts["text_casefold"]) and k != "str" and not nofold)
+
+            def f(v):
+                if type(v) is str:
+                    if rstrip:
+                        v = v.rstrip(" ")
+                    return v.casefold() if fold else v
+                return slow(v)
+            return f
+        if k == "bool":
+            def f(v):
+                if v is True:
+                    return "true"
+                if v is False:
+                    return "false"
+                if type(v) is int and v in (0, 1):
+                    return "true" if v else "false"
+                return slow(v)
+            return f
+        if k == "date":
+            def f(v):
+                if type(v) is dt.date and v.year != 101:
+                    return v.isoformat()
+                return slow(v)
+            return f
+        if k == "ts":
+            naive_ok = col.phys == "timestamp_utc" or self.tz is dt.timezone.utc
+            cut = 19 if self.precision == 0 else 20 + self.precision
+            zero = dt.timedelta(0)
+
+            def f(v):
+                if type(v) is dt.datetime and v.year != 101:
+                    if v.tzinfo is None:
+                        if naive_ok:
+                            return v.isoformat(" ", "microseconds")[:cut]
+                    elif v.utcoffset() == zero:
+                        return v.replace(tzinfo=None).isoformat(" ", "microseconds")[:cut]
+                return slow(v)
+            return f
+        return slow
 
     @staticmethod
     def _text(v):
@@ -838,14 +1034,16 @@ class Normalizer:
 
 
 def row_digest(values):
-    h = hashlib.sha256()
+    """sha256 over b"\x00N;" (NULL) or b"\x01<utf-8 byte length>:<utf-8 bytes>" per value —
+    built as one str and encoded once (same bytes as one update per value)."""
+    parts = []
+    add = parts.append
     for c in values:
         if c is None:
-            h.update(b"\x00N;")
+            add("\x00N;")
         else:
-            b = c.encode("utf-8", "surrogatepass")
-            h.update(b"\x01" + str(len(b)).encode() + b":" + b)
-    return h.digest()
+            add(f"\x01{len(c) if c.isascii() else len(c.encode('utf-8', 'surrogatepass'))}:{c}")
+    return hashlib.sha256("".join(parts).encode("utf-8", "surrogatepass")).digest()
 
 
 # ── Sides ───────────────────────────────────────────────────────────────────────────────
@@ -882,7 +1080,8 @@ class SqlSide:
         """UTC session time zone (MySQL TIMESTAMP / PG timestamptz come back as UTC), a
         server-side per-statement timeout (independent of the driver: MySQL
         max_execution_time for SELECTs, MariaDB max_statement_time, PostgreSQL
-        statement_timeout), then one READ ONLY consistent-snapshot transaction."""
+        statement_timeout), then one READ ONLY consistent-snapshot transaction — on MySQL
+        after forcing the session to REPEATABLE READ (see MYSQL_SNAPSHOT_ISOLATION)."""
         if self.dialect == "postgres" and hasattr(self.conn, "autocommit"):
             try:
                 self.conn.autocommit = True   # DB-API drivers: our explicit BEGIN must start the txn
@@ -898,6 +1097,7 @@ class SqlSide:
                     raise
                 except Exception:          # MariaDB has max_statement_time (seconds) instead
                     self.query(f"SET SESSION max_statement_time = {ms / 1000.0:.3f}")
+            self.query(MYSQL_SNAPSHOT_ISOLATION)   # before START: the snapshot needs REPEATABLE READ
             self.query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
         else:
             self.query("SET TimeZone = 'UTC'")
@@ -1174,8 +1374,134 @@ def _canon_row(norm, plan, row, side):
     return vals
 
 
-def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
-    """Compares one planned table. Returns the per-table report dict."""
+def _row_fns(norm, plan, side):
+    """Per-column compiled canonicalizers (Normalizer.compile) — same output as _canon_row."""
+    return [norm.compile(cp.src if side == "source" else cp.tgt, cp.as_kind, side, casefold=cp.casefold, bits=cp.bits)
+            for cp in plan.cols]
+
+
+def _key_fns(norm, plan, side):
+    """Per-key-column canonicalizers — same ordering/equality as _canon_key: numeric keys as
+    exact numbers (int when integral: int and Decimal compare exactly), others exact text."""
+    out = []
+    for cp in plan.key:
+        col = cp.src if side == "source" else cp.tgt
+        if cp.as_kind == "numeric":
+            def f(v):
+                t = type(v)
+                if t is int:
+                    return v
+                if t is Decimal and v.is_finite() and v == v.to_integral_value():
+                    return int(v)
+                return Decimal(dec_str(v))
+        else:
+            c = norm.compile(col, cp.as_kind, side, nofold=True)
+
+            def f(v, c=c):
+                r = c(v)
+                return "" if r is None else r
+        out.append(f)
+    return out
+
+
+def _range_conds(dialect, col, key_range):
+    """(lo, hi] on one integer key column; None = unbounded on that end."""
+    lo, hi = key_range
+    q = qident(dialect, col.name)
+    conds = []
+    if lo is not None:
+        conds.append(f"{q} > {int(lo)}")
+    if hi is not None:
+        conds.append(f"{q} <= {int(hi)}")
+    return conds
+
+
+def row_estimate_sql(dialect, st):
+    s, t = str_literal(dialect, st.schema), str_literal(dialect, st.name)
+    if dialect == "mysql":
+        return f"SELECT table_rows FROM information_schema.tables WHERE table_schema={s} AND table_name={t}"
+    return ("SELECT c.reltuples FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+            f"WHERE n.nspname={s} AND c.relname={t}")
+
+
+def row_estimate(side, st):
+    """Catalog row estimate (InnoDB table_rows / PG reltuples) for progress ETA only — never
+    used for a verdict. None when unknown."""
+    try:
+        rows = side.query(row_estimate_sql(side.dialect, st))
+        v = float(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        return int(v) if v >= 0 else None
+    except CompareError:
+        raise
+    except Exception:
+        return None
+
+
+class Progress:
+    """Rows compared / estimate / rows per s / ETA -> one stderr line every `interval` s and
+    (optional) an atomically replaced JSON file the agent can mirror to the dashboard."""
+
+    def __init__(self, stream=None, path=None, interval=15.0, workers=1, tables_total=0, clock=time.monotonic):
+        self.stream, self.path, self.interval, self.workers = stream, Path(path) if path else None, float(interval), workers
+        self.tables_total, self.tables_done, self.clock = tables_total, 0, clock
+        self.table, self.rows, self.estimate, self.t0, self.last = None, 0, None, clock(), None
+        self.run_t0 = clock()
+
+    def start_table(self, table, estimate):
+        self.table, self.rows, self.estimate, self.t0 = table, 0, estimate, self.clock()
+        self.emit(force=True)
+
+    def add(self, n):
+        self.rows += int(n)
+        self.emit()
+
+    def end_table(self):
+        self.tables_done += 1
+        self.emit(force=True)
+
+    def snapshot(self, state="running"):
+        el = max(self.clock() - self.t0, 1e-9)
+        rps = self.rows / el if self.rows else 0.0
+        eta = None
+        if self.estimate and rps and self.rows < self.estimate:
+            eta = int((self.estimate - self.rows) / rps)
+        return {"tool": "cross_engine_compare", "state": state, "table": self.table, "tables_done": self.tables_done,
+                "tables_total": self.tables_total, "rows_compared": self.rows, "rows_total_estimate": self.estimate,
+                "rows_per_s": round(rps, 1), "eta_s": eta, "elapsed_s": round(self.clock() - self.run_t0, 1),
+                "workers": self.workers, "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+
+    def emit(self, force=False, state="running"):
+        now = self.clock()
+        if not force and self.last is not None and now - self.last < self.interval:
+            return
+        self.last = now
+        snap = self.snapshot(state)
+        if self.stream is not None:
+            est = f"~{snap['rows_total_estimate']:,}" if snap["rows_total_estimate"] else "?"
+            eta = f"{snap['eta_s']}s" if snap["eta_s"] is not None else "?"
+            print(f"progress {snap['table']}: {snap['rows_compared']:,} / {est} rows, {snap['rows_per_s']:,.0f} rows/s, "
+                  f"ETA {eta}, table {snap['tables_done'] + (0 if state == 'done' else 1)}/{snap['tables_total']}, "
+                  f"workers {snap['workers']}", file=self.stream, flush=True)
+        if self.path is not None:
+            tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(snap) + "\n")
+            os.replace(tmp, self.path)      # atomic: a reader never sees a half-written file
+
+    def finish(self, overall):
+        self.table = None
+        snap_state = "done"
+        self.emit(force=True, state=snap_state)
+        if self.path is not None:
+            d = self.snapshot(snap_state)
+            d["overall"] = overall
+            tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(d) + "\n")
+            os.replace(tmp, self.path)
+
+
+def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None, key_range=None, progress=None):
+    """Compares one planned table. Returns the per-table report dict. key_range = (lo, hi]
+    on the single integer key (parallel workers); progress = callable(rows_compared_delta)."""
     norm = Normalizer(opts)
     deadline = deadline if deadline is not None else time.monotonic() + float(opts["max_seconds"])
     rep = {"target_table": plan.tgt.as_dict(), "source_table": plan.src.as_dict(), "mode": plan.mode,
@@ -1190,6 +1516,11 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
                         "include_nulls": bool(bound.get("include_nulls"))}
     s_where = [bound_sql(src_side.dialect, sb["column"], sb)] if sb else []
     t_where = [bound_sql(tgt_side.dialect, tb["column"], tb)] if tb else []
+    if key_range is not None:
+        if len(plan.key) != 1:
+            raise CompareError("key_range needs exactly one key column")
+        s_where += _range_conds(src_side.dialect, plan.key[0].src, key_range)
+        t_where += _range_conds(tgt_side.dialect, plan.key[0].tgt, key_range)
     s_cols = [cp.src for cp in plan.cols]
     t_cols = [cp.tgt for cp in plan.cols]
     acc = _Acc(opts)
@@ -1198,11 +1529,36 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
     partial = order_error = None
     include_values = bool(opts["include_values"])
     max_ex = int(opts["max_examples"])
+    zero_0101, zero_0101_keys = Counter(), {}
+    date_idx = [i for i, cp in enumerate(plan.cols) if cp.as_kind in ("date", "ts") and cp.src.dialect == "mysql"]
+    s_fns, t_fns = _row_fns(norm, plan, "source"), _row_fns(norm, plan, "target")
 
-    def record_diff(key, sv, tv):
+    def canon_s(row):
+        return [None if v is None else f(v) for f, v in zip(s_fns, row)]
+
+    def canon_t(row):
+        return [None if v is None else f(v) for f, v in zip(t_fns, row)]
+    pending = [0]
+
+    def tick(n=1):
+        if progress is not None:
+            pending[0] += n
+            if pending[0] >= 2048:
+                progress(pending[0])
+                pending[0] = 0
+
+    def record_diff(key, sv, tv, s_raw=None, t_raw=None):
         acc.n_diff += 1
         cols = [cp.src.name for cp, a, b in zip(plan.cols, sv, tv) if a != b]
         acc.diff_columns.update(cols)
+        if s_raw is not None and date_idx:
+            for i in date_idx:
+                if sv[i] != tv[i] and is_zero_date_raw(s_raw[i]) and is_0101_sentinel(t_raw[i]):
+                    c = plan.cols[i].src.name
+                    zero_0101[c] += 1
+                    ks = zero_0101_keys.setdefault(c, [])
+                    if len(ks) < max_ex:
+                        ks.append([str(k) for k in key])
         if not acc.full(acc.different):
             item = {"key": [str(k) for k in key], "columns": cols}
             item["values" if include_values else "value_hashes"] = {
@@ -1235,6 +1591,13 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
             if cur["n"] >= chunk_size:
                 close_chunk()
 
+        sk_fns, tk_fns = _key_fns(norm, plan, "source"), _key_fns(norm, plan, "target")
+
+        def key_s(row):
+            return tuple([f(row[i]) for f, i in zip(sk_fns, key_idx)])
+
+        def key_t(row):
+            return tuple([f(row[i]) for f, i in zip(tk_fns, key_idx)])
         try:
             s_row, t_row = next(s_it, None), next(t_it, None)
             prev_s = prev_t = None
@@ -1243,14 +1606,15 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
                 merged += 1
                 if merged % 512 == 0 and time.monotonic() > deadline:
                     raise _Budget()
-                sk = _canon_key(norm, plan, s_row, "source", key_idx) if s_row is not None else None
-                tk = _canon_key(norm, plan, t_row, "target", key_idx) if t_row is not None else None
+                tick()
+                sk = key_s(s_row) if s_row is not None else None
+                tk = key_t(t_row) if t_row is not None else None
                 if sk is not None and prev_s is not None and not sk > prev_s:
                     raise _OrderError(f"source rows not in normalized key order at {list(map(str, sk))}")
                 if tk is not None and prev_t is not None and not tk > prev_t:
                     raise _OrderError(f"target rows not in normalized key order at {list(map(str, tk))}")
                 if tk is None or (sk is not None and sk < tk):
-                    sv = _canon_row(norm, plan, s_row, "source")
+                    sv = canon_s(s_row)
                     d = row_digest(sv)
                     s_hash.update(d); cur["s"].update(d); cur["sn"] += 1; s_n += 1
                     acc.n_missing += 1
@@ -1259,7 +1623,7 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
                     bump(sk); prev_s = sk
                     s_row = next(s_it, None)
                 elif sk is None or tk < sk:
-                    tv = _canon_row(norm, plan, t_row, "target")
+                    tv = canon_t(t_row)
                     d = row_digest(tv)
                     t_hash.update(d); cur["t"].update(d); cur["tn"] += 1; t_n += 1
                     acc.n_extra += 1
@@ -1268,12 +1632,12 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
                     bump(tk); prev_t = tk
                     t_row = next(t_it, None)
                 else:
-                    sv, tv = _canon_row(norm, plan, s_row, "source"), _canon_row(norm, plan, t_row, "target")
+                    sv, tv = canon_s(s_row), canon_t(t_row)
                     ds, dt_ = row_digest(sv), row_digest(tv)
                     s_hash.update(ds); t_hash.update(dt_); cur["s"].update(ds); cur["t"].update(dt_)
                     cur["sn"] += 1; cur["tn"] += 1; s_n += 1; t_n += 1
                     if ds != dt_:
-                        record_diff(sk, sv, tv)
+                        record_diff(sk, sv, tv, s_row, t_row)
                     bump(sk); prev_s, prev_t = sk, tk
                     s_row, t_row = next(s_it, None), next(t_it, None)
             close_chunk()
@@ -1303,10 +1667,13 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
 
             def digest_all(rows, side):
                 c = Counter()
+                canon = canon_s if side == "source" else canon_t
                 for i, r in enumerate(rows, 1):
                     if i % 512 == 0 and time.monotonic() > deadline:
                         raise _Budget()
-                    c[row_digest(_canon_row(norm, plan, r, side))] += 1
+                    if side == "source":
+                        tick()
+                    c[row_digest(canon(r))] += 1
                 return c
             s_rows = fetch(src_side, plan.src, s_cols, s_where)
             t_rows = fetch(tgt_side, plan.tgt, t_cols, t_where)
@@ -1323,6 +1690,8 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
           except _Budget:
             partial = (f"time budget ({opts['max_seconds']} s) exhausted during the multiset comparison — "
                        "partial, not a MATCH")
+    if progress is not None and pending[0]:
+        progress(pending[0])
     rep["rows"] = {"source": s_n, "target": t_n}
     if sb:
         rep["tail_rows"] = {
@@ -1338,6 +1707,10 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
     if norm.zero_dates:
         rep["zero_dates"] = {"source": norm.zero_dates.get("source", 0), "target": norm.zero_dates.get("target", 0),
                              "policy": opts["zero_date"]}
+    if norm.sentinels_0101:
+        rep["zero_date_sentinels"] = {"value": "0101-01-01", "source": norm.sentinels_0101.get("source", 0),
+                                      "target": norm.sentinels_0101.get("target", 0)}
+    _zero_date_findings(rep, zero_0101, zero_0101_keys, keyed=plan.mode == "key_chunks", max_ex=max_ex)
     if not partial and time.monotonic() > deadline:
         partial = (f"comparison finished after the time budget ({opts['max_seconds']} s) — not accepted as a MATCH; "
                    "raise max_seconds or narrow the scope")
@@ -1363,6 +1736,30 @@ def compare_table(src_side, tgt_side, plan, opts, bound=None, deadline=None):
     return rep
 
 
+def _zero_date_findings(rep, zero_0101, keys=None, keyed=True, max_ex=20):
+    """Explicit finding class for MySQL zero dates that became 0101-01-01 on the target —
+    ONLY from paired per-key evidence (the same key's source value is a zero date and its
+    target value 0101-01-01; those rows are already MISMATCH). Aggregate counters never
+    create a finding: they can't tell a converted zero date from a genuine 0101-01-01 row.
+    A key-less (multiset) table with differences and both observations is reported as
+    `zero_date_inconclusive` — a note, not a finding, never an UPDATE recommendation."""
+    keys = keys or {}
+    findings = [{"column": c, "rows": n, "class": "zero_date_as_0101", "evidence": "paired_by_key",
+                 "keys": keys.get(c, [])[:max_ex], "message": ZERO_DATE_0101_MESSAGE}
+                for c, n in sorted(zero_0101.items())]
+    if findings:
+        rep["zero_date_findings"] = findings
+        rep["mismatches"]["zero_date_as_0101"] = {f["column"]: f["rows"] for f in findings}
+        rep["notes"].append(f"{sum(f['rows'] for f in findings)} row(s): " + ZERO_DATE_0101_MESSAGE)
+        return
+    zs, zd, mm = rep.get("zero_date_sentinels") or {}, rep.get("zero_dates") or {}, rep.get("mismatches") or {}
+    differs = mm.get("missing_on_target") or mm.get("extra_on_target") or mm.get("different_rows")
+    if not keyed and differs and zs.get("target") and zd.get("source"):
+        rep["zero_date_inconclusive"] = {"source_zero_dates": zd["source"], "target_0101_values": zs["target"],
+                                         "evidence": "unpaired (multiset)", "message": ZERO_DATE_INCONCLUSIVE_MESSAGE}
+        rep["notes"].append(ZERO_DATE_INCONCLUSIVE_MESSAGE)
+
+
 def plan_table(src_side, tgt_side, table, opts):
     """(plan, None) or (None, report-with-verdict) when the table cannot be planned."""
     to = _table_options(opts, table)
@@ -1376,8 +1773,10 @@ def plan_table(src_side, tgt_side, table, opts):
     return build_plan(table, src, tgt, opts), None
 
 
-def compare_tables(src_side, tgt_side, tables, options=None, bounds=None):
-    """Full report for `tables` (no watermark unless `bounds` {table: bound} is given)."""
+def compare_tables(src_side, tgt_side, tables, options=None, bounds=None, progress=None):
+    """Full report for `tables` (no watermark unless `bounds` {table: bound} is given), all in
+    ONE snapshot pair. `workers` is ignored here (it needs connection config — see
+    compare_tables_parallel / the CLI). progress: a Progress (or None)."""
     opts = merge_options(options)
     started = dt.datetime.now(dt.timezone.utc)
     deadline = time.monotonic() + float(opts["max_seconds"])
@@ -1397,18 +1796,389 @@ def compare_tables(src_side, tgt_side, tables, options=None, bounds=None):
                     report["tables"][t] = {"verdict": "NEEDS_REVIEW", "check": None,
                                            "notes": ["time budget exhausted before this table — not compared"]}
                     continue
-                report["tables"][t] = compare_table(src_side, tgt_side, plan, opts,
-                                                    (bounds or {}).get(t), deadline)
+                if progress is not None:
+                    progress.start_table(t, row_estimate(src_side, plan.src))
+                kr = scope_range(src_side, plan, opts)
+                report["tables"][t] = compare_table(src_side, tgt_side, plan, opts, (bounds or {}).get(t), deadline,
+                                                    key_range=kr,
+                                                    progress=progress.add if progress is not None else None)
+                report["tables"][t]["consistency"] = "single_snapshot"
+                if kr is not None:
+                    _mark_partial(report["tables"][t], kr, _table_options(opts, t))
+            except CompareError as e:
+                report["tables"][t] = {"verdict": "NEEDS_REVIEW", "check": None, "notes": [str(e)]}
+            finally:
+                if progress is not None and progress.table == t:
+                    progress.end_table()
+    finally:
+        src_side.end()
+        tgt_side.end()
+    return _finish_report(report)
+
+
+def _finish_report(report):
+    verdicts = [r["verdict"] for r in report["tables"].values()]
+    report["overall"] = ("MISMATCH" if "MISMATCH" in verdicts else "NEEDS_REVIEW" if "NEEDS_REVIEW" in verdicts
+                         else "MATCH")
+    # single_snapshot: every compared table was read in one snapshot pair (one consistent cut
+    # per table); per_range_snapshots: at least one table was split into ranges, each in its
+    # own snapshot pair — not a single cut (see PARALLEL_NOTE / writes_frozen).
+    report["consistency"] = ("per_range_snapshots" if any(r.get("consistency") == "per_range_snapshots"
+                                                         for r in report["tables"].values()) else "single_snapshot")
+    report["writes_frozen"] = bool((report.get("options") or {}).get("writes_frozen"))
+    report["coverage"] = ("partial" if any((r.get("coverage") or {}).get("partial") for r in report["tables"].values())
+                          else "full")
+    report["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    return report
+
+
+# ── Parallel PK-range workers (CLI) ─────────────────────────────────────────────────────
+_W = {}
+PARALLEL_NOTE = ("parallel: {workers} worker processes over {ranges} integer-key ranges, EACH RANGE IN ITS OWN snapshot "
+                 "pair (separate transactions opened up to the scan time apart) — per-range snapshots, NOT a single "
+                 "consistent cut. Exact only while writes are frozen on both sides (--writes-frozen). On live data a "
+                 "row changed between two ranges' snapshots can show as a difference (re-check the reported keys), "
+                 "and a row whose key moved from a not-yet-read range into an already-read one can be MISSED")
+PARALLEL_UNPROVEN_NOTE = ("every range matched, but per-range snapshots are not a single cut and writes were not declared "
+                          "frozen — a row whose key moved between ranges during the scan can be missed, so this is NOT a "
+                          "MATCH-as-proof (NEEDS_REVIEW): re-run under a write freeze with --writes-frozen, or with "
+                          "--workers 1 (one snapshot pair), and reconcile any differing keys per key")
+# Seconds the coordinator waits past the budget for workers to hand back their own partial
+# (budget-exhausted) reports before it terminates them.
+PARALLEL_GRACE_S = 5.0
+
+
+def parallel_eligible(plan):
+    """One integer key column on both sides (keyset ranges by value)."""
+    return (plan.mode == "key_chunks" and len(plan.key) == 1 and plan.key[0].src.phys == "int"
+            and plan.key[0].tgt.phys in ("int", "decimal") and (plan.key[0].tgt.scale or 0) == 0)
+
+
+def key_ranges(lo, hi, parts):
+    """(lo, hi] pairs covering EVERYTHING: first unbounded below, last unbounded above, so rows
+    outside [lo, hi] at range-scan time are still compared. lo/hi = min/max key seen."""
+    lo, hi = int(lo), int(hi)
+    parts = max(1, min(int(parts), hi - lo + 1))
+    cuts = [lo - 1 + ((hi - lo + 1) * i) // parts for i in range(1, parts)]
+    bounds = [None] + cuts + [None]
+    return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+
+def _worker_init(cfg, options, queue):
+    sys.dont_write_bytecode = True
+    _W["opts"] = merge_options(options)
+    _W["q"] = queue
+    _W["src"] = connect_side(cfg["source"], "source", _W["opts"]["pg_driver"])
+    _W["tgt"] = connect_side(cfg["target"], "target", _W["opts"]["pg_driver"])
+
+
+def _worker_range(table, key_range, wall_deadline):
+    src, tgt, opts, q = _W["src"], _W["tgt"], _W["opts"], _W["q"]
+    remaining = wall_deadline - time.time()
+    if remaining <= 0:
+        return range_error(key_range, "time budget exhausted before this range started — not compared")
+    deadline = time.monotonic() + remaining
+    src.begin(remaining)
+    tgt.begin(remaining)
+    try:
+        plan, early = plan_table(src, tgt, table, opts)
+        if early is not None:
+            return early
+        return compare_table(src, tgt, plan, opts, deadline=deadline, key_range=key_range,
+                             progress=(lambda n: q.put((table, n))) if q is not None else None)
+    finally:
+        src.end()
+        tgt.end()
+
+
+def range_error(key_range, error):
+    """The per-range stand-in report for a range that produced no evidence (worker exception,
+    broken pool, coordinator deadline). Never a MATCH; other ranges' evidence is kept."""
+    return {"verdict": "NEEDS_REVIEW", "check": None,
+            "range_error": {"range": [None if b is None else str(b) for b in key_range], "error": str(error)},
+            "notes": [f"range ({key_range[0]}, {key_range[1]}] not compared: {error}"]}
+
+
+def merge_range_reports(parts, ranges, workers, writes_frozen=False):
+    """One table report from per-range reports (in key order): sums, examples in key order
+    truncated to max_examples — the same mismatch set and counts as one sequential scan. The
+    digest is sha256 over the ordered range digests (digest_scheme "ranges"). Ranges without
+    evidence are listed in `range_errors`; MISMATCH takes precedence over NEEDS_REVIEW, and an
+    all-ranges MATCH is MATCH-as-proof only with writes_frozen (or a single range)."""
+    errors = [p["range_error"] for p in parts if p.get("range_error")]
+    multi = len(ranges) > 1
+    consistency = "per_range_snapshots" if multi else "single_snapshot"
+    full = [p for p in parts if "mismatches" in p]
+    if not full:
+        verdicts = [p["verdict"] for p in parts]
+        v = "MISMATCH" if "MISMATCH" in verdicts else "NEEDS_REVIEW" if "NEEDS_REVIEW" in verdicts else "MATCH"
+        if v == "MATCH" and multi and not writes_frozen:
+            v = "NEEDS_REVIEW"
+        out = {"verdict": v, "check": VERDICT_CHECK[v], "consistency": consistency,
+               "notes": [n for p in parts for n in p.get("notes", [])]}
+        if errors:
+            out["range_errors"] = errors
+        return out
+    base = full[0]
+    rep = {k: base[k] for k in ("target_table", "source_table", "mode", "key", "columns", "type_findings",
+                                "ignored_columns", "unsupported_columns") if k in base}
+    common = set(base.get("notes", []))
+    for p in full[1:]:
+        common &= set(p.get("notes", []))
+    base_notes = [n for n in base.get("notes", []) if n in common and not n.endswith(ZERO_DATE_0101_MESSAGE)]
+    notes = []
+    rows = {"source": 0, "target": 0}
+    mm = {"missing_on_target": 0, "extra_on_target": 0, "different_rows": 0}
+    diff_cols, z0101, zd, zs = Counter(), Counter(), Counter(), Counter()
+    z_keys = {}
+    policy = None
+    ex = {"missing_on_target": [], "extra_on_target": [], "different": []}
+    s_h, t_h = hashlib.sha256(), hashlib.sha256()
+    chunk_count, chunk_bad, chunk_size = 0, [], None
+    verdicts = []
+    for p, rg in zip(parts, ranges):
+        verdicts.append(p["verdict"])
+        tag = f"range ({rg[0]}, {rg[1]}]"
+        for n in p.get("notes", []):
+            if n not in base_notes and not n.endswith(ZERO_DATE_0101_MESSAGE) and n not in notes:
+                notes.append(f"{tag}: {n}")
+        if "mismatches" not in p:
+            continue
+        rows["source"] += p["rows"]["source"]
+        rows["target"] += p["rows"]["target"]
+        for k in mm:
+            mm[k] += p["mismatches"][k]
+        diff_cols.update(p["mismatches"]["differing_columns"])
+        z0101.update(p["mismatches"].get("zero_date_as_0101") or {})
+        for f in p.get("zero_date_findings") or []:
+            z_keys.setdefault(f["column"], []).extend(f.get("keys") or [])
+        for k in ex:
+            ex[k].extend(p["mismatches"]["examples"][k])
+        s_h.update(f"{rg}:{p['digest']['source']};".encode())
+        t_h.update(f"{rg}:{p['digest']['target']};".encode())
+        if "chunks" in p:
+            chunk_size = p["chunks"]["size"]
+            chunk_count += p["chunks"]["count"]
+            chunk_bad.extend(p["chunks"]["mismatched"])
+        for side in ("source", "target"):
+            zd[side] += (p.get("zero_dates") or {}).get(side, 0)
+            zs[side] += (p.get("zero_date_sentinels") or {}).get(side, 0)
+        policy = (p.get("zero_dates") or {}).get("policy") or policy
+    rep["notes"] = base_notes + [PARALLEL_NOTE.format(workers=workers, ranges=len(ranges))] + notes
+    rep["parallel"] = {"workers": workers, "ranges": len(ranges), "snapshots": "one per range",
+                       "writes_frozen": bool(writes_frozen), "ranges_without_evidence": len(errors)}
+    rep["consistency"] = consistency
+    if errors:
+        rep["range_errors"] = errors
+    rep["rows"] = rows
+    rep["digest"] = {"source": s_h.hexdigest(), "target": t_h.hexdigest()}
+    rep["digest_scheme"] = "ranges"
+    rep["mismatches"] = {**mm, "differing_columns": dict(diff_cols), "examples": ex}
+    if chunk_size is not None:
+        rep["chunks"] = {"size": chunk_size, "count": chunk_count, "mismatched": chunk_bad}
+    if zd:
+        rep["zero_dates"] = {"source": zd["source"], "target": zd["target"], "policy": policy}
+    if zs:
+        rep["zero_date_sentinels"] = {"value": "0101-01-01", "source": zs["source"], "target": zs["target"]}
+    _zero_date_findings(rep, z0101, z_keys, keyed=True, max_ex=10 ** 9)
+    v = "MISMATCH" if "MISMATCH" in verdicts else "NEEDS_REVIEW" if "NEEDS_REVIEW" in verdicts else "MATCH"
+    if v == "MATCH" and multi and not writes_frozen:
+        v = "NEEDS_REVIEW"
+        rep["unproven_verdict"] = "MATCH"
+        rep["notes"].append(PARALLEL_UNPROVEN_NOTE)
+    rep["verdict"], rep["check"] = v, VERDICT_CHECK[v]
+    return rep
+
+
+def _truncate_examples(rep, max_ex):
+    if "mismatches" in rep:
+        for k, lst in rep["mismatches"]["examples"].items():
+            del lst[max_ex:]
+        if "chunks" in rep:
+            del rep["chunks"]["mismatched"][max_ex:]
+    for f in rep.get("zero_date_findings") or []:
+        del f["keys"][max_ex:]
+    return rep
+
+
+def collect_range_results(futs, ranges, deadline, queue=None, progress=None, grace=PARALLEL_GRACE_S,
+                          poll=0.5, clock=time.monotonic):
+    """Waits for the range futures without trusting any single one: each result is collected
+    independently (an exception becomes that range's range_error, other ranges keep their
+    evidence), progress is drained and a timed heartbeat emitted every `poll` s even when no
+    worker reports, and the wait ends at deadline + grace. Returns (parts, timed_out) — parts
+    in range order; ranges still running at the end are range_errors and their futures are
+    cancelled (the caller terminates the pool's processes when timed_out)."""
+    from concurrent.futures import wait, FIRST_COMPLETED
+    pending = set(futs)
+    timed_out = False
+    while pending:
+        left = deadline + grace - clock()
+        if left <= 0:
+            timed_out = True
+            break
+        done, pending = wait(pending, timeout=min(poll, left), return_when=FIRST_COMPLETED)
+        if queue is not None:
+            _drain(queue, progress, timeout=0)
+        if progress is not None:
+            progress.emit()                      # heartbeat: interval-gated, independent of worker messages
+    if queue is not None:
+        _drain(queue, progress, timeout=0)
+    parts = []
+    for f, rg in zip(futs, ranges):
+        if not f.done():
+            f.cancel()
+            parts.append(range_error(rg, "time budget exhausted — the coordinator stopped waiting for this range "
+                                         "(worker terminated); not compared"))
+            continue
+        try:
+            parts.append(f.result())
+        except Exception as e:                    # worker connect/driver failure, BrokenProcessPool, ...
+            parts.append(range_error(rg, f"worker failed ({type(e).__name__}: {e})"))
+    return parts, timed_out
+
+
+def submit_and_collect(pool, fn, table, ranges, wall_deadline, deadline, queue=None, progress=None, **collect_kw):
+    """Submits the ranges one at a time: a submit() failure (BrokenProcessPool after a worker
+    died, a shut-down pool, ...) stops further submissions but keeps every future already
+    submitted — their completed evidence is collected as usual — and each range that was never
+    submitted becomes a range_error. Returns (parts in range order, pool_unusable)."""
+    futs, submitted, failure = [], [], None
+    for rg in ranges:
+        try:
+            futs.append(pool.submit(fn, table, rg, wall_deadline))
+        except Exception as e:                    # BrokenProcessPool, RuntimeError (shutdown), pickling ...
+            failure = e
+            break
+        submitted.append(rg)
+    got, timed_out = collect_range_results(futs, submitted, deadline, queue, progress, **collect_kw)
+    by_range = dict(zip(submitted, got))
+    parts = [by_range[rg] if rg in by_range else
+             range_error(rg, f"not submitted: worker pool failed ({type(failure).__name__}: {failure})")
+             for rg in ranges]
+    unusable = (timed_out or failure is not None
+                or any(p.get("range_error") and "Broken" in p["range_error"]["error"] for p in got))
+    return parts, unusable
+
+
+def _kill_pool(pool):
+    """Stops a ProcessPoolExecutor whose running futures can't be cancelled: no new work,
+    then terminate its worker processes (they hold read-only snapshots only)."""
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for pr in procs:
+        try:
+            pr.terminate()
+        except Exception:
+            pass
+    for pr in procs:
+        try:
+            pr.join(timeout=5)
+        except Exception:
+            pass
+
+
+def compare_tables_parallel(cfg, tables, options=None, progress=None, src_side=None, tgt_side=None):
+    """compare_tables with `workers` processes for tables with one integer key (others run
+    sequentially in the coordinator's snapshot). Each worker opens its own connections from
+    `cfg` (password_env / secret_arn are resolved in the worker) and reads each range in a
+    new snapshot pair — see PARALLEL_NOTE for what that means on live data."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    opts = merge_options(options)
+    workers = int(opts["workers"])
+    own = src_side is None
+    if own:
+        src_side = connect_side(cfg["source"], "source", opts["pg_driver"])
+        try:
+            tgt_side = connect_side(cfg["target"], "target", opts["pg_driver"])
+        except Exception:
+            _close(src_side)
+            raise
+    started = dt.datetime.now(dt.timezone.utc)
+    wall_deadline = time.time() + float(opts["max_seconds"])
+    deadline = time.monotonic() + float(opts["max_seconds"])
+    report = {"tool": "cross_engine_compare", "version": VERSION, "started_at": started.isoformat(),
+              "source": {"dialect": src_side.dialect}, "target": {"dialect": tgt_side.dialect},
+              "options": {k: v for k, v in opts.items() if k != "tables"}, "tables": {}}
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    pool = None
+    src_side.begin(opts["max_seconds"])
+    tgt_side.begin(opts["max_seconds"])
+    try:
+        for t in tables:
+            try:
+                plan, early = plan_table(src_side, tgt_side, t, opts)
+                if early is not None:
+                    report["tables"][t] = early
+                    continue
+                if time.monotonic() > deadline:
+                    report["tables"][t] = {"verdict": "NEEDS_REVIEW", "check": None,
+                                           "notes": ["time budget exhausted before this table — not compared"]}
+                    continue
+                if progress is not None:
+                    progress.start_table(t, row_estimate(src_side, plan.src))
+                try:
+                    kr = scope_range(src_side, plan, opts)
+                    if kr is not None:   # a partial in-freeze check: one snapshot, no ranges
+                        r = compare_table(src_side, tgt_side, plan, opts, deadline=deadline, key_range=kr,
+                                          progress=progress.add if progress is not None else None)
+                        r["consistency"] = "single_snapshot"
+                        report["tables"][t] = _mark_partial(r, kr, _table_options(opts, t))
+                        continue
+                    if not parallel_eligible(plan):
+                        r = compare_table(src_side, tgt_side, plan, opts, deadline=deadline,
+                                          progress=progress.add if progress is not None else None)
+                        r["notes"].append(f"workers={workers} not used for this table: parallel ranges need one integer "
+                                          "key column on both sides — compared sequentially")
+                        r["consistency"] = "single_snapshot"
+                        report["tables"][t] = r
+                        continue
+                    k = plan.key[0]
+                    mins = [src_side.query(minmax_sql(src_side.dialect, plan.src, k.src.name, "MIN"))[0][0],
+                            tgt_side.query(minmax_sql(tgt_side.dialect, plan.tgt, k.tgt.name, "MIN"))[0][0]]
+                    maxs = [src_side.query(minmax_sql(src_side.dialect, plan.src, k.src.name, "MAX"))[0][0],
+                            tgt_side.query(minmax_sql(tgt_side.dialect, plan.tgt, k.tgt.name, "MAX"))[0][0]]
+                    mins, maxs = [int(v) for v in mins if v is not None], [int(v) for v in maxs if v is not None]
+                    ranges = key_ranges(min(mins), max(maxs), workers * 4) if mins else [(None, None)]
+                    if pool is None:
+                        pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_worker_init,
+                                                   initargs=(cfg, options, queue))
+                    parts, unusable = submit_and_collect(pool, _worker_range, t, ranges, wall_deadline, deadline,
+                                                         queue, progress)
+                    if unusable:
+                        _kill_pool(pool)
+                        pool = None
+                    report["tables"][t] = _truncate_examples(
+                        merge_range_reports(parts, ranges, workers, bool(opts["writes_frozen"])), int(opts["max_examples"]))
+                finally:
+                    if progress is not None:
+                        progress.end_table()
             except CompareError as e:
                 report["tables"][t] = {"verdict": "NEEDS_REVIEW", "check": None, "notes": [str(e)]}
     finally:
         src_side.end()
         tgt_side.end()
-    verdicts = [r["verdict"] for r in report["tables"].values()]
-    report["overall"] = ("MISMATCH" if "MISMATCH" in verdicts else "NEEDS_REVIEW" if "NEEDS_REVIEW" in verdicts
-                         else "MATCH")
-    report["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-    return report
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+        queue.close()
+        if own:
+            _close(src_side)
+            _close(tgt_side)
+    return _finish_report(report)
+
+
+def _drain(queue, progress, timeout):
+    import queue as _q
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            _t, n = queue.get(timeout=max(0.0, end - time.monotonic())) if timeout else queue.get_nowait()
+        except (_q.Empty, OSError, ValueError):
+            return
+        if progress is not None:
+            progress.add(n)
 
 
 # ── Soak integration (soak_check.py / soak_check_lambda.py) ─────────────────────────────
@@ -1540,7 +2310,8 @@ def soak_checks(src_side, tgt_side, tables, checksum_tables, wcfg, options=None)
                 note = "; ".join(early.get("notes") or [])
                 if t in tables:
                     row_check["detail"][t] = {"source": None, "target": None, "mode": "whole_table", "note": note,
-                                              "comparison": "cross_engine_normalized", "engines": pair}
+                                              "comparison": "cross_engine_normalized", "engines": pair,
+                                              "match": early["check"]}
                     row_oks.append(early["check"])
                     if early["check"] is not True and early["check"] != "not_applicable":
                         drift_check["pass"] = False
@@ -1548,7 +2319,7 @@ def soak_checks(src_side, tgt_side, tables, checksum_tables, wcfg, options=None)
                                                     "note": note}
                 if t in checksum_tables:
                     checksum_check["detail"][t] = {"source": None, "target": None, "mode": "whole_table", "note": note,
-                                                   "comparison": "cross_engine_normalized"}
+                                                   "comparison": "cross_engine_normalized", "match": early["check"]}
                     ck_oks.append(early["check"])
                 continue
             bound, extras, mode_or_why = _soak_bound(src_side, tgt_side, plan, wcfg, opts, t)
@@ -1577,7 +2348,7 @@ def soak_checks(src_side, tgt_side, tables, checksum_tables, wcfg, options=None)
                 ok = sc == tc
                 note = mode_or_why
                 detail = {"source": sc, "target": tc, "mode": "whole_table", "note": note, **extras}
-            detail.update({"comparison": "cross_engine_normalized", "engines": pair})
+            detail.update({"comparison": "cross_engine_normalized", "engines": pair, "match": ok})
             if t in tables:
                 row_check["detail"][t] = detail
                 row_oks.append(ok)
@@ -1602,7 +2373,7 @@ def soak_checks(src_side, tgt_side, tables, checksum_tables, wcfg, options=None)
                     "watermark": extras.get("watermark"), "note": note, "comparison": "cross_engine_normalized",
                     "engines": pair, "verdict": rep["verdict"], "rows": rep["rows"], "mismatches": rep["mismatches"],
                     "type_findings": [fd for fd in rep["type_findings"] if fd["severity"] in ("mismatch", "risk", "unsupported")],
-                    "notes": rep["notes"]}
+                    "notes": rep["notes"], "match": ck_ok}
                 ck_oks.append(ck_ok)
     finally:
         src_side.end()
@@ -1715,13 +2486,34 @@ def _close(side):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Normalized MySQL <-> PostgreSQL table comparison (read-only).")
+    ap = argparse.ArgumentParser(
+        description="Normalized MySQL <-> PostgreSQL table comparison (read-only).",
+        epilog="Throughput (1M mixed-type rows, MySQL 8.0 -> PostgreSQL 16 in local Docker, 8 vCPU Graviton, "
+               "pg8000): ~25.7k rows/s with --workers 1 (16.7k before the v2 fast paths), ~98k rows/s with "
+               "--workers 4. Small hosts are slower (dry run 5: ~7k rows/s on a t4g.small). Budget Phase 7 as "
+               "rows / rows_per_s from the progress output; see mysql-postgresql.md §9 for the in-window quick "
+               "check vs post-switch full compare split.")
     ap.add_argument("--config", required=True, type=Path,
                     help="JSON with source/target (soak-config.json shape), tables, optional cross_engine options")
     ap.add_argument("--out", type=Path, help="write the JSON report here (default: stdout)")
     ap.add_argument("--tables", help="comma-separated subset of the configured tables")
     ap.add_argument("--max-seconds", type=float)
     ap.add_argument("--include-values", action="store_true", help="report canonical values of differing columns")
+    ap.add_argument("--workers", type=int,
+                    help="parallel PK-range worker processes (default 1). Each range is read in ITS OWN snapshot "
+                         "pair — per-range snapshots, not a single cut: exact only while writes are frozen "
+                         "(--writes-frozen); on LIVE data rows written between the ranges' snapshots can show as "
+                         "differences or be missed, so an all-ranges MATCH is NEEDS_REVIEW unless --writes-frozen. "
+                         "Tables without one integer key are compared sequentially (one snapshot)")
+    ap.add_argument("--writes-frozen", action="store_true",
+                    help="assert that writes are stopped on both sides for the whole run (cutover freeze); recorded "
+                         "in the report. With --workers > 1 it is required for a MATCH to count as proof — without it "
+                         "an all-ranges MATCH is NEEDS_REVIEW (per-range snapshots are not a single cut)")
+    ap.add_argument("--progress-file", type=Path,
+                    help="atomically rewritten JSON progress (table, rows_compared, rows_total_estimate, rows_per_s, "
+                         "eta_s, updated_at, workers, state) for the dashboard")
+    ap.add_argument("--progress-interval", type=float, default=15.0, help="seconds between progress updates (15)")
+    ap.add_argument("--no-progress", action="store_true", help="no progress lines on stderr")
     args = ap.parse_args(argv)
     try:
         cfg = json.loads(args.config.read_text())
@@ -1730,6 +2522,10 @@ def main(argv=None):
             options["max_seconds"] = args.max_seconds
         if args.include_values:
             options["include_values"] = True
+        if args.workers:
+            options["workers"] = args.workers
+        if args.writes_frozen:
+            options["writes_frozen"] = True
         opts = merge_options(options)
         tables = cfg.get("tables") or []
         if args.tables:
@@ -1745,11 +2541,17 @@ def main(argv=None):
     except (CompareError, KeyError, ValueError, OSError) as e:
         print(f"cross_engine_compare.py: {type(e).__name__}: {e}", file=sys.stderr)
         return 3
+    progress = Progress(stream=None if args.no_progress else sys.stderr, path=args.progress_file,
+                        interval=args.progress_interval, workers=int(opts["workers"]), tables_total=len(tables))
     try:
-        report = compare_tables(src, tgt, tables, options)
+        if int(opts["workers"]) > 1:
+            report = compare_tables_parallel(cfg, tables, options, progress, src, tgt)
+        else:
+            report = compare_tables(src, tgt, tables, options, progress=progress)
     finally:
         _close(src)
         _close(tgt)
+    progress.finish(report["overall"])
     report["source"].update({"engine": cfg["source"].get("engine"), "host": cfg["source"].get("host"),
                              "database": cfg["source"].get("database")})
     report["target"].update({"engine": cfg["target"].get("engine"), "host": cfg["target"].get("host"),

@@ -15,7 +15,15 @@ their identities and actions must fit the existing accepted scope or a new autho
 Do not write another polling loop merely to supervise these scripts.
 
 The scripts must check the expected database/resource identities before acting, obtain
-secrets on-host, and keep credentials out of argv, generated files and diagnostic logs.
+secrets on-host, and keep credentials out of argv, generated files and diagnostic logs. The one
+exception is the narrow on-host application-config staging of `cutover-procedures.md`
+§Credential delivery, under **all** of its conditions: an authorized step whose A-block names the
+host, live file and staged file; the staged file only on the customer's application host (never
+the workstation, the engagement repo, `evidence/`, the handoff bundle or any log — including this
+helper's captured logs); the live file's owner, group and mode applied atomically; verification
+only with `shared/scripts/config_diff.py` on that host (allow-listed keys, no values otherwise);
+removal or revert after cutover is verified or when the rollback window closes, recorded in the
+plan.
 The helper captures stdout/stderr into **private local logs**, not automatically safe
 handoff material. Shell pipelines need explicit `bash` and `set -o pipefail`, or checked
 producer and consumer exits. An exit code alone never validates a migration.
