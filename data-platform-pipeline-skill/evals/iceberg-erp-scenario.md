@@ -15,13 +15,17 @@ trend and top 5 defects by supplier. Prefix acme, region ap-northeast-2. Just us
 your recommended defaults.
 ```
 
-Expected: accepts ALL defaults (Iceberg for #1, **No** for #8), reads the real schema before generating anything, screens for the six value-level corruptions, reaches GATE 3 with a proposed data model, then builds/deploys/verifies autonomously.
+Expected first response: asks the separate SMUS/standalone question and makes no AWS mutations. The phrase “recommended defaults” does not select a platform.
+
+Simulated follow-up: **“Build without SMUS.”** Then record `use_smus: false`, accept the ordinary defaults (Iceberg for #1, No for #8), read the source schema, confirm the model and build/verify the standalone pipeline.
 
 ---
 
 ## Expected output checklist
 
-### A. Defaults honored
+### A. Customer choice and defaults honored
+- [ ] The initial defaults-only request triggers the SMUS question before any provisioning; the follow-up explicitly records standalone
+- [ ] No SMUS domains, profiles, roles, assignments or job tags are created
 - [ ] "Just use your recommended defaults" → accepts **Iceberg (S3 Tables)** for #1 and **No** for #8 without re-asking each question
 - [ ] Does NOT ask for `query_region`; no split-region artifacts appear anywhere (no resource link, no second workgroup, no `residency` key)
 - [ ] Schedule defaults to daily 02:00 KST (cron `0 17 * * ? *`); DPU 2 / `G.1X`; Athena scan cap 1 GB
@@ -79,7 +83,7 @@ Expected: accepts ALL defaults (Iceberg for #1, **No** for #8), reads the real s
 ### I. Autonomy (Execution Model)
 - [ ] The agent runs `npm install`, `cdk synth`, `cdk deploy`, the Glue job, and the smoke test **itself** — it does not hand the user a list of commands to run
 - [ ] Transient failures are auto-retried; obvious column mismatches are auto-fixed
-- [ ] The user is asked only at GATE 3, on genuinely ambiguous mappings, and at GATE 5 — not for execution permission
+- [ ] The user is asked for the platform choice/GATE 1, at GATE 3, on genuinely ambiguous mappings, and at GATE 5 — not for execution permission
 
 ---
 

@@ -127,6 +127,8 @@ Then re-verify before building. Falling back to Hive is appropriate only when th
 
 ## Lake Formation strict mode
 
+**SMUS builds:** use `smus.md` §2/§4 instead of the IAMAllowedPrincipals recipe below. Preserve global and catalog-specific settings and obtain scoped project grants. Global defaults alone do not describe existing table permissions.
+
 If `get-data-lake-settings` → `CreateDatabaseDefaultPermissions` returns `[]` (empty), `IAMAllowedPrincipals` has been revoked account-wide and Glue tables created by this skill will NOT be accessible via IAM policies alone.
 
 > ⚠️ **Lake Formation strict mode detected.** Options (pick one — do not let the skill auto-remediate):

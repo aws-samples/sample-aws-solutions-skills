@@ -4,6 +4,24 @@ A production-grade Agent Skill that builds the **ingestion → storage → catal
 
 **Anthropic Agent Skills format** — a `SKILL.md` plus a `reference/` library, deployed verbatim to all three tools (Claude Code, Kiro, Codex).
 
+## Customer chooses SMUS or standalone
+
+Before any provisioning, the skill asks whether the customer wants **Amazon
+SageMaker Unified Studio integration** or a **standalone Glue/S3 Tables/Athena
+pipeline**. Neither is preselected. “Use the defaults” does not answer this
+question. An existing explicit choice is preserved for the same target.
+
+Both branches record the answer in `.platform-decision.json` and validate it
+before bootstrap, uploads, IAM/LF changes, CDK deployments or schedules. The
+standalone branch creates no SMUS resources. The SMUS branch can reuse an existing
+project or provision an IdC-backed V2 domain and SQL/ETL project, associate the
+Glue jobs, add scoped project access, and verify queries/jobs as that project.
+
+The included adapter covers same-account, same-region S3 Tables and Glue code
+jobs. Visual ETL graph authoring, Canvas and actual IdC sign-in are separate
+validation items. See
+[`reference/smus.md`](claude-code/skills/data-platform-pipeline/reference/smus.md).
+
 ## What it produces
 
 A CDK TypeScript project with a multi-stack layout:
@@ -25,6 +43,13 @@ cdk-data-platform/
 
 Plus per-function IAM roles, resource tags on everything, post-run data-quality SQL, and cost guardrails (1 GB Athena scan cap, 2-DPU Glue default, S3 lifecycle).
 
+For the default Iceberg path, the curated layer is an S3 Tables bucket and
+`mart_*` tables; the Hive/crawler layout above applies when Hive is selected.
+With SMUS selected, the generated app also includes the missing SMUS foundation
+and scoped grant stacks, plus project integration and verification scripts.
+Existing SMUS governance is preserved instead of applying the standalone
+IAM-only Lake Formation recipe.
+
 ## Layout
 
 ```
@@ -44,13 +69,18 @@ data-platform-pipeline-skill/
 
 > Note: The `SKILL.md` carries the core workflow; deeper material (CDK gotchas, Glue scripts, Iceberg/Hive paths, SAP sources, VPC connectivity, split-region catalog + query) lives in `reference/*.md` loaded on demand. The `SKILL.md` + `reference/` set is md5-identical across all three tools.
 
+The installable bundle also includes `scripts/deployment_gate.py`,
+`scripts/smus_project.py`, and `assets/smus/*.ts`. Install/copy the **whole skill
+directory**, not only SKILL.md. All three bundles are checked byte-for-byte by
+the test suite.
+
 ### SAP sources
 
 Glue has **native SAP connectors** — SAP OData (source + target, with ODP delta extraction) and SAP HANA — so an SAP source is not routed to generic JDBC or assumed to be a CSV export. The skill asks which SAP access already exists, since OData/HANA prerequisites are Basis-team work that can take weeks; if nothing is ready it builds on a representative export and hands over the prerequisite list. See `reference/sap-sources.md`.
 
 ### Validation gates
 
-The skill stops at five named checkpoints. Two are **agent-blocking** (the agent verifies and fixes itself, no user wait): preconditions, and post-run reconciliation. Three are **user-blocking** (must present and wait): scope & data residency, data model confirmation, and teardown intent. See `SKILL.md` → Validation Gates.
+The skill stops at five named checkpoints. Two are **agent-blocking** (the agent verifies and fixes itself, no user wait): preconditions, and post-run reconciliation. Three are **user-blocking** (must present and wait): platform choice/scope & data residency, data model confirmation, and teardown intent. The SMUS choice is required even when other defaults are accepted. See `SKILL.md` → Validation Gates.
 
 ### Split-region catalog + query (opt-in)
 
@@ -91,13 +121,43 @@ The skill will ask for these inputs:
 
 | Input | Example |
 |---|---|
+| `account_id` | Explicit target account, verified with STS |
+| `use_smus` | Customer explicitly chooses `true` or `false`; no default |
 | `project_prefix` | `acme` |
 | `aws_region` | `ap-northeast-2` |
 | `source_type` | `jdbc` / `s3` / `cdc` |
 | `source_details` | DB endpoint + Secrets Manager ARN, OR existing S3 path |
 | `business_questions` | "Monthly defect-rate trend, Top 5 defects by vendor" |
 
-Then six follow-up questions with **recommended defaults** (data volume, run cadence, table relationships, code-to-name mappings, partitioning, sensitive columns). The user can accept all defaults with "go with your recommendations" and skip the back-and-forth.
+Then follow-up questions cover storage pattern, volume, cadence, relationships,
+code mappings, partitions, sensitive columns and split-region needs. The customer
+can accept those defaults, but the SMUS/standalone choice still needs an explicit
+answer.
+
+## Validation
+
+From the repository root:
+
+```bash
+python3 -m unittest discover -s data-platform-pipeline-skill/tests -p 'test_*.py' -v
+npm ci --prefix data-platform-pipeline-skill/tests --ignore-scripts
+npm test --prefix data-platform-pipeline-skill/tests
+bash scripts/sync-skills.sh verify
+```
+
+Python tests exercise the pre-provisioning gate, mode/account mismatches, scoped
+integration, repeat apply, project credentials, reconciliation, failures and
+timeouts. Node tests compile the shipped TypeScript assets and inspect synthesized
+CloudFormation for both branches. They make no AWS calls.
+
+The black-box scenarios in `evals/smus-choice-scenarios.md` supplement automated
+tests; they are not a claim that every coding-agent model has been evaluated.
+For account-level acceptance, follow `reference/smus.md` §5 with authorized,
+bounded resources. Keep raw account/identity evidence outside public commits.
+
+When editing, update the Claude Code bundle, run the repository SKILL.md sync,
+and copy changed `reference/`, `scripts/`, and `assets/` into both other bundles.
+The bundle-identity test fails if any installable file differs.
 
 ## Sample data
 

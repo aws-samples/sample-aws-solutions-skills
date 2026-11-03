@@ -2,7 +2,9 @@
 name: data-platform-pipeline
 description: |
   Build a production-ready serverless data lake pipeline on AWS. Creates S3 storage
-  (3-bucket layout), Glue Catalog, ETL jobs, IAM roles, and Athena query layer.
+  (S3 Tables or Hive), Glue Catalog, ETL jobs, IAM roles, and Athena query layer.
+  Offers optional SageMaker Unified Studio integration, chosen by the customer
+  before provisioning.
   Use for AWS Data Lab builds, new data platform setup, or adding data sources
   to an existing lake. Triggers: "build data pipeline", "data lake setup",
   "ingest data", "ETL pipeline", "Glue job", "data platform", "serverless analytics".
@@ -12,9 +14,9 @@ description: |
 
 This skill builds the **ingestion → storage → catalog → query** layers of a serverless data platform. The output is a working CDK TypeScript project plus the Glue scripts and Athena DDL to run it. Downstream consumption (Quick Sight, dashboards, chat agents) is out of scope — this skill stops at "data is queryable in Athena."
 
-The skill is opinionated: best practices are baked in, not presented as options. If a choice has a clear winner for serverless analytics on AWS, the skill picks it.
+Implementation defaults are opinionated, but **whether to use SageMaker Unified Studio (SMUS) is always the customer’s decision**. Both SMUS and standalone pipelines are supported. Ask for this choice before any provisioning; there is no default.
 
-> **One deliberate exception.** If the catalog + query layers must live in a different region from storage (follow-up #8), the choice between the two mechanisms is **presented to the user, not decided** — it turns on a legal question (is data residency a mandate or a preference?) and a cost question that depends on customer-specific volume. See `reference/cross-region-query.md` §2.
+> **Another customer-owned decision.** If the catalog + query layers must live in a different region from storage (follow-up #8), the choice between the two mechanisms is **presented to the user, not decided** — it turns on a legal question (is data residency a mandate or a preference?) and a cost question that depends on customer-specific volume. See `reference/cross-region-query.md` §2.
 
 ---
 
@@ -25,6 +27,7 @@ The skill is opinionated: best practices are baked in, not presented as options.
 3. **No views on the S3 Tables catalog** — `CREATE VIEW` is unsupported (incl. cross-catalog refs from `AwsDataCatalog`). Use `mart_*` CTAS tables instead of `v_*` views on the Iceberg path.
 4. **`DROP TABLE` (purge=false) is unsupported on S3 Tables** — use `DROP TABLE ... PURGE` or the S3 Tables API (`aws s3tables delete-table`).
 5. **NEVER switch architecture due to tool versions** — upgrade the CLI/CDK instead. Tool versions are fixable in 2 minutes; architecture is permanent. Fall back to Hive only when the user explicitly opts in, or S3 Tables is genuinely unavailable in-region.
+6. **Customer platform choice before provisioning** — explicitly collect `use_smus: true|false`. Missing/ambiguous answers, “use the defaults,” an existing domain, or an ML use case do not select a mode. Before any AWS mutation, validate `.platform-decision.json` with `scripts/deployment_gate.py`. Never fabricate confirmation.
 
 > Full failure modes, the supported/unsupported Athena DDL list, encoding rules, CDK gotchas, and the known-issues table → **`reference/gotchas.md`**.
 
@@ -35,7 +38,7 @@ The skill is opinionated: best practices are baked in, not presented as options.
 > **Execution Model**: This skill does NOT just generate code for the user to run manually. You ARE the builder — you have terminal access. Generate the CDK project, then:
 > 1. Install dependencies (`npm install`)
 > 2. Synthesize (`cdk synth`) — fix any errors before proceeding
-> 3. Deploy (`cdk deploy --all --require-approval never`)
+> 3. Deploy only after the recorded customer platform choice passes `scripts/deployment_gate.py`; wrap `cdk deploy --all --require-approval never` with that gate
 > 4. Run post-deploy verification (crawlers, queries, smoke tests)
 > 5. If anything fails, diagnose, fix, and retry automatically
 > 6. Only ask the user when a DECISION is needed (not for execution permission)
@@ -44,7 +47,7 @@ The skill is opinionated: best practices are baked in, not presented as options.
 >
 > | Agent does silently | Agent asks user |
 > |---|---|
-> | `npm install`, `cdk synth`, `cdk deploy` | "Deploy to production?" (if environment=production) |
+> | `npm install`, `cdk synth`, gated `cdk deploy` after customer decisions | "Use SMUS or build without it?" (required; no default), and "Deploy to production?" (if environment=production) |
 > | Run crawlers, check schemas | "Column names don't match any known pattern — which mapping is correct?" |
 > | Fix column mismatches (if obvious mapping) | "I found 3 possible interpretations. Which one?" |
 > | Run smoke tests | Report results: "✅ All tables have data, views working" |
@@ -62,10 +65,10 @@ Five checkpoints where the build MUST stop. Two kinds, and the difference matter
 
 | Gate | Kind | When | Passes when | Detail |
 |---|---|---|---|---|
-| **GATE 1 — Scope & residency** | 🛑 USER | After §1 inputs + follow-ups, before ANY build | Storage pattern confirmed; `aws_region` set; **if #8 = yes**, `query_region` set AND the residency question answered *mandate* or *preference* AND the cross-boundary data-flow acknowledged | §1, `reference/cross-region-query.md` §2 |
-| **GATE 2 — Preconditions** | ⛔ AGENT | Before `cdk synth` | All 5 precondition checks pass; LF not in strict mode (or user chose a path); IAM simulate shows no denies; tooling versions meet minimums | §1 ⚠️ MANDATORY block |
+| **GATE 1 — Scope & residency** | 🛑 USER | After §1 inputs + follow-ups, before ANY build | **Explicit customer SMUS/standalone answer recorded**; storage pattern confirmed; `aws_region` set; **if #8 = yes**, `query_region` set AND the residency question answered *mandate* or *preference* AND the cross-boundary data-flow acknowledged | §1, `reference/cross-region-query.md` §2 |
+| **GATE 2 — Preconditions** | ⛔ AGENT | Before `cdk synth` | All 5 checks pass; selected governance path grants actual access (SMUS preserves LF settings and uses scoped grants); IAM simulation and actual grant authority checked; tooling versions meet minimums | §1 ⚠️ MANDATORY block |
 | **GATE 3 — Data model** | 🛑 USER | Before generating CDK/scripts | User has confirmed the base/mart table list, grains, and join keys | §1 Interactive data model design |
-| **GATE 4 — Reconciliation** | ⛔ AGENT | After every pipeline run, before declaring success | Row counts + key SUMs reconcile against source within ~1%; every mart's declared grain matches its SQL; split-region: `query_region` COUNT == `aws_region` COUNT | §8 |
+| **GATE 4 — Reconciliation** | ⛔ AGENT | After every pipeline run, before declaring success | Row counts + key SUMs reconcile against source within ~1%; every mart's declared grain matches its SQL; SMUS also passes project-role query/job checks with UI/SSO evidence reported separately; split-region: `query_region` COUNT == `aws_region` COUNT | §8 |
 | **GATE 5 — Teardown intent** | 🛑 USER | Before any destructive command | User has explicitly confirmed data deletion, having been told what is deleted | §11 |
 
 > **Gate discipline.** Never announce a gate as passed without running its check. If a gate fails, report *which* gate, *why*, and the fix — do not proceed to the next phase with a known failure and a note to fix it later. A skipped GATE 2 surfaces as an opaque deploy failure; a skipped GATE 4 ships wrong numbers that pass every structural test.
@@ -85,6 +88,8 @@ The core below is the default flow. Pull in a reference file when you reach its 
 | `reference/vpc-connectivity.md` | JDBC source is on-prem or in a private subnet |
 | `reference/cross-region-query.md` | Do the catalog + query layers need to be in a different region from storage (#8 = yes)? → read before building anything |
 | `reference/gotchas.md` | Hit an opaque failure, or before generating Athena DDL on S3 Tables |
+| `reference/smus.md` | Customer chose SMUS — foundation, identity/governance preflight, CDK assets, project integration and acceptance; do not load for standalone |
+| `scripts/deployment_gate.py` | Both modes: validate the recorded customer decision before any provisioning command |
 
 ---
 
@@ -110,10 +115,59 @@ What is the current state of your data platform?
 
 **Key principle:** Never deploy infrastructure that already exists. Always check first.
 
+### Customer platform choice — ask before any provisioning
+
+Immediately after current-state assessment, ask (unless the customer has already
+explicitly answered for this target):
+
+```
+Would you like this pipeline integrated with Amazon SageMaker Unified Studio?
+  a) Use SMUS — a shared project for catalog access, SQL analysis, and Glue jobs
+  b) Build without SMUS — use Glue, S3 Tables/S3, and Athena directly
+  c) Explain the trade-offs before I decide
+```
+
+**Neither option is preselected.** Explain both when requested, then wait for a
+choice. “Use the defaults,” “choose for me,” no reply, discovering an existing
+SMUS domain, and selecting ML as the consumer do not answer this question.
+Read-only discovery/local drafting may continue; do not create buckets, upload
+source data, bootstrap CDK, change IAM/LF, enable catalog integration, deploy
+stacks, or schedule jobs before the answer.
+
+Record the actual answer in `.platform-decision.json` with `account_id`, `region`,
+`prefix`, boolean `use_smus`, and
+`customer_decision: {source: "customer", confirmed: true, answer: "<actual response>"}`.
+The record is not proof of human authorship: never invent its answer/confirmation.
+Preserve a previous explicit choice for the same target; on resume, missing legacy
+metadata requires asking, not inferring a choice. A change of mode needs an
+explicit customer decision and an incremental plan; it never authorizes teardown.
+
+- **SMUS:** read `reference/smus.md`, discover/reuse or provision the selected
+  domain/project, and preserve existing governance. Start with code-based Glue
+  jobs and project Athena; do not promise visual ETL conversion or Canvas.
+- **Standalone:** follow the normal pipeline path. Generate no SMUS domains,
+  profiles, roles, assignments, or job tags; do not call SMUS setup helpers.
+
+Copy `scripts/deployment_gate.py` into the generated project and wrap all AWS
+mutation entrypoints, including SDK setup and bootstrap. For example:
+
+```bash
+python3 scripts/deployment_gate.py --decision .platform-decision.json \
+  --account "{account_id}" --region "{aws_region}" --prefix "{prefix}" \
+  --mode {smus|standalone} -- npx cdk deploy --all --require-approval never
+```
+
+The gate rejects missing choices, malformed booleans, mismatched target scope,
+and mode conflicts before starting the command. Other architecture/data-model
+approvals below still apply. Record `platform.use_smus` and the decision reference
+in `platform.yaml` for both modes.
+
 ### Primary inputs — collect ALL before proceeding
 
 | Input | Example | Notes |
 | --- | --- | --- |
+| `account_id` | `111122223333` | Target account; verify with STS. Example only, never a default. |
+| `use_smus` | `true` / `false` | Explicit customer answer; no default. |
 | `project_prefix` | `acme` | Lowercase, kebab-friendly. Naming convention for every resource. |
 | `aws_region` | `ap-northeast-2`, `us-west-2` | Where the data lake lives — storage + ETL, and also catalog + query unless split (#8). |
 | `query_region` (optional) | `ap-northeast-1`, `us-east-1` | **Defaults to `aws_region`.** Set only when #8 = yes. Owns the Glue resource link, Athena workgroup, and results bucket → `reference/cross-region-query.md`. |
@@ -200,7 +254,7 @@ Do the catalog + query layers need to live in a different region from storage?
 
 On **(a)** — the overwhelming majority — nothing changes; ignore `reference/cross-region-query.md` entirely. On **(b)**: collect `query_region`, then read **`reference/cross-region-query.md`** BEFORE generating anything. Ask its §2 Step 1 question ("is residency a regulatory **mandate** or a **preference**?") early — the answer eliminates one mechanism, and a zero-egress mandate means neither works and the build should stop.
 
-> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept ALL defaults (including **Iceberg** for #1 and **No** for #8) and proceed.
+> **Interaction pattern:** Present each question as a one-at-a-time multiple-choice prompt with the default highlighted. Do NOT dump all questions at once. If the user says "just use the defaults", accept the follow-up defaults (including **Iceberg** for #1 and **No** for #8). This does **not** answer the separate SMUS question; collect that explicit choice before provisioning.
 
 ### 🛑 GATE 1 (USER-BLOCKING) — scope & residency confirmation
 
@@ -209,6 +263,7 @@ Summarize what you're about to build and **await explicit confirmation**. Do not
 ```
 Build plan:
   Prefix: {prefix} · Region: {aws_region} · Environment: {environment}
+  Experience: {Customer chose SMUS | Customer chose standalone}
   Storage pattern: {Iceberg (S3 Tables) | Hive}
   Downstream: {BI | C360 / identity resolution | ML | general-purpose}
   Source: {source_type} → {n} table(s)
@@ -249,7 +304,7 @@ aws cloudformation describe-stacks --stack-name CDKToolkit --region {aws_region}
 cdk --version
 ```
 
-**Lake Formation result:** output contains `"IAM_ALLOWED_PRINCIPALS"` → good. Output is `[]` → **strict mode** — STOP and surface options to the user (see `reference/gotchas.md` → Lake Formation strict mode).
+**Lake Formation result:** global defaults alone do not prove access to existing or federated catalogs. **SMUS:** preserve existing governance, inspect catalog-specific permissions, and use scoped project-role grants through an authorized grant administrator (`reference/smus.md`). **Standalone:** interpret the existing defaults and choose a working IAM/LF path; if grants are missing, resolve them before deploy (`reference/gotchas.md`).
 
 **IAM permissions** — simulate the key create actions; STOP if any show implicit/explicit deny:
 ```bash
@@ -542,9 +597,11 @@ Record which pattern was used in `ARCHITECTURE.md` (§10) — the consumption sk
 | `{prefix}-quicksight-role` | VPC/federated-query scenarios only | Usually NOT needed — see `reference/gotchas.md` |
 | `{prefix}-query-role-{query_region}` | Athena in `{query_region}` (split-region only, #8) | Storage-region `s3tables:Get*`/`glue:Get*` + local results-bucket write → `reference/cross-region-query.md` §A4 |
 
-### Lake Formation IAM-only mode
+### Lake Formation mode
 
-LF has two coexisting models: IAM-based (legacy, `IAMAllowedPrincipals`) and LF-managed (explicit grants). For batch analytics where IAM suffices, this skill configures **IAM-only mode** for deterministic behavior. The precondition check is in §1; strict-mode handling + the explicit `IAMAllowedPrincipals` grant CDK → `reference/gotchas.md`.
+**SMUS override:** preserve current LF governance. Do not emit IAMAllowedPrincipals, global DataLakeSettings changes, or an administrator bootstrap. Add only the reviewed project-role namespace/table grants via an already authorized grant path; see `reference/smus.md`.
+
+For the **standalone** branch, LF has two coexisting models: IAM-based (legacy, `IAMAllowedPrincipals`) and LF-managed (explicit grants). For batch analytics where IAM suffices, this skill configures **IAM-only mode** for deterministic behavior. The precondition check is in §1; strict-mode handling + the explicit `IAMAllowedPrincipals` grant CDK → `reference/gotchas.md`.
 
 ### Glue ETL role (excerpt)
 
@@ -652,6 +709,12 @@ After `cdk deploy --all --require-approval never` succeeds, run the bootstrap yo
 
 ## 8. Data Quality Checks
 
+**If SMUS was selected:** also run the project-identity checks in
+`reference/smus.md` §5. Administrator query success is insufficient. Verify job
+association, actual project-role Athena results, a bounded project-role job run,
+and stable resources on reapply. Report UI, actual IdC sign-in, visual authoring
+and Canvas as separate tested/untested items; do not collapse them into “SMUS passed.”
+
 > ⛔ **GATE 4 (AGENT-BLOCKING) — reconciliation before declaring success.** Do not report a pipeline run as good until: (1) row counts and key SUMs reconcile against the source within ~1%; (2) every mart's declared `-- GRAIN` matches its actual SQL grain; (3) split-region only — a `COUNT(*)` from `{query_region}` **equals** the same count in `{aws_region}`. Diagnose and fix failures yourself, then re-run. "Validation passed" without reconciliation is the exact failure this gate exists to catch.
 
 After every pipeline run, run row-count, null-rate, date-range, duplicate-PK, and referential-integrity checks. Generate one set per curated table in `athena-views/quality-checks.sql`. SQL templates in `reference/scripts.md`.
@@ -715,6 +778,9 @@ The skill MUST generate a `README.md`, an `ARCHITECTURE.md`, and a `platform.yam
 ```markdown
 # {prefix} Data Platform — Pipeline Layer
 ## Output Contract
+### Customer platform choice
+- SMUS: `{true|false}` — customer response recorded in `.platform-decision.json`
+- If true: domain/project/environment, project Athena connection, LF ownership and validation evidence
 ### Storage Pattern
 - Pattern: `Iceberg (S3 Tables)`  OR  `Hive`     <-- record which one was built
 ### Naming Convention
@@ -802,6 +868,8 @@ platform:
   prefix: "{prefix}"
   region: "{region}"
   pattern: "iceberg"  # iceberg | hive
+  use_smus: true  # EXAMPLE ONLY: write the customer-confirmed boolean, no default
+  customer_decision_file: ".platform-decision.json"
   catalog: "s3tablescatalog/{prefix}-table-bucket"  # or AwsDataCatalog for Hive
   created: "YYYY-MM-DD"
   updated: "YYYY-MM-DD"
@@ -813,6 +881,22 @@ platform:
                                                    # replication; it breaks a compliance constraint.
   query_catalog: "AwsDataCatalog"                  # in {query_region}
   query_database: "{prefix}_db_link"               # the resource link (resource_link only)
+# Include this block ONLY when platform.use_smus is true. Use live outputs.
+smus:
+  domain_id: "<discovered>"
+  project_id: "<discovered>"
+  environment_id: "<discovered>"
+  project_role_arn: "<discovered>"
+  athena_connection: "<discovered>"
+  athena_workgroup: "<discovered>"
+  lf_grant_owner: "<authorized role or owning stack>"
+  validation:
+    project_role_query: "passed|failed|not_tested"
+    project_role_job: "passed|failed|not_tested"
+    console: "passed|failed|not_tested"
+    idc_signin: "passed|failed|not_tested"
+    visual_etl: "not_tested"
+    canvas: "not_tested"
 storage:
   table_bucket: "{prefix}-table-bucket"  # Iceberg only
   raw_zone: "{prefix}-raw-zone"
@@ -871,6 +955,12 @@ consumption:
 
 ## 11. Teardown
 
+**SMUS:** include project/domain ownership and LF permission ownership in the
+teardown plan. Retain shared domains, identities, network and unrelated grants.
+Stop only test-created compute; revoke only build-owned grants when authorized.
+Deleting a PrincipalPermissions resource can revoke permissions for its
+principal/resource pair. Never delete a shared pair or change mode as cleanup.
+
 > **Iteration tip — separate stacks.** CFN rolls back the whole stack on any resource failure. Split into **StorageStack** (very stable), **CatalogStack** (stable: DB, crawlers, IAM), **PipelineStack** (changes every iteration: jobs, triggers, named queries, views). View/mart iteration won't roll back upstream resources. Cross-stack refs via `props`.
 
 > 🛑 **GATE 5 (USER-BLOCKING) — teardown intent.** Never run a destructive command without an explicit confirmation that names what will be deleted: which buckets, which tables, and that the data is unrecoverable. "Clean up" or "we're done" is NOT sufficient authorization — state the blast radius and wait.
@@ -918,7 +1008,8 @@ Don't enable LF strict mode / LF-TBAC / cross-account sharing by default. Trigge
 | Cross-account sharing | LF cross-account grant + RAM share (or AWS DataZone) |
 | Cross-**region** catalog + query | `reference/cross-region-query.md` (follow-up #8) — resource link or mart replication |
 | Cross-account **AND** cross-region | Both supported and documented by AWS → `reference/cross-region-query.md` §8. ⚠️ Cross-account voids this skill's LF IAM-only default: Mechanism A requires RAM + LF grants, Mechanism B requires a destination-side table-bucket policy (+ KMS key policies on both ends) |
-| "Data mesh" / "data products" | AWS DataZone (separate skill) |
+| Customer explicitly chooses SMUS | `reference/smus.md` — project integration and scoped access; catalog publication/subscriptions remain a separately scoped design |
+| "Data mesh" / "data products" beyond the pipeline | Review DataZone catalog/subscription design separately; this does not automatically select SMUS |
 | Audit/compliance | CloudTrail data events on S3 + LF audit trail |
 
 The naming convention and tags this skill applies are preconditions for all of the above — cheap now, expensive to retrofit.
@@ -958,4 +1049,4 @@ Update platform.yaml and ARCHITECTURE.md after every change.
 
 ## Section Map
 
-🔴 Critical Rules · **Validation Gates (5: scope&residency / preconditions / data model / reconciliation / teardown)** · Reference files (load-on-demand table) · §1 Prerequisites & Inputs · §2 Architecture Overview · §3 Decision Trees · §4 Storage Pattern: Iceberg (CORE FLOW) · §5 IAM & Security · §6 ETL Pipeline · §7 Query Layer · §8 Data Quality · §9 Cost Guardrails · §10 Output Contract · §11 Teardown · §12 Batch-Only Scope · §13 Governance · Reference files: `iceberg-cdk.md`, `scripts.md`, `hive-pattern.md`, `sap-sources.md`, `vpc-connectivity.md`, `cross-region-query.md`, `gotchas.md`
+🔴 Critical Rules · **Validation Gates (5: scope&residency / preconditions / data model / reconciliation / teardown)** · Reference files (load-on-demand table) · §1 Prerequisites & Inputs · §2 Architecture Overview · §3 Decision Trees · §4 Storage Pattern: Iceberg (CORE FLOW) · §5 IAM & Security · §6 ETL Pipeline · §7 Query Layer · §8 Data Quality · §9 Cost Guardrails · §10 Output Contract · §11 Teardown · §12 Batch-Only Scope · §13 Governance · Reference files: `iceberg-cdk.md`, `scripts.md`, `hive-pattern.md`, `sap-sources.md`, `vpc-connectivity.md`, `cross-region-query.md`, `gotchas.md`, `smus.md`; scripts: `deployment_gate.py`, `smus_project.py`; optional CDK assets: `assets/smus/`

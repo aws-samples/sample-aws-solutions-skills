@@ -1,0 +1,10 @@
+{
+  "name": "pipeline-smus-template-tests",
+  "private": true,
+  "scripts": { "test": "node --test test-cdk.cjs" },
+  "devDependencies": {
+    "aws-cdk-lib": "2.275.0",
+    "constructs": "10.8.1",
+    "typescript": "7.0.2"
+  }
+}

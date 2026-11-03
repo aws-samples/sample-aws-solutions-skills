@@ -17,6 +17,8 @@ Reference: `reference/cross-region-query.md`. Gates: `SKILL.md` → Validation G
 
 (Korean: data must stay in Seoul for regulatory reasons; wants Amazon Quick's AI chat, which is unavailable in Seoul; S3 CSV source; two business questions; prefix `acme`.)
 
+Simulated platform-choice follow-up: **“SMUS 없이 구성해주세요.”** The initial request must trigger the explicit choice before any AWS mutation. This regression scenario then continues on the standalone path; it does not qualify a combined SMUS/split-region design.
+
 Expected: the skill answers **in Korean**, recognizes this as the split-region case, reaches **GATE 1** with the residency acknowledgements, and — because the user said "규정 때문" (regulatory) — **disqualifies replication** rather than presenting it as an equal option.
 
 ---
@@ -24,6 +26,7 @@ Expected: the skill answers **in Korean**, recognizes this as the split-region c
 ## Expected output checklist
 
 ### A. Language & framing
+- [ ] Asks SMUS vs standalone before provisioning, records the explicit standalone follow-up, and emits no SMUS resources
 - [ ] Every prose response is in **Korean** (`SKILL.md` Language rule); code, CDK, and CLI output remain English
 - [ ] Does **not** treat "Amazon Quick unavailable in Seoul" as a blocker or propose abandoning Seoul
 
